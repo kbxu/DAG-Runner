@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+
+# Private migration inputs and generated configs. Never publish this directory.
+data/
+
+# Runtime state is local and may contain sensitive paths or logs.
+var/*
+!var/.gitkeep
+
+# Demo execution output.
+.demo_data/
+demo/.demo_data/

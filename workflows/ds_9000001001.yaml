@@ -1,0 +1,34 @@
+name: ds_9000001001
+description: 示例数据处理流程
+workdir: ..
+env:
+  DEMO_ENV: local
+setup: |-
+  # This public example is intentionally environment-neutral.
+  export PYTHONUNBUFFERED=1
+tasks:
+  task_9000001101:
+    description: 提取示例数据
+    command: python tasks/extract.py
+    depends: []
+  task_9000001102:
+    description: 清洗转换数据
+    command: python tasks/transform.py
+    depends:
+    - task_9000001101
+  task_9000001103:
+    description: 汇总统计结果
+    command: python tasks/summarize.py
+    depends:
+    - task_9000001102
+  task_9000001104:
+    description: 生成示例报告
+    command: python tasks/publish.py
+    depends:
+    - task_9000001103
+migration:
+  source_process_code: 9000001001
+  source_process_name: 示例数据处理流程
+  dolphinscheduler_crontab: 0 0 9 ? * MON,TUE,WED,THU,FRI *
+  timezone: Asia/Shanghai
+  requires_manual_review: false

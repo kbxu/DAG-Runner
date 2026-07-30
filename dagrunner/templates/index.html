@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dag Runner Console</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MINI WORKFLOW SERVICE</p>
+      <h1>Dag Runner Console</h1>
+      <p class="subtitle">工作流、定时计划和运行状态集中管理</p>
+    </div>
+    <div id="serviceStatus" class="live checking"><span></span><b>正在连接</b></div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <div><h2>工作流与定时</h2><p>查看任务 DAG，配置 cron，或立即发起运行</p></div>
+        <button class="button ghost" onclick="loadWorkflows()">刷新配置</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>工作流</th><th>任务</th><th>定时状态</th><th>Cron / 时区</th><th>下次运行</th><th>操作</th></tr></thead>
+          <tbody id="workflowRows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody>
+        </table>
+      </div>
+      <div id="configErrors" class="config-errors hidden"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div><h2>运行记录</h2><p>按开始时间倒序；运行中的记录每 3 秒刷新</p></div>
+        <button class="button ghost" onclick="loadRuns()">立即刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>开始时间 / Run ID</th><th>工作流</th><th>触发方式</th><th>状态</th><th>任务进度</th><th>耗时</th><th>操作</th></tr></thead>
+          <tbody id="runRows"><tr><td colspan="7" class="empty">正在加载…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="modal" class="modal hidden" onclick="closeModalFromBackdrop(event)">
+    <div class="modal-card">
+      <div class="modal-head"><h3 id="modalTitle"></h3><button class="icon-button" onclick="closeModal()">×</button></div>
+      <div id="modalBody" class="modal-body"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

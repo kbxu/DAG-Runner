@@ -1,0 +1,57 @@
+[
+  {
+    "processDefinition": {
+      "code": 9000001001,
+      "name": "示例数据处理流程",
+      "description": "完全虚构的 DolphinScheduler 导出示例",
+      "globalParamList": [
+        {"prop": "DEMO_ENV", "value": "local", "direct": "IN", "type": "VARCHAR"}
+      ]
+    },
+    "processTaskRelationList": [
+      {"preTaskCode": 0, "postTaskCode": 9000001101},
+      {"preTaskCode": 9000001101, "postTaskCode": 9000001102},
+      {"preTaskCode": 9000001102, "postTaskCode": 9000001103},
+      {"preTaskCode": 9000001103, "postTaskCode": 9000001104}
+    ],
+    "taskDefinitionList": [
+      {
+        "code": 9000001101,
+        "name": "提取示例数据",
+        "taskType": "SHELL",
+        "flag": "YES",
+        "timeoutFlag": "CLOSE",
+        "taskParams": {"localParams": [], "rawScript": "python tasks/extract.py"}
+      },
+      {
+        "code": 9000001102,
+        "name": "清洗转换数据",
+        "taskType": "SHELL",
+        "flag": "YES",
+        "timeoutFlag": "CLOSE",
+        "taskParams": {"localParams": [], "rawScript": "python tasks/transform.py"}
+      },
+      {
+        "code": 9000001103,
+        "name": "汇总统计结果",
+        "taskType": "SHELL",
+        "flag": "YES",
+        "timeoutFlag": "CLOSE",
+        "taskParams": {"localParams": [], "rawScript": "python tasks/summarize.py"}
+      },
+      {
+        "code": 9000001104,
+        "name": "生成示例报告",
+        "taskType": "SHELL",
+        "flag": "YES",
+        "timeoutFlag": "CLOSE",
+        "taskParams": {"localParams": [], "rawScript": "python tasks/publish.py"}
+      }
+    ],
+    "schedule": {
+      "crontab": "0 0 9 ? * MON,TUE,WED,THU,FRI *",
+      "timezoneId": "Asia/Shanghai",
+      "releaseState": "OFFLINE"
+    }
+  }
+]
