@@ -4,14 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dag Runner Console</title>
+  <link rel="icon" href="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <p class="eyebrow">MINI WORKFLOW SERVICE</p>
-      <h1>Dag Runner Console</h1>
-      <p class="subtitle">工作流、定时计划和运行状态集中管理</p>
+    <div class="brand">
+      <img class="brand-logo" src="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" alt="DAG Runner">
+      <div>
+        <p class="eyebrow">MINI WORKFLOW SERVICE</p>
+        <h1>Dag Runner Console</h1>
+        <p class="subtitle">工作流、定时计划和运行状态集中管理</p>
+      </div>
     </div>
     <div id="serviceStatus" class="live checking"><span></span><b>正在连接</b></div>
   </header>

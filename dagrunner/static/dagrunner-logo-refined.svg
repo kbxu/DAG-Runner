@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">DAG Runner logo</title>
+  <desc id="desc">A white obtuse triangle with a clean, evenly glowing teal outline.</desc>
+
+  <defs>
+    <filter id="outer-glow" x="-35%" y="-35%" width="170%" height="170%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <filter id="inner-glow" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3.5"/>
+    </filter>
+  </defs>
+
+  <!-- All layers share identical geometry to keep every edge and corner uniform. -->
+  <g fill="none" stroke="#13a59a" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 73 196 L 27 58 L 229 196 Z" stroke-width="13" stroke-opacity="0.20" filter="url(#outer-glow)"/>
+    <path d="M 73 196 L 27 58 L 229 196 Z" stroke-width="10" stroke-opacity="0.40" filter="url(#inner-glow)"/>
+  </g>
+
+  <path d="M 73 196 L 27 58 L 229 196 Z" fill="#ffffff" stroke="#087f78" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 73 196 L 27 58 L 229 196 Z" fill="none" stroke="#9be8df" stroke-width="1.5" stroke-opacity="0.58" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -14,6 +14,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--ink); background: var(--canvas); font: 14px/1.5 Inter, "Segoe UI", Arial, sans-serif; }
 .topbar { display: flex; justify-content: space-between; align-items: flex-end; padding: 28px max(28px, calc((100vw - 1500px) / 2)); color: white; background: linear-gradient(120deg, #112b43, #0d5251); box-shadow: 0 4px 16px #16324d30; }
+.brand { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.brand-logo { display: block; flex: 0 0 auto; width: 72px; height: 72px; object-fit: contain; }
 .eyebrow { margin: 0 0 5px; color: #8fe1d5; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
 h1 { margin: 0; font-size: 27px; letter-spacing: -.02em; }
 .subtitle { margin: 4px 0 0; color: #c7dbdf; }
@@ -142,4 +144,4 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .dag-meta b { display: inline-block; width: 48px; }
 .dag-meta code { color: #344054; font-family: "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
 .toast { position: fixed; z-index: 30; right: 24px; bottom: 24px; max-width: 420px; padding: 11px 15px; color: white; border-radius: 7px; background: #182230; box-shadow: 0 6px 24px #0003; }
-@media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .live { display: none; } main { padding: 0 10px; } .form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .brand { gap: 12px; } .brand-logo { width: 58px; height: 58px; } .live { display: none; } main { padding: 0 10px; } .form-grid { grid-template-columns: 1fr; } }
