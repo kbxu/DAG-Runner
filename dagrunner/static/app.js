@@ -1,6 +1,8 @@
 const state = {
   workflows: new Map(),
   workflowSort: { key: "", direction: "asc" },
+  workflowPage: 1,
+  workflowPageSize: 15,
   runs: [],
   runPage: 1,
   runPageSize: 20,
@@ -113,17 +115,23 @@ function renderWorkflows() {
   if (key) {
     const multiplier = direction === "asc" ? 1 : -1;
     workflows.sort((left, right) => {
-      const leftTime = left[key] ? Date.parse(left[key]) : null;
-      const rightTime = right[key] ? Date.parse(right[key]) : null;
+      const leftValue = key === "next_run_time" ? left.schedule?.next_run_time : left[key];
+      const rightValue = key === "next_run_time" ? right.schedule?.next_run_time : right[key];
+      const leftTime = leftValue ? Date.parse(leftValue) : null;
+      const rightTime = rightValue ? Date.parse(rightValue) : null;
       if (leftTime === null && rightTime === null) return left.db_id - right.db_id;
       if (leftTime === null) return 1;
       if (rightTime === null) return -1;
       return (leftTime - rightTime) * multiplier || left.db_id - right.db_id;
     });
   }
+  const totalPages = Math.max(1, Math.ceil(workflows.length / state.workflowPageSize));
+  state.workflowPage = Math.min(Math.max(state.workflowPage, 1), totalPages);
+  const pageStart = (state.workflowPage - 1) * state.workflowPageSize;
+  const visibleWorkflows = workflows.slice(pageStart, pageStart + state.workflowPageSize);
   document.getElementById("lastRunSort").textContent = key === "last_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
   document.getElementById("nextRunSort").textContent = key === "next_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
-  document.getElementById("workflowRows").innerHTML = workflows.map(w => {
+  document.getElementById("workflowRows").innerHTML = visibleWorkflows.map(w => {
       const s = w.schedule;
       return `<tr>
         <td><button class="workflow-link" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
@@ -135,14 +143,25 @@ function renderWorkflows() {
         <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">编辑</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button><button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">删除</button></div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">还没有导入工作流</td></tr>`;
+  document.getElementById("workflowPagination").innerHTML = `<span>共 ${workflows.length} 条 · 第 ${state.workflowPage} / ${totalPages} 页</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">上一页</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">下一页</button></div>`;
 }
 
 function setWorkflowSort(key) {
-  if (state.workflowSort.key === key) {
-    state.workflowSort.direction = state.workflowSort.direction === "asc" ? "desc" : "asc";
+  if (state.workflowSort.key !== key) {
+    state.workflowSort = { key, direction: "desc" };
+  } else if (state.workflowSort.direction === "desc") {
+    state.workflowSort.direction = "asc";
   } else {
-    state.workflowSort = { key, direction: key === "next_run_time" ? "asc" : "desc" };
+    state.workflowSort = { key: "", direction: "asc" };
   }
+  state.workflowPage = 1;
+  renderWorkflows();
+}
+
+function changeWorkflowPage(page) {
+  const totalPages = Math.max(1, Math.ceil(state.workflows.size / state.workflowPageSize));
+  if (page < 1 || page > totalPages || page === state.workflowPage) return;
+  state.workflowPage = page;
   renderWorkflows();
 }
 
