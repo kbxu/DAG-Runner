@@ -1,5 +1,15 @@
-const state = { workflows: new Map(), runs: [] };
+const state = {
+  workflows: new Map(),
+  workflowSort: { key: "", direction: "asc" },
+  runs: [],
+  runPage: 1,
+  runPageSize: 20,
+  runPagination: { page: 1, page_size: 20, total: 0, total_pages: 1 },
+  runFilters: { workflow: "", status: "", trigger: "" },
+};
 let serviceState = "checking";
+let runLoadSequence = 0;
+let runSearchTimer = null;
 
 async function api(url, options = {}) {
   let response;
@@ -89,17 +99,7 @@ async function loadWorkflows() {
   try {
     const data = await api("/api/workflows");
     state.workflows = new Map(data.workflows.map(w => [w.name, w]));
-    document.getElementById("workflowRows").innerHTML = data.workflows.map(w => {
-      const s = w.schedule;
-      return `<tr>
-        <td><button class="workflow-link" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
-        <td><span class="primary">${w.task_count}</span> 个节点</td>
-        <td><span class="badge ${s.enabled ? "enabled" : "disabled"}">${s.enabled ? "已启用" : "未启用"}</span></td>
-        <td><div class="mono">${esc(s.cron || "未配置")}</div><div class="secondary">${esc(s.timezone)}</div></td>
-        <td>${fmt(s.next_run_time)}</td>
-        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">编辑</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button><button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">删除</button></div></td>
-      </tr>`;
-    }).join("") || `<tr><td colspan="6" class="empty">还没有导入工作流</td></tr>`;
+    renderWorkflows();
     const errors = Object.entries(data.config_errors || {});
     const box = document.getElementById("configErrors");
     box.classList.toggle("hidden", !errors.length);
@@ -107,9 +107,56 @@ async function loadWorkflows() {
   } catch (error) { if (!error.offline) toast(error.message, true); }
 }
 
-async function loadRuns() {
+function renderWorkflows() {
+  const workflows = [...state.workflows.values()];
+  const { key, direction } = state.workflowSort;
+  if (key) {
+    const multiplier = direction === "asc" ? 1 : -1;
+    workflows.sort((left, right) => {
+      const leftTime = left[key] ? Date.parse(left[key]) : null;
+      const rightTime = right[key] ? Date.parse(right[key]) : null;
+      if (leftTime === null && rightTime === null) return left.db_id - right.db_id;
+      if (leftTime === null) return 1;
+      if (rightTime === null) return -1;
+      return (leftTime - rightTime) * multiplier || left.db_id - right.db_id;
+    });
+  }
+  document.getElementById("lastRunSort").textContent = key === "last_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
+  document.getElementById("nextRunSort").textContent = key === "next_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
+  document.getElementById("workflowRows").innerHTML = workflows.map(w => {
+      const s = w.schedule;
+      return `<tr>
+        <td><button class="workflow-link" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
+        <td><span class="primary">${w.task_count}</span> 个节点</td>
+        <td><span class="badge ${s.enabled ? "enabled" : "disabled"}">${s.enabled ? "已启用" : "未启用"}</span></td>
+        <td><div class="mono">${esc(s.cron || "未配置")}</div><div class="secondary">${esc(s.timezone)}</div></td>
+        <td>${fmt(w.last_run_time)}</td>
+        <td>${fmt(s.next_run_time)}</td>
+        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">编辑</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button><button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">删除</button></div></td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="7" class="empty">还没有导入工作流</td></tr>`;
+}
+
+function setWorkflowSort(key) {
+  if (state.workflowSort.key === key) {
+    state.workflowSort.direction = state.workflowSort.direction === "asc" ? "desc" : "asc";
+  } else {
+    state.workflowSort = { key, direction: key === "next_run_time" ? "asc" : "desc" };
+  }
+  renderWorkflows();
+}
+
+async function loadRuns(resetPage=false) {
+  if (resetPage === true) state.runPage = 1;
+  const sequence = ++runLoadSequence;
   try {
-    const data = await api("/api/runs?limit=100"); state.runs = data.runs;
+    const query = new URLSearchParams({ page: state.runPage, page_size: state.runPageSize });
+    for (const [key, value] of Object.entries(state.runFilters)) if (value) query.set(key, value);
+    const data = await api(`/api/runs?${query}`);
+    if (sequence !== runLoadSequence) return;
+    state.runs = data.runs;
+    state.runPagination = data.pagination;
+    state.runPage = data.pagination.page;
     document.getElementById("runRows").innerHTML = data.runs.map(r => {
       const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.skipped_count || 0);
       const percent = r.task_count ? Math.round(complete * 100 / r.task_count) : 0;
@@ -121,8 +168,31 @@ async function loadRuns() {
         actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">删除</button>`);
       }
       return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td><div class="primary">${esc(r.workflow_description || r.workflow_name)}</div><div class="workflow-id mono">${esc(r.workflow_name)}</div></td><td>${esc(r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · 成功 ${r.success_count || 0}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
-    }).join("") || `<tr><td colspan="7" class="empty">还没有运行记录</td></tr>`;
+    }).join("") || `<tr><td colspan="7" class="empty">没有符合条件的运行记录</td></tr>`;
+    renderRunPagination();
   } catch (error) { if (!error.offline) toast(error.message, true); }
+}
+
+function renderRunPagination() {
+  const p = state.runPagination;
+  document.getElementById("runPagination").innerHTML = `<span>共 ${p.total} 条 · 第 ${p.page} / ${p.total_pages} 页</span><div><button class="button ghost" ${p.page <= 1 ? "disabled" : ""} onclick="changeRunPage(${p.page - 1})">上一页</button><button class="button ghost" ${p.page >= p.total_pages ? "disabled" : ""} onclick="changeRunPage(${p.page + 1})">下一页</button></div>`;
+}
+
+function changeRunPage(page) {
+  if (page < 1 || page > state.runPagination.total_pages || page === state.runPage) return;
+  state.runPage = page;
+  loadRuns();
+}
+
+function setRunFilter(name, value) {
+  state.runFilters[name] = value.trim();
+  loadRuns(true);
+}
+
+function scheduleRunSearch(value) {
+  state.runFilters.workflow = value.trim();
+  clearTimeout(runSearchTimer);
+  runSearchTimer = setTimeout(() => loadRuns(true), 300);
 }
 
 async function runWorkflow(name) { try { const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:"{}"}); toast(`已提交 ${r.run_id}`); setTimeout(loadRuns, 250); } catch(e) { toast(e.message, true); } }

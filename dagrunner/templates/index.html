@@ -24,8 +24,8 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>工作流</th><th>任务</th><th>定时状态</th><th>Cron / 时区</th><th>下次运行</th><th>操作</th></tr></thead>
-          <tbody id="workflowRows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody>
+          <thead><tr><th>工作流</th><th>任务</th><th>定时状态</th><th>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')">上次运行 <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')">下次运行 <span id="nextRunSort"></span></button></th><th>操作</th></tr></thead>
+          <tbody id="workflowRows"><tr><td colspan="7" class="empty">正在加载…</td></tr></tbody>
         </table>
       </div>
       <div id="configErrors" class="config-errors hidden"></div>
@@ -38,10 +38,20 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>开始时间 / Run ID</th><th>工作流</th><th>触发方式</th><th>状态</th><th>任务进度</th><th>耗时</th><th>操作</th></tr></thead>
+          <thead>
+            <tr><th>开始时间 / Run ID</th><th>工作流</th><th>触发方式</th><th>状态</th><th>任务进度</th><th>耗时</th><th>操作</th></tr>
+            <tr class="filter-row">
+              <th></th>
+              <th><input id="runWorkflowFilter" type="search" placeholder="搜索名称或 ID" aria-label="搜索工作流" oninput="scheduleRunSearch(this.value)"></th>
+              <th><select id="runTriggerFilter" aria-label="筛选触发方式" onchange="setRunFilter('trigger',this.value)"><option value="">全部</option><option value="manual">手动</option><option value="schedule">定时</option><option value="rerun">重跑</option><option value="resume">失败续跑</option></select></th>
+              <th><select id="runStatusFilter" aria-label="筛选状态" onchange="setRunFilter('status',this.value)"><option value="">全部</option><option value="RUNNING">运行中</option><option value="SUCCESS">成功</option><option value="FAILED">失败</option></select></th>
+              <th></th><th></th><th></th>
+            </tr>
+          </thead>
           <tbody id="runRows"><tr><td colspan="7" class="empty">正在加载…</td></tr></tbody>
         </table>
       </div>
+      <div id="runPagination" class="pagination"></div>
     </section>
   </main>
 

@@ -56,6 +56,7 @@ def create_app(
     @app.get("/api/workflows")
     def workflows():
         registry.refresh()
+        last_run_times = database.latest_run_times()
         schedule_rows = {
             row["workflow_name"]: row for row in database.list_schedules()
         }
@@ -67,6 +68,7 @@ def create_app(
                     "name": name,
                     "db_id": registry.rows[name]["id"],
                     "description": workflow.description,
+                    "last_run_time": last_run_times.get(name),
                     "task_count": len(workflow.tasks),
                     "tasks": [
                         {
@@ -189,20 +191,43 @@ def create_app(
     @app.get("/api/runs")
     def runs():
         registry.refresh()
-        limit = min(max(request.args.get("limit", 100, type=int), 1), 500)
+        page = max(request.args.get("page", 1, type=int), 1)
+        requested_page_size = request.args.get(
+            "page_size", request.args.get("limit", 20, type=int), type=int
+        )
+        page_size = min(max(requested_page_size or 20, 1), 20)
+        workflow_query = request.args.get("workflow", "").strip()
+        status = request.args.get("status", "").strip().upper()
+        trigger_type = request.args.get("trigger", "").strip().lower()
+        if status and status not in {"RUNNING", "SUCCESS", "FAILED"}:
+            raise ServiceError(f"invalid run status filter: {status}")
+        if trigger_type and trigger_type not in {"manual", "schedule", "rerun", "resume"}:
+            raise ServiceError(f"invalid trigger filter: {trigger_type}")
+        rows, total, page = database.search_runs(
+            page=page,
+            page_size=page_size,
+            workflow_query=workflow_query,
+            status=status,
+            trigger_type=trigger_type,
+        )
         active_ids = executions.active_run_ids()
         run_rows = []
-        for row in database.list_all_runs(limit):
+        for row in rows:
             item = {**_row_dict(row), "active": row["run_id"] in active_ids}
-            workflow = registry.workflows.get(row["workflow_name"])
             item["workflow_description"] = (
-                workflow.description
-                if workflow and workflow.description
-                else row["workflow_name"]
+                row["workflow_description"] or row["workflow_name"]
             )
             run_rows.append(item)
         return jsonify(
-            {"runs": run_rows}
+            {
+                "runs": run_rows,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": max(1, (total + page_size - 1) // page_size),
+                },
+            }
         )
 
     @app.get("/api/runs/<run_id>")

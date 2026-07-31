@@ -338,6 +338,14 @@ class StateDatabase:
                 (workflow_name,),
             ).fetchone()
 
+    def latest_run_times(self) -> dict[str, str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT workflow_name, MAX(start_time) AS last_run_time
+                   FROM workflow_runs GROUP BY workflow_name"""
+            ).fetchall()
+        return {row["workflow_name"]: row["last_run_time"] for row in rows}
+
     def task_states(self, run_id: str) -> dict[str, sqlite3.Row]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -368,6 +376,57 @@ class StateDatabase:
                    ORDER BY wr.start_time DESC, wr.rowid DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
+
+    def search_runs(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        workflow_query: str = "",
+        status: str = "",
+        trigger_type: str = "",
+    ) -> tuple[list[sqlite3.Row], int, int]:
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if workflow_query:
+            conditions.append(
+                "(instr(lower(wr.workflow_name), lower(?)) > 0 OR "
+                "instr(lower(COALESCE(w.name, '')), lower(?)) > 0)"
+            )
+            parameters.extend((workflow_query, workflow_query))
+        if status:
+            conditions.append("wr.status = ?")
+            parameters.append(status)
+        if trigger_type:
+            conditions.append("wr.trigger_type = ?")
+            parameters.append(trigger_type)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        from_clause = (
+            "FROM workflow_runs wr "
+            "LEFT JOIN workflows w ON w.workflow_key = wr.workflow_name"
+        )
+        with self.connect() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) {from_clause} {where}", parameters
+            ).fetchone()[0]
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = min(max(page, 1), total_pages)
+            rows = connection.execute(
+                f"""SELECT wr.*, w.name AS workflow_description,
+                            COUNT(tr.task_name) AS task_count,
+                            SUM(CASE WHEN tr.status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+                            SUM(CASE WHEN tr.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
+                            SUM(CASE WHEN tr.status = 'RUNNING' THEN 1 ELSE 0 END) AS running_count,
+                            SUM(CASE WHEN tr.status = 'SKIPPED' THEN 1 ELSE 0 END) AS skipped_count
+                     {from_clause}
+                     LEFT JOIN task_runs tr ON tr.run_id = wr.run_id
+                     {where}
+                     GROUP BY wr.run_id
+                     ORDER BY wr.start_time DESC, wr.rowid DESC
+                     LIMIT ? OFFSET ?""",
+                (*parameters, page_size, (page - 1) * page_size),
+            ).fetchall()
+        return rows, total, page
 
     def get_run(self, run_id: str) -> sqlite3.Row | None:
         with self.connect() as connection:
