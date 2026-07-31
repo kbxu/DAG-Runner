@@ -13,6 +13,7 @@
 - **方便迁移**：可把 DolphinScheduler JSON 和 Windows Task Scheduler XML 转换为 DAG Runner YAML
 - **DAG 执行**：自动校验依赖和环路，并行执行就绪任务，支持停止、重跑和失败续跑
 - **集中管理**：通过 Web 页面导入和编辑工作流、配置定时、查看运行 DAG 与任务日志
+- **登录保护**：账号密码登录、36 小时会话，以及连续失败 3 次后按 IP 封禁 10 分钟
 - **跨平台**：Linux 使用 Bash，Windows 使用 PowerShell，支持在 `setup` 中激活 Conda 环境
 
 ## 快速开始
@@ -25,20 +26,41 @@ cd DAG-Runner
 conda create -n dagr python=3.11.* -y
 conda activate dagr
 python -m pip install -r requirements.txt
+python -m dagrunner.auth --generate
 python -m dagrunner.server
 ```
 
-以后再次启动只需要进入项目目录、激活环境并运行 Server：
+`dagrunner.auth --generate` 默认创建或重置 `admin`，并且只在命令输出中显示一次随机
+强密码；重置密码会让该账号已有会话立即失效。也可以不传 `--generate`，按提示手工输入
+至少 16 位的密码。
+
+`dagrunner.server` 参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | HTTP 服务监听地址；需要允许其他机器访问时可设为 `0.0.0.0` |
+| `--port` | `7119` | HTTP 服务监听端口 |
+| `--db` | `var/scheduler.db` | SQLite 数据库文件路径 |
+| `--logs` | `var/logs` | 工作流和任务日志目录 |
+| `--threads` | `8` | 任务执行线程池大小 |
+
+例如，允许局域网访问并使用自定义数据目录：
 
 ```bash
-cd DAG-Runner
-conda activate dagr
-python -m dagrunner.server
+python -m dagrunner.server \
+  --host 0.0.0.0 \
+  --port 7119 \
+  --db var/scheduler.db \
+  --logs var/logs \
+  --threads 8
 ```
 
-访问 <http://127.0.0.1:7119>，点击“导入工作流”，选择
-`demo/examples/dagr_example_pipeline.yaml`。文件会先在编辑窗口中打开并显示拟分配 ID；
-确认内容后点击“导入”。Server 不扫描本地 YAML，导入后自动分配工作流 ID，定时默认关闭。
+启动后访问 <http://127.0.0.1:7119>。数据库表会在服务启动时自动创建，无需手工建表。
+
+Web 登录的密码会先在浏览器中计算 SHA-256，再由后端使用随机盐和
+PBKDF2-HMAC-SHA256（600,000 次迭代）生成数据库校验值。前端摘要仍然属于可重放的
+密码凭据，不能代替传输加密；非本机部署必须启用 HTTPS，并设置
+`DAGRUNNER_COOKIE_SECURE=1`，确保会话 Cookie 只通过 HTTPS 发送。
 
 ## 定义工作流
 
@@ -80,132 +102,56 @@ tasks:
     timeout: 1800
 ```
 
-配置不再支持顶层或任务级 `env`。环境变量统一在 `setup` 中定义：Bash 使用
-`export NAME='value'`，PowerShell 使用 `$env:NAME = 'value'`。`setup` 与任务
-命令在同一个 Shell 进程中执行，因此变量会传递给任务命令。
-
-顶层 `workdir` 也不再支持。工作目录应在 `setup` 开头通过 Bash 的 `cd` 或
-PowerShell 的 `Set-Location` 切换；只有确实需要单独目录的任务才使用任务级 `cwd`。
-可复制 [`templates/production_setup.sh`](templates/production_setup.sh) 或
-[`templates/production_setup.ps1`](templates/production_setup.ps1) 后填写项目路径、
-Conda 安装位置和环境名称，再通过迁移命令的 `--setup-file` 使用。
-
-普通任务只有在所有有效依赖均为 `SUCCESS` 时才会执行。依赖失败后，下游任务自动记为
-`SKIPPED`。条件节点使用 `type: condition`，会等待依赖结束后按状态选择 `success` 或
-`failure` 分支；未选中的路径正常跳过，被条件节点处理的前置失败不会导致整个工作流失败。
-同一工作流默认最多同时执行 4 个已就绪任务；任务完成后会立即重新计算并解锁下游。
-
-```yaml
-tasks:
-  is_trade_date:
-    command: python is_trade_date.py
-    depends: []
-
-  trade_date_branch:
-    type: condition
-    depends: [is_trade_date]
-    condition:
-      relation: AND
-      groups:
-        - relation: AND
-          items:
-            - task: is_trade_date
-              status: SUCCESS
-    success: [refresh_market]
-    failure: [skip_market]
-
-  refresh_market:
-    command: python refresh_market.py
-    depends: [trade_date_branch]
-
-  skip_market:
-    command: echo "not a trade date"
-    depends: [trade_date_branch]
-```
-
-完整虚构示例见 [`demo/examples/dagr_example_pipeline.yaml`](demo/examples/dagr_example_pipeline.yaml)。
+登录 Web 控制台后点击“导入工作流”，选择 YAML 文件并确认即可。导入后调度默认关闭，检查配置无误后再手动启用。
 
 ## 从外部调度器迁移
 
-仓库包含完全虚构的 DolphinScheduler 和 Windows 任务计划程序导出示例：
+以 DolphinScheduler 为例：
 
-- [`demo/examples/ds_9000001001.json`](demo/examples/ds_9000001001.json)
-- [`demo/examples/dagr_ds_9000001001.yaml`](demo/examples/dagr_ds_9000001001.yaml)
-- [`demo/examples/ts_market_report.xml`](demo/examples/ts_market_report.xml)
-- [`demo/examples/dagr_ts_market_report.yaml`](demo/examples/dagr_ts_market_report.yaml)
+### 1. 从 DolphinScheduler 导出工作流
 
-转换命令只读写配置，不会执行任务：
+在 DolphinScheduler 的工作流定义页面选择需要迁移的工作流并导出，得到 JSON 文件。
+
+### 2. 使用命令行转换
 
 ```bash
 python -m dagrunner.migrate_workflows \
   --source dolphinscheduler \
-  demo/examples/ds_9000001001.json \
+  data/ds_workflow.json \
   --setup-file templates/production_setup.sh \
-  --exclude-disabled
+  --output-dir data/converted
 ```
 
-Windows 任务计划程序 XML：
+转换参数：
 
-```bash
-python -m dagrunner.migrate_workflows \
-  --source windows-task-scheduler \
-  demo/examples/ts_market_report.xml \
+| 参数 | 是否必填 | 说明 |
+| --- | --- | --- |
+| `--source` | 是 | 导出文件来源；DolphinScheduler 使用 `dolphinscheduler` |
+| `EXPORT` | 是 | 一个或多个导出的 JSON 文件路径 |
+| `--output-dir` | 否 | YAML 输出目录；默认写入源文件所在目录 |
+| `--setup-file` | 否 | 注入工作流级准备脚本；`.ps1`/`.psm1` 按 PowerShell 处理，其余按 Bash 处理 |
+| `--exclude-disabled` | 否 | 不转换已禁用节点及与其相连的依赖边 |
+| `--timezone` | 否 | 时区，默认 `Asia/Shanghai`；主要用于转换 Windows 触发器 |
+
+输出文件默认命名为 `dagr_<源文件名>.yaml`。转换过程只读写配置，不会执行导出文件中的命令。
+
+### 3. 导入转换后的文件
+
+登录 DAG Runner，在 Web 控制台点击“导入工作流”，选择生成的 YAML 文件。导入后检查命令、依赖关系、工作目录和调度时间，再手动启用调度。
+
+### Windows 任务计划程序示例
+
+先在 Windows 任务计划程序中将任务导出为 XML，然后在 PowerShell 中执行：
+
+```powershell
+python -m dagrunner.migrate_workflows `
+  --source windows-task-scheduler `
+  C:\exports\daily-report.xml `
+  --output-dir C:\exports\converted `
   --timezone Asia/Shanghai
 ```
 
-`--source` 接受 `dolphinscheduler` 和 `windows-task-scheduler`。
-未传 `--output-dir` 时，转换结果写入源文件所在目录，默认文件名为
-`dagr_<源文件名>.yaml`；一个源文件包含多个工作流时，从第二个开始追加 `_2`、`_3`。
-迁移器会把 DolphinScheduler SHELL 脚本中的 CRLF/CR 换行统一为 LF，生成的
-YAML 文件也固定使用 LF，避免 Bash 执行时因残留 `\r` 报错。
-`--exclude-disabled` 会过滤 DolphinScheduler 禁用节点以及与这些节点相连的
-依赖边；不传时则保留禁用节点。转换器支持 SHELL、CONDITIONS 节点、
-依赖、全局参数、启用状态和 timeout。DolphinScheduler 全局及无冲突的任务
-局部参数会写入 `setup`；`.sh` setup 生成 `export`，`.ps1` setup 生成 `$env:`。
-`CONDITIONS` 的 AND/OR 状态判断、成功分支和失败分支会原样转换为条件节点；
-无法安全识别的关系或状态会终止转换并给出错误，不会静默降级。迁移器不再生成
-`workdir`；需要切换工作目录时，应在 setup 文件中
-先执行 `cd`（Bash）或 `Set-Location`（PowerShell）。
-
-Windows 导入器支持 `Exec` 动作以及每日、每周和每月日期触发器，并保留参数、
-工作目录和执行时限。同一计划任务有多个无法合并的触发时间时，会生成多份
-工作流以保证时间精确。所有导入的定时默认关闭，必须在 Server 页面人工开启；
-账户和登录方式仅保留为迁移提示，实际使用 DAG Runner 服务账户执行。
-
-## Web 控制台
-
-页面包含两个主要表格：
-
-- **工作流与定时**：中文名称在前、数据库 ID 在后，每页最多 15 条；展示上次和下次运行时间，点击表头可依次按倒序、顺序和初始顺序排列；可手动导入 YAML、查看任务和 DAG、配置定时、运行、编辑、导出或删除工作流。编辑窗口只会在保存或主动关闭时退出，并高亮实际参与执行的字段和变量。
-- **运行记录**：默认按开始时间倒序，每页最多 20 条；支持按工作流名称或 ID 搜索，并按状态、触发方式筛选。详情中展示带任务状态的历史 DAG 和任务表，支持手动刷新、停止、重跑、失败续跑或删除记录。日志使用独立弹窗，显示“中文名（任务 ID）”并提供复制按钮。
-
-每次运行都会保存任务中文名和依赖快照，后续编辑工作流不会改变历史 DAG。
-删除单条运行记录会同时删除对应任务记录和日志；删除工作流会级联删除其定时、
-全部运行记录、任务记录和日志。运行中的工作流或运行记录不能删除。
-
-失败续跑会重新加载数据库中的最新工作流正文：旧运行中同 ID 且已成功的任务
-直接复用，其余任务按最新 DAG 继续执行。
-
-定时使用标准五字段 Cron（分、时、日、月、星期）。例如 `10 * * * *`
-表示每小时第 10 分钟，`0 10 * * *` 表示每天 10:00。DolphinScheduler
-导出的 Quartz 表达式 `0 10 * * * ? *` 会自动转换为 `10 * * * *`。
-运行记录写入 SQLite 并在页面展示时均使用服务所在系统的本地时区。
-
-工作流只能通过页面手动导入，数据库自动分配 ID；YAML 中的原工作流 ID
-不再使用，中文显示名取自 YAML 的 `description`。来源 Cron 和时区作为初始值，但定时一律
-关闭；没有定时信息时使用 `0 18 * * mon-fri` 和 `Asia/Shanghai`。
-定时下线且工作流未运行时，可以在页面编辑完整 YAML 正文。
-导入后不再保留 YAML 文件所在目录；相对路径以 Server 启动目录为基准，
-生产配置建议在 `setup` 或任务 `cwd` 中使用明确路径。
-
-默认数据位置：
-
-- SQLite：`var/scheduler.db`，保存工作流正文、中文名称、定时、运行及任务状态
-- 日志：`var/logs/`
-- 运行锁：`var/locks/`
-
-数据库写入和页面展示均使用 Server 所在系统的本地时间与时区。`var/` 和 `data/`
-都不会进入 Git；`data/` 仅用于存放私有迁移源文件和本地转换结果。
+转换完成后，在 Web 控制台中导入 `C:\exports\converted\dagr_daily-report.yaml`。
 
 ## CLI
 

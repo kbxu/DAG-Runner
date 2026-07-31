@@ -1,0 +1,20 @@
+:root { color-scheme: light; --teal: #087f78; --teal-dark: #075e59; --ink: #17202a; --muted: #677281; --line: #d9e4e5; }
+* { box-sizing: border-box; }
+body { min-height: 100vh; margin: 0; color: var(--ink); background: radial-gradient(circle at 20% 15%, #148b8333, transparent 34%), linear-gradient(135deg, #10283d, #0b4c4b); font: 14px/1.5 Inter, "Segoe UI", Arial, sans-serif; }
+.login-shell { min-height: 100vh; display: grid; place-items: center; padding: 28px; }
+.login-card { width: min(420px, 100%); padding: 34px; border: 1px solid #ffffff66; border-radius: 18px; background: #fffffffa; box-shadow: 0 28px 80px #061a2659; }
+.login-brand { display: flex; align-items: center; gap: 16px; }
+.login-brand img { width: 66px; height: 66px; padding: 5px; border-radius: 14px; background: linear-gradient(145deg, #102f43, #0d5b55); }
+.login-brand p { margin: 0 0 2px; color: var(--teal); font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+.login-brand h1 { margin: 0; font-size: 25px; letter-spacing: -.02em; }
+.login-intro { margin: 24px 0 20px; color: var(--muted); }
+label { display: block; margin: 15px 0 6px; color: #344054; font-size: 12px; font-weight: 700; }
+input { width: 100%; padding: 11px 12px; color: var(--ink); border: 1px solid #cbd6da; border-radius: 8px; outline: none; background: white; font: inherit; transition: border-color .15s, box-shadow .15s; }
+input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px #087f7822; }
+button { width: 100%; margin-top: 8px; padding: 11px 14px; border: 0; border-radius: 8px; color: white; background: var(--teal); cursor: pointer; font: inherit; font-weight: 750; transition: background .15s, transform .15s; }
+button:hover:not(:disabled) { background: var(--teal-dark); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { cursor: wait; opacity: .68; }
+.login-error { min-height: 21px; margin: 11px 0 0; color: #b42318; font-size: 12px; }
+.login-note { margin: 22px 0 0; padding-top: 17px; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
+@media (max-width: 520px) { .login-shell { padding: 16px; } .login-card { padding: 26px 22px; border-radius: 14px; } }

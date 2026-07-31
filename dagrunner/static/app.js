@@ -28,6 +28,12 @@ async function api(url, options = {}) {
   }
   const type = response.headers.get("content-type") || "";
   const body = type.includes("application/json") ? await response.json() : await response.text();
+  if (response.status === 401 && body?.login_url) {
+    window.location.assign(body.login_url);
+    const error = new Error("登录已失效，请重新登录");
+    error.loginRequired = true;
+    throw error;
+  }
   if (!response.ok) throw new Error(body.error || body || `HTTP ${response.status}`);
   return body;
 }
@@ -216,6 +222,7 @@ function scheduleRunSearch(value) {
 }
 
 async function runWorkflow(name) { try { const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:"{}"}); toast(`已提交 ${r.run_id}`); setTimeout(loadRuns, 250); } catch(e) { toast(e.message, true); } }
+async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
 let pendingImportFilename = "workflow.yaml";
 function openImportWorkflow() {
   const input=document.createElement("input");

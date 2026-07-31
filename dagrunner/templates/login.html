@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · DAG Runner</title>
+  <link rel="icon" href="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='login.css') }}">
+</head>
+<body data-next-url="{{ next_url }}">
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="loginTitle">
+      <div class="login-brand">
+        <img src="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" alt="">
+        <div>
+          <p>DAG RUNNER</p>
+          <h1 id="loginTitle">登录控制台</h1>
+        </div>
+      </div>
+      <p class="login-intro">输入管理员账号继续管理工作流。</p>
+      <form id="loginForm">
+        <label for="username">账号</label>
+        <input id="username" name="username" value="admin" autocomplete="username" maxlength="64" required>
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <p id="loginError" class="login-error" role="alert" aria-live="polite"></p>
+        <button id="loginButton" type="submit">登录</button>
+      </form>
+      <p class="login-note">登录状态默认保持 36 小时。请通过 HTTPS 访问非本机部署。</p>
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='login.js') }}"></script>
+</body>
+</html>

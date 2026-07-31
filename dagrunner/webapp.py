@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import atexit
 import json
+import os
+from urllib.parse import urlsplit
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
+from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
 from .database import StateDatabase
 from .logger import TaskLogManager
 from .service import (
@@ -33,6 +36,7 @@ def create_app(
                 stored["workflow_key"], stored["name"], migrated
             )
     registry = WorkflowRegistry(database)
+    auth = AuthService(database)
     logs = TaskLogManager(logs_path)
     executions = ExecutionService(database, registry, logs)
     schedules = ScheduleService(database, registry, executions)
@@ -42,12 +46,126 @@ def create_app(
 
     app.extensions["state_database"] = database
     app.extensions["workflow_registry"] = registry
+    app.extensions["auth_service"] = auth
     app.extensions["execution_service"] = executions
     app.extensions["schedule_service"] = schedules
 
+    public_endpoints = {"static", "login_page", "api_login"}
+
+    @app.before_request
+    def require_login():
+        if request.endpoint in public_endpoints:
+            return None
+        token = request.cookies.get(SESSION_COOKIE)
+        username = auth.authenticate(token)
+        if username:
+            g.current_user = username
+            return None
+        return_to = (
+            "/"
+            if request.path.startswith("/api/") or request.method != "GET"
+            else request.full_path.rstrip("?")
+        )
+        login_url = url_for(
+            "login_page",
+            next=return_to,
+        )
+        if request.path.startswith("/api/") and request.headers.get(
+            "Sec-Fetch-Mode"
+        ) != "navigate":
+            return jsonify(
+                {"ok": False, "error": "登录已失效，请重新登录", "login_url": login_url}
+            ), 401
+        return redirect(login_url)
+
+    @app.after_request
+    def prevent_private_response_caching(response):
+        if request.endpoint != "static":
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.endpoint == "login_page":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                "form-action 'self'"
+            )
+        return response
+
+    @app.get("/login")
+    def login_page():
+        if auth.authenticate(request.cookies.get(SESSION_COOKIE)):
+            return redirect(_safe_next(request.args.get("next")))
+        return render_template(
+            "login.html", next_url=_safe_next(request.args.get("next"))
+        )
+
+    @app.post("/api/auth/login")
+    def api_login():
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get("username", "")).strip()
+        password_hash = str(payload.get("password_hash", ""))
+        ip_address = request.remote_addr or "unknown"
+        result = auth.login(username, password_hash, ip_address)
+        if result.status == "blocked":
+            response = jsonify(
+                {
+                    "ok": False,
+                    "error": "登录失败次数过多，请在 10 分钟后重试",
+                    "retry_after": result.retry_after,
+                }
+            )
+            response.status_code = 429
+            response.headers["Retry-After"] = str(result.retry_after)
+            return response
+        if result.status != "success":
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "账号或密码错误",
+                    "remaining_attempts": result.remaining_attempts,
+                }
+            ), 401
+        assert result.token is not None and result.expires_at is not None
+        response = jsonify(
+            {
+                "ok": True,
+                "username": username,
+                "redirect": _safe_next(payload.get("next")),
+                "expires_in": SESSION_HOURS * 3600,
+            }
+        )
+        response.set_cookie(
+            SESSION_COOKIE,
+            result.token,
+            max_age=SESSION_HOURS * 3600,
+            expires=result.expires_at,
+            httponly=True,
+            secure=_secure_cookie_enabled(),
+            samesite="Strict",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/auth/logout")
+    def api_logout():
+        auth.logout(request.cookies.get(SESSION_COOKIE))
+        response = jsonify({"ok": True, "redirect": url_for("login_page")})
+        response.delete_cookie(
+            SESSION_COOKIE,
+            path="/",
+            httponly=True,
+            secure=_secure_cookie_enabled(),
+            samesite="Strict",
+        )
+        return response
+
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", username=g.current_user)
 
     @app.get("/health")
     def health():
@@ -345,3 +463,25 @@ def _command_text(command, args) -> str:
         return "条件分支"
     base = command if isinstance(command, str) else " ".join(command)
     return " ".join([base, *args]).strip()
+
+
+def _safe_next(value) -> str:
+    candidate = str(value or "/")
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not candidate.startswith("/")
+        or candidate.startswith("//")
+        or "\\" in candidate
+        or any(ord(character) < 32 for character in candidate)
+        or candidate.startswith("/login")
+        or candidate.startswith("/api/auth/")
+    ):
+        return "/"
+    return candidate
+
+
+def _secure_cookie_enabled() -> bool:
+    configured = os.getenv("DAGRUNNER_COOKIE_SECURE", "").strip().lower()
+    return request.is_secure or configured in {"1", "true", "yes", "on"}

@@ -98,6 +98,30 @@ class StateDatabase:
                 CREATE INDEX IF NOT EXISTS idx_task_runs_lookup
                     ON task_runs(workflow_name, task_name, run_id);
 
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    created_time TEXT NOT NULL,
+                    updated_time TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    created_time TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+                    ON auth_sessions(expires_at);
+
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    ip_address TEXT PRIMARY KEY,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    blocked_until TEXT,
+                    updated_time TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS schedules (
                     workflow_name TEXT PRIMARY KEY,
                     description TEXT NOT NULL DEFAULT '',
@@ -137,6 +161,95 @@ class StateDatabase:
                 connection, "task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0"
             )
             self._normalize_timestamps(connection)
+            connection.execute("PRAGMA optimize")
+
+    def upsert_user(self, username: str, password_hash: str) -> None:
+        now = local_now()
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO users (username, password_hash, created_time, updated_time)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(username) DO UPDATE SET
+                       password_hash = excluded.password_hash,
+                       updated_time = excluded.updated_time""",
+                (username, password_hash, now, now),
+            )
+            connection.execute(
+                "DELETE FROM auth_sessions WHERE username = ?", (username,)
+            )
+
+    def get_user(self, username: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+
+    def create_auth_session(
+        self, token_hash: str, username: str, expires_at: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM auth_sessions WHERE expires_at <= ?", (local_now(),)
+            )
+            connection.execute(
+                """INSERT INTO auth_sessions
+                       (token_hash, username, created_time, expires_at)
+                   VALUES (?, ?, ?, ?)""",
+                (token_hash, username, local_now(), expires_at),
+            )
+
+    def get_auth_session(self, token_hash: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+            ).fetchone()
+
+    def delete_auth_session(self, token_hash: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+            )
+
+    def get_login_attempt(self, ip_address: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM login_attempts WHERE ip_address = ?", (ip_address,)
+            ).fetchone()
+
+    def record_login_failure(
+        self,
+        ip_address: str,
+        *,
+        now: str,
+        blocked_until: str,
+        block_after: int,
+    ) -> tuple[int, str | None]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM login_attempts WHERE ip_address = ?", (ip_address,)
+            ).fetchone()
+            attempts = 0
+            if row and (not row["blocked_until"] or row["blocked_until"] > now):
+                attempts = int(row["failed_attempts"])
+            attempts += 1
+            active_block = blocked_until if attempts >= block_after else None
+            connection.execute(
+                """INSERT INTO login_attempts
+                       (ip_address, failed_attempts, blocked_until, updated_time)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(ip_address) DO UPDATE SET
+                       failed_attempts = excluded.failed_attempts,
+                       blocked_until = excluded.blocked_until,
+                       updated_time = excluded.updated_time""",
+                (ip_address, attempts, active_block, now),
+            )
+        return attempts, active_block
+
+    def clear_login_failures(self, ip_address: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM login_attempts WHERE ip_address = ?", (ip_address,)
+            )
 
     def create_workflow(self, name: str, definition: str) -> sqlite3.Row:
         now = local_now()

@@ -19,6 +19,10 @@ body { margin: 0; color: var(--ink); background: var(--canvas); font: 14px/1.5 I
 .eyebrow { margin: 0 0 5px; color: #8fe1d5; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
 h1 { margin: 0; font-size: 27px; letter-spacing: -.02em; }
 .subtitle { margin: 4px 0 0; color: #c7dbdf; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.signed-in-user { color: #c7dbdf; font-size: 12px; font-weight: 650; }
+.logout-button { padding: 6px 10px; color: white; border: 1px solid #ffffff38; border-radius: 6px; background: #ffffff12; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
+.logout-button:hover { background: #ffffff22; }
 .live { padding: 7px 12px; border: 1px solid #ffffff38; border-radius: 99px; background: #ffffff12; font-size: 12px; }
 .live span { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; transition: background .2s, box-shadow .2s; }
 .live b { font-weight: 600; }
@@ -147,4 +151,4 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .dag-meta b { display: inline-block; width: 48px; }
 .dag-meta code { color: #344054; font-family: "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
 .toast { position: fixed; z-index: 30; right: 24px; bottom: 24px; max-width: 420px; padding: 11px 15px; color: white; border-radius: 7px; background: #182230; box-shadow: 0 6px 24px #0003; }
-@media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .brand { gap: 12px; } .brand-logo { width: 58px; height: 58px; } .live { display: none; } main { padding: 0 10px; } .form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .brand { gap: 12px; } .brand-logo { width: 58px; height: 58px; } .live, .signed-in-user { display: none; } main { padding: 0 10px; } .form-grid { grid-template-columns: 1fr; } }

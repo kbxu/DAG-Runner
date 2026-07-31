@@ -17,7 +17,11 @@
         <p class="subtitle">工作流、定时计划和运行状态集中管理</p>
       </div>
     </div>
-    <div id="serviceStatus" class="live checking"><span></span><b>正在连接</b></div>
+    <div class="header-actions">
+      <div id="serviceStatus" class="live checking"><span></span><b>正在连接</b></div>
+      <span class="signed-in-user">{{ username }}</span>
+      <button class="logout-button" type="button" onclick="logout()">退出</button>
+    </div>
   </header>
 
   <main>

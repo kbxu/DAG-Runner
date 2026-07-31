@@ -1,5 +1,6 @@
 # Runtime dependencies. SQLite, subprocess and the CLI core use Python's standard library.
 PyYAML>=6.0,<7
 Flask>=3.1,<4
+Werkzeug>=3.1,<4
 APScheduler>=3.11,<4
 waitress>=3.0,<4
