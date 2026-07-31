@@ -90,8 +90,38 @@ PowerShell 的 `Set-Location` 切换；只有确实需要单独目录的任务�
 [`templates/production_setup.ps1`](templates/production_setup.ps1) 后填写项目路径、
 Conda 安装位置和环境名称，再通过迁移命令的 `--setup-file` 使用。
 
-任务只有在所有依赖均为 `SUCCESS` 时才会执行。依赖失败后，下游任务自动记为 `SKIPPED`。
+普通任务只有在所有有效依赖均为 `SUCCESS` 时才会执行。依赖失败后，下游任务自动记为
+`SKIPPED`。条件节点使用 `type: condition`，会等待依赖结束后按状态选择 `success` 或
+`failure` 分支；未选中的路径正常跳过，被条件节点处理的前置失败不会导致整个工作流失败。
 同一工作流默认最多同时执行 4 个已就绪任务；任务完成后会立即重新计算并解锁下游。
+
+```yaml
+tasks:
+  is_trade_date:
+    command: python is_trade_date.py
+    depends: []
+
+  trade_date_branch:
+    type: condition
+    depends: [is_trade_date]
+    condition:
+      relation: AND
+      groups:
+        - relation: AND
+          items:
+            - task: is_trade_date
+              status: SUCCESS
+    success: [refresh_market]
+    failure: [skip_market]
+
+  refresh_market:
+    command: python refresh_market.py
+    depends: [trade_date_branch]
+
+  skip_market:
+    command: echo "not a trade date"
+    depends: [trade_date_branch]
+```
 
 完整虚构示例见 [`demo/examples/dagr_example_pipeline.yaml`](demo/examples/dagr_example_pipeline.yaml)。
 
@@ -129,12 +159,12 @@ python -m dagrunner.migrate_workflows \
 迁移器会把 DolphinScheduler SHELL 脚本中的 CRLF/CR 换行统一为 LF，生成的
 YAML 文件也固定使用 LF，避免 Bash 执行时因残留 `\r` 报错。
 `--exclude-disabled` 会过滤 DolphinScheduler 禁用节点以及与这些节点相连的
-依赖边；不传时则保留禁用的 SHELL 节点。转换器支持 SHELL 节点、
+依赖边；不传时则保留禁用节点。转换器支持 SHELL、CONDITIONS 节点、
 依赖、全局参数、启用状态和 timeout。DolphinScheduler 全局及无冲突的任务
 局部参数会写入 `setup`；`.sh` setup 生成 `export`，`.ps1` setup 生成 `$env:`。
-启用的 `CONDITIONS` 成功分支会降级为
-普通成功依赖，失败分支会禁用并提示人工复核；禁用的 `CONDITIONS` 不参与
-依赖计算。迁移器不再生成 `workdir`；需要切换工作目录时，应在 setup 文件中
+`CONDITIONS` 的 AND/OR 状态判断、成功分支和失败分支会原样转换为条件节点；
+无法安全识别的关系或状态会终止转换并给出错误，不会静默降级。迁移器不再生成
+`workdir`；需要切换工作目录时，应在 setup 文件中
 先执行 `cd`（Bash）或 `Set-Location`（PowerShell）。
 
 Windows 导入器支持 `Exec` 动作以及每日、每周和每月日期触发器，并保留参数、

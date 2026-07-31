@@ -86,6 +86,10 @@ class StateDatabase:
                     reused_from_run_id TEXT,
                     task_description TEXT NOT NULL DEFAULT '',
                     depends_json TEXT NOT NULL DEFAULT '[]',
+                    task_type TEXT NOT NULL DEFAULT 'command',
+                    condition_result TEXT,
+                    handled_by TEXT,
+                    skip_kind TEXT,
                     snapshot_version INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (run_id, task_name),
                     FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
@@ -123,6 +127,12 @@ class StateDatabase:
             self._ensure_column(
                 connection, "task_runs", "depends_json", "TEXT NOT NULL DEFAULT '[]'"
             )
+            self._ensure_column(
+                connection, "task_runs", "task_type", "TEXT NOT NULL DEFAULT 'command'"
+            )
+            self._ensure_column(connection, "task_runs", "condition_result", "TEXT")
+            self._ensure_column(connection, "task_runs", "handled_by", "TEXT")
+            self._ensure_column(connection, "task_runs", "skip_kind", "TEXT")
             self._ensure_column(
                 connection, "task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0"
             )
@@ -251,7 +261,7 @@ class StateDatabase:
         resumed_from_run_id: str | None = None,
         from_task: str | None = None,
         trigger_type: str = "manual",
-        task_metadata: dict[str, tuple[str, Sequence[str]]] | None = None,
+        task_metadata: dict[str, dict[str, object]] | None = None,
     ) -> None:
         now = local_now()
         with self.connect() as connection:
@@ -266,15 +276,19 @@ class StateDatabase:
             connection.executemany(
                 """INSERT INTO task_runs
                    (run_id, workflow_name, task_name, status, task_description, depends_json,
-                    snapshot_version)
-                   VALUES (?, ?, ?, 'PENDING', ?, ?, 1)""",
+                    task_type, snapshot_version)
+                   VALUES (?, ?, ?, 'PENDING', ?, ?, ?, 2)""",
                 [
                     (
                         run_id,
                         workflow_name,
                         name,
-                        metadata.get(name, ("", ()))[0],
-                        json.dumps(metadata.get(name, ("", ()))[1], ensure_ascii=False),
+                        str(metadata.get(name, {}).get("description", "")),
+                        json.dumps(
+                            metadata.get(name, {}).get("depends", ()),
+                            ensure_ascii=False,
+                        ),
+                        str(metadata.get(name, {}).get("task_type", "command")),
                     )
                     for name in task_names
                 ],
@@ -290,6 +304,9 @@ class StateDatabase:
         log_file: str | None = None,
         error_message: str | None = None,
         reused_from_run_id: str | None = None,
+        condition_result: str | None = None,
+        handled_by: str | None = None,
+        skip_kind: str | None = None,
     ) -> None:
         if status not in TASK_STATUSES:
             raise ValueError(f"invalid task status: {status}")
@@ -303,7 +320,8 @@ class StateDatabase:
                        start_time = COALESCE(?, start_time),
                        end_time = ?, exit_code = ?,
                        log_file = COALESCE(?, log_file),
-                       error_message = ?, reused_from_run_id = ?
+                       error_message = ?, reused_from_run_id = ?,
+                       condition_result = ?, handled_by = ?, skip_kind = ?
                    WHERE run_id = ? AND task_name = ?""",
                 (
                     status,
@@ -313,9 +331,21 @@ class StateDatabase:
                     log_file,
                     error_message,
                     reused_from_run_id,
+                    condition_result,
+                    handled_by,
+                    skip_kind,
                     run_id,
                     task_name,
                 ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"task run not found: {run_id}/{task_name}")
+
+    def mark_task_handled(self, run_id: str, task_name: str, handled_by: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE task_runs SET handled_by = ? WHERE run_id = ? AND task_name = ?",
+                (handled_by, run_id, task_name),
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"task run not found: {run_id}/{task_name}")
@@ -367,7 +397,8 @@ class StateDatabase:
                 """SELECT wr.*,
                           COUNT(tr.task_name) AS task_count,
                           SUM(CASE WHEN tr.status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
-                          SUM(CASE WHEN tr.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
+                          SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NULL THEN 1 ELSE 0 END) AS failed_count,
+                          SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NOT NULL THEN 1 ELSE 0 END) AS handled_count,
                           SUM(CASE WHEN tr.status = 'RUNNING' THEN 1 ELSE 0 END) AS running_count,
                           SUM(CASE WHEN tr.status = 'SKIPPED' THEN 1 ELSE 0 END) AS skipped_count
                    FROM workflow_runs wr
@@ -415,7 +446,8 @@ class StateDatabase:
                 f"""SELECT wr.*, w.name AS workflow_description,
                             COUNT(tr.task_name) AS task_count,
                             SUM(CASE WHEN tr.status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
-                            SUM(CASE WHEN tr.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
+                            SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NULL THEN 1 ELSE 0 END) AS failed_count,
+                            SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NOT NULL THEN 1 ELSE 0 END) AS handled_count,
                             SUM(CASE WHEN tr.status = 'RUNNING' THEN 1 ELSE 0 END) AS running_count,
                             SUM(CASE WHEN tr.status = 'SKIPPED' THEN 1 ELSE 0 END) AS skipped_count
                      {from_clause}

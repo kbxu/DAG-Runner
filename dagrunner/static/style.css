@@ -52,6 +52,7 @@ tbody tr:hover { background: #fbfcfc; }
 .FAILED { color: var(--danger); background: #fef3f2; }
 .RUNNING { color: #175cd3; background: #eff8ff; }
 .SKIPPED, .disabled { color: #667085; background: #f2f4f7; }
+.handled-note { margin-top: 4px; color: var(--teal-dark); font-size: 10px; white-space: nowrap; }
 .button { padding: 6px 10px; border: 0; border-radius: 6px; color: white; background: var(--teal); cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
 .button:hover { background: var(--teal-dark); }
 .button.ghost { color: #344054; border: 1px solid #d0d5dd; background: white; }
@@ -114,6 +115,8 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .dag-node { cursor: pointer; }
 .dag-node rect { stroke-width: 1.7; filter: drop-shadow(0 2px 2px #17324d12); transition: filter .15s, stroke-width .15s; }
 .dag-node:hover rect { stroke-width: 2.5; filter: drop-shadow(0 4px 5px #17324d25); }
+.dag-condition rect { stroke-dasharray: 5 2; }
+.dag-condition circle { stroke: #ffffff; stroke-width: 1.5; }
 .dag-enabled rect { fill: #f0fbf9; stroke: #15958c; }
 .dag-enabled circle { fill: #0b8f86; }
 .dag-disabled rect { fill: #f4f5f6; stroke: #98a2b3; stroke-dasharray: 5 3; }

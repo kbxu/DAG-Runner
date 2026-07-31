@@ -77,6 +77,9 @@ def create_app(
                             "depends": list(task.depends),
                             "enabled": task.enabled,
                             "command": _command_text(task.command, task.args),
+                            "type": task.task_type,
+                            "success": list(task.success),
+                            "failure": list(task.failure),
                         }
                         for task in workflow.tasks.values()
                     ],
@@ -268,6 +271,14 @@ def create_app(
                     "depends": depends,
                     "enabled": definition.enabled if definition else True,
                     "status": row["status"],
+                    "type": row["task_type"] if snapshot else (
+                        definition.task_type if definition else "command"
+                    ),
+                    "condition_result": row["condition_result"],
+                    "handled_by": row["handled_by"],
+                    "skip_kind": row["skip_kind"],
+                    "success": list(definition.success) if definition else [],
+                    "failure": list(definition.failure) if definition else [],
                 }
             )
         return jsonify({"run": run_data, "tasks": tasks, "graph_tasks": graph_tasks})
@@ -330,5 +341,7 @@ def _row_dict(row) -> dict:
 
 
 def _command_text(command, args) -> str:
+    if command is None:
+        return "条件分支"
     base = command if isinstance(command, str) else " ".join(command)
     return " ".join([base, *args]).strip()

@@ -94,15 +94,55 @@ def migrate_legacy_env(content: str) -> tuple[str, bool]:
 
 
 @dataclass(frozen=True)
+class ConditionItem:
+    task: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ConditionGroup:
+    relation: str
+    items: tuple[ConditionItem, ...]
+
+    def evaluate(self, states: dict[str, str]) -> bool:
+        matches = (states[item.task] == item.status for item in self.items)
+        return all(matches) if self.relation == "AND" else any(matches)
+
+
+@dataclass(frozen=True)
+class ConditionSpec:
+    relation: str
+    groups: tuple[ConditionGroup, ...]
+
+    def evaluate(self, states: dict[str, str]) -> bool:
+        matches = (group.evaluate(states) for group in self.groups)
+        return all(matches) if self.relation == "AND" else any(matches)
+
+    @property
+    def referenced_tasks(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(item.task for group in self.groups for item in group.items)
+        )
+
+
+@dataclass(frozen=True)
 class Task:
     name: str
-    command: str | tuple[str, ...]
+    command: str | tuple[str, ...] | None = None
     depends: tuple[str, ...] = ()
     args: tuple[str, ...] = ()
     cwd: str | None = None
     timeout: int | None = None
     enabled: bool = True
     description: str = ""
+    task_type: str = "command"
+    condition: ConditionSpec | None = None
+    success: tuple[str, ...] = ()
+    failure: tuple[str, ...] = ()
+
+    @property
+    def is_condition(self) -> bool:
+        return self.task_type == "condition"
 
 
 @dataclass(frozen=True)
@@ -176,11 +216,34 @@ class Workflow:
                 raise WorkflowError(
                     f"task {task_name!r} env is no longer supported; define variables in setup or command"
                 )
+            task_type = raw.get("type", "command")
+            if task_type not in {"command", "condition"}:
+                raise WorkflowError(
+                    f"task {task_name!r} type must be 'command' or 'condition'"
+                )
             command = raw.get("command")
-            if isinstance(command, list) and all(isinstance(x, str) for x in command):
-                command = tuple(command)
-            elif not isinstance(command, str) or not command.strip():
-                raise WorkflowError(f"task {task_name!r} needs a string or string-list command")
+            condition = None
+            success: tuple[str, ...] = ()
+            failure: tuple[str, ...] = ()
+            if task_type == "command":
+                if isinstance(command, list) and all(isinstance(x, str) for x in command):
+                    command = tuple(command)
+                elif not isinstance(command, str) or not command.strip():
+                    raise WorkflowError(
+                        f"task {task_name!r} needs a string or string-list command"
+                    )
+            else:
+                if command is not None:
+                    raise WorkflowError(
+                        f"condition task {task_name!r} must not define command"
+                    )
+                condition = _condition_value(raw.get("condition"), task_name)
+                success = _string_tuple(raw.get("success", []), task_name, "success")
+                failure = _string_tuple(raw.get("failure", []), task_name, "failure")
+                if not success and not failure:
+                    raise WorkflowError(
+                        f"condition task {task_name!r} needs a success or failure branch"
+                    )
             depends = _string_tuple(raw.get("depends", []), task_name, "depends")
             args = _string_tuple(raw.get("args", []), task_name, "args")
             timeout = raw.get("timeout")
@@ -195,6 +258,10 @@ class Workflow:
                 timeout=timeout,
                 enabled=bool(raw.get("enabled", True)),
                 description=str(raw.get("description", "")),
+                task_type=task_type,
+                condition=condition,
+                success=success,
+                failure=failure,
             )
 
         workflow = cls(
@@ -223,6 +290,29 @@ class Workflow:
                     raise WorkflowError(f"task {name!r} cannot depend on itself")
                 indegree[name] += 1
                 children[dependency].append(name)
+            if task.is_condition:
+                assert task.condition is not None
+                missing_inputs = set(task.condition.referenced_tasks) - set(task.depends)
+                if missing_inputs:
+                    raise WorkflowError(
+                        f"condition task {name!r} must depend on referenced task(s): "
+                        f"{', '.join(sorted(missing_inputs))}"
+                    )
+                overlap = set(task.success) & set(task.failure)
+                if overlap:
+                    raise WorkflowError(
+                        f"condition task {name!r} has targets in both branches: "
+                        f"{', '.join(sorted(overlap))}"
+                    )
+                for target in (*task.success, *task.failure):
+                    if target not in self.tasks:
+                        raise WorkflowError(
+                            f"condition task {name!r} targets unknown task {target!r}"
+                        )
+                    if name not in self.tasks[target].depends:
+                        raise WorkflowError(
+                            f"condition branch target {target!r} must depend on {name!r}"
+                        )
 
         ready = [name for name in self.tasks if indegree[name] == 0]
         order: list[str] = []
@@ -280,6 +370,63 @@ def _optional_string(value: Any, task_name: str, field_name: str) -> str | None:
     if not isinstance(value, str):
         raise WorkflowError(f"task {task_name!r} {field_name} must be a string")
     return value
+
+
+def _condition_value(value: Any, task_name: str) -> ConditionSpec:
+    if not isinstance(value, dict):
+        raise WorkflowError(f"condition task {task_name!r} condition must be a mapping")
+    relation = _condition_relation(value.get("relation", "AND"), task_name)
+    raw_groups = value.get("groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raise WorkflowError(
+            f"condition task {task_name!r} condition.groups must be a non-empty list"
+        )
+    groups: list[ConditionGroup] = []
+    for group_index, raw_group in enumerate(raw_groups, start=1):
+        if not isinstance(raw_group, dict):
+            raise WorkflowError(
+                f"condition task {task_name!r} group {group_index} must be a mapping"
+            )
+        group_relation = _condition_relation(
+            raw_group.get("relation", "AND"), task_name
+        )
+        raw_items = raw_group.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise WorkflowError(
+                f"condition task {task_name!r} group {group_index} items must be a non-empty list"
+            )
+        items: list[ConditionItem] = []
+        for item_index, raw_item in enumerate(raw_items, start=1):
+            if not isinstance(raw_item, dict):
+                raise WorkflowError(
+                    f"condition task {task_name!r} group {group_index} item "
+                    f"{item_index} must be a mapping"
+                )
+            referenced_task = raw_item.get("task")
+            if not isinstance(referenced_task, str) or not referenced_task:
+                raise WorkflowError(
+                    f"condition task {task_name!r} group {group_index} item "
+                    f"{item_index} needs a task"
+                )
+            status = str(raw_item.get("status", "")).upper()
+            if status == "FAILURE":
+                status = "FAILED"
+            if status not in {"SUCCESS", "FAILED", "SKIPPED"}:
+                raise WorkflowError(
+                    f"condition task {task_name!r} has unsupported status {status!r}"
+                )
+            items.append(ConditionItem(referenced_task, status))
+        groups.append(ConditionGroup(group_relation, tuple(items)))
+    return ConditionSpec(relation, tuple(groups))
+
+
+def _condition_relation(value: Any, task_name: str) -> str:
+    relation = str(value).upper()
+    if relation not in {"AND", "OR"}:
+        raise WorkflowError(
+            f"condition task {task_name!r} relation must be AND or OR"
+        )
+    return relation
 
 
 def _setup_value(value: Any) -> str | dict[str, str]:

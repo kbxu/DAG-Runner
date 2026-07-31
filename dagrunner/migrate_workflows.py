@@ -468,6 +468,15 @@ def _environment_lines(values: dict[str, Any], shell: str) -> list[str]:
     return lines
 
 
+def _ds_condition_relation(value: Any, code: int) -> str:
+    relation = str(value).upper()
+    if relation not in {"AND", "OR"}:
+        raise ValueError(
+            f"CONDITIONS code={code} uses unsupported relation {relation!r}"
+        )
+    return relation
+
+
 def convert_dolphinscheduler_definition(
     item: dict[str, Any],
     setup: str = "",
@@ -486,66 +495,101 @@ def convert_dolphinscheduler_definition(
     all_shell_codes = {
         code for code, definition in definitions.items() if definition.get("taskType") == "SHELL"
     }
+    all_condition_codes = {
+        code
+        for code, definition in definitions.items()
+        if definition.get("taskType") == "CONDITIONS"
+    }
+    all_supported_codes = all_shell_codes | all_condition_codes
     unsupported = {
         code: definition
         for code, definition in definitions.items()
-        if definition.get("taskType") != "SHELL"
+        if definition.get("taskType") not in {"SHELL", "CONDITIONS"}
     }
-    conditional_dependencies: dict[int, set[int]] = defaultdict(set)
-    disabled_by_condition: set[int] = set()
     for code, definition in unsupported.items():
         task_type = definition.get("taskType", "UNKNOWN")
         if exclude_disabled and definition.get("flag") == "NO":
             continue
-        if task_type != "CONDITIONS":
-            warnings.append(
-                f"omitted unsupported {task_type} node code={code} name={definition.get('name')!r}"
-            )
-            continue
-        if definition.get("flag") == "NO":
-            warnings.append(
-                f"ignored disabled CONDITIONS node code={code} name={definition.get('name')!r}"
-            )
-            continue
-        params = definition.get("taskParams") or {}
-        result = params.get("conditionResult") or {}
-        incoming = {
-            rel.get("preTaskCode")
-            for rel in relations
-            if rel.get("postTaskCode") == code
-            and rel.get("preTaskCode") in all_shell_codes
-        }
-        for group in ((params.get("dependence") or {}).get("dependTaskList") or []):
-            for dependency in group.get("dependItemList") or []:
-                if dependency.get("depTaskCode") in all_shell_codes:
-                    incoming.add(dependency["depTaskCode"])
-        for target in result.get("successNode") or []:
-            if target in all_shell_codes:
-                conditional_dependencies[target].update(incoming)
-        for target in result.get("failedNode") or []:
-            if target in all_shell_codes:
-                disabled_by_condition.add(target)
         warnings.append(
-            f"CONDITIONS code={code}: success branch converted to normal SUCCESS dependencies; "
-            "failed branch targets were disabled and require manual review"
+            f"omitted unsupported {task_type} node code={code} name={definition.get('name')!r}"
         )
 
     disabled_codes = {
         code
-        for code in all_shell_codes
+        for code in all_supported_codes
         if definitions[code].get("flag") == "NO"
-    } | disabled_by_condition
-    shell_codes = (
-        all_shell_codes - disabled_codes if exclude_disabled else all_shell_codes
+    }
+    included_codes = (
+        all_supported_codes - disabled_codes if exclude_disabled else all_supported_codes
     )
     dependencies: dict[int, set[int]] = defaultdict(set)
     for relation in relations:
         before, after = relation.get("preTaskCode", 0), relation.get("postTaskCode")
-        if before in shell_codes and after in shell_codes:
+        if before in included_codes and after in included_codes:
             dependencies[after].add(before)
-    for target, incoming in conditional_dependencies.items():
-        if target in shell_codes:
-            dependencies[target].update(incoming & shell_codes)
+
+    condition_configs: dict[int, dict[str, Any]] = {}
+    for code in sorted(all_condition_codes & included_codes):
+        definition = definitions[code]
+        params = definition.get("taskParams") or {}
+        dependence = params.get("dependence") or {}
+        relation = _ds_condition_relation(dependence.get("relation", "AND"), code)
+        raw_groups = dependence.get("dependTaskList") or []
+        if not raw_groups:
+            raise ValueError(f"CONDITIONS code={code} has no dependence groups")
+        groups: list[dict[str, Any]] = []
+        referenced: set[int] = set()
+        for group_index, raw_group in enumerate(raw_groups, start=1):
+            group_relation = _ds_condition_relation(
+                raw_group.get("relation", "AND"), code
+            )
+            raw_items = raw_group.get("dependItemList") or []
+            if not raw_items:
+                raise ValueError(
+                    f"CONDITIONS code={code} group {group_index} has no dependency items"
+                )
+            items: list[dict[str, str]] = []
+            for raw_item in raw_items:
+                dependency_code = raw_item.get("depTaskCode")
+                if dependency_code not in included_codes:
+                    raise ValueError(
+                        f"CONDITIONS code={code} references unavailable task "
+                        f"code={dependency_code}"
+                    )
+                status = str(raw_item.get("status", "")).upper()
+                if status == "FAILURE":
+                    status = "FAILED"
+                if status not in {"SUCCESS", "FAILED", "SKIPPED"}:
+                    raise ValueError(
+                        f"CONDITIONS code={code} uses unsupported status {status!r}"
+                    )
+                referenced.add(dependency_code)
+                items.append(
+                    {"task": f"task_{dependency_code}", "status": status}
+                )
+            groups.append({"relation": group_relation, "items": items})
+        dependencies[code].update(referenced)
+
+        result = params.get("conditionResult") or {}
+        success_codes = [
+            target
+            for target in result.get("successNode") or []
+            if target in included_codes
+        ]
+        failure_codes = [
+            target
+            for target in result.get("failedNode") or []
+            if target in included_codes
+        ]
+        if not success_codes and not failure_codes:
+            raise ValueError(f"CONDITIONS code={code} has no available branch targets")
+        for target in (*success_codes, *failure_codes):
+            dependencies[target].add(code)
+        condition_configs[code] = {
+            "condition": {"relation": relation, "groups": groups},
+            "success": [f"task_{target}" for target in success_codes],
+            "failure": [f"task_{target}" for target in failure_codes],
+        }
 
     global_env = {
         entry["prop"]: "" if entry.get("value") is None else str(entry.get("value"))
@@ -553,7 +597,7 @@ def convert_dolphinscheduler_definition(
         if entry.get("prop")
     }
     setup_env = dict(global_env)
-    for code in shell_codes:
+    for code in all_shell_codes & included_codes:
         params = definitions[code].get("taskParams") or {}
         for entry in params.get("localParams") or []:
             name = entry.get("prop")
@@ -568,19 +612,32 @@ def convert_dolphinscheduler_definition(
             setup_env[name] = value
 
     tasks: dict[str, Any] = {}
-    for code in sorted(shell_codes):
+    for code in sorted(included_codes):
         definition = definitions[code]
         params = definition.get("taskParams") or {}
-        task: dict[str, Any] = {
-            "description": definition.get("name") or "",
-            "command": _lf_newlines(str(params.get("rawScript") or "true")),
-            "depends": [f"task_{dep}" for dep in sorted(dependencies[code])],
-        }
-        if definition.get("flag") == "NO" or code in disabled_by_condition:
+        if code in all_condition_codes:
+            task = {
+                "type": "condition",
+                "description": definition.get("name") or "",
+                "depends": [f"task_{dep}" for dep in sorted(dependencies[code])],
+                **condition_configs[code],
+            }
+        else:
+            task = {
+                "description": definition.get("name") or "",
+                "command": _lf_newlines(str(params.get("rawScript") or "true")),
+                "depends": [f"task_{dep}" for dep in sorted(dependencies[code])],
+            }
+        if definition.get("flag") == "NO":
             task["enabled"] = False
-        timeout = definition.get("timeout")
-        if definition.get("timeoutFlag") == "OPEN" and isinstance(timeout, int) and timeout > 0:
-            task["timeout"] = timeout * 60  # DolphinScheduler export uses minutes.
+        if code in all_shell_codes:
+            timeout = definition.get("timeout")
+            if (
+                definition.get("timeoutFlag") == "OPEN"
+                and isinstance(timeout, int)
+                and timeout > 0
+            ):
+                task["timeout"] = timeout * 60  # DolphinScheduler export uses minutes.
         tasks[f"task_{code}"] = task
 
     schedule = item.get("schedule") or {}

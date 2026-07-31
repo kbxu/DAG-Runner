@@ -47,7 +47,7 @@ function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g,
 function namedId(name, id) { return name && name !== id ? `${name}（${id}）` : id; }
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
 const usefulTopKeys = new Set(["description", "setup", "tasks"]);
-const usefulTaskKeys = new Set(["description", "command", "depends", "args", "cwd", "timeout", "enabled"]);
+const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
   return `<div class="yaml-editor"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div>`;
 }
@@ -177,7 +177,7 @@ async function loadRuns(resetPage=false) {
     state.runPagination = data.pagination;
     state.runPage = data.pagination.page;
     document.getElementById("runRows").innerHTML = data.runs.map(r => {
-      const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.skipped_count || 0);
+      const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.handled_count || 0) + (r.skipped_count || 0);
       const percent = r.task_count ? Math.round(complete * 100 / r.task_count) : 0;
       const actions = [`<button class="button ghost" onclick="showRun('${r.run_id}')">详情</button>`];
       if (r.status === "RUNNING") actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">停止</button>`);
@@ -186,7 +186,8 @@ async function loadRuns(resetPage=false) {
         if (r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" onclick="runAction('${r.run_id}','resume')">失败续跑</button>`);
         actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">删除</button>`);
       }
-      return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td><div class="primary">${esc(r.workflow_description || r.workflow_name)}</div><div class="workflow-id mono">${esc(r.workflow_name)}</div></td><td>${esc(r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · 成功 ${r.success_count || 0}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
+      const handled = r.handled_count ? ` · 已处理 ${r.handled_count}` : "";
+      return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td><div class="primary">${esc(r.workflow_description || r.workflow_name)}</div><div class="workflow-id mono">${esc(r.workflow_name)}</div></td><td>${esc(r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · 成功 ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">没有符合条件的运行记录</td></tr>`;
     renderRunPagination();
   } catch (error) { if (!error.offline) toast(error.message, true); }
@@ -287,7 +288,7 @@ function closeDeleteConfirmFromBackdrop(event) {
 
 function showTasks(name) {
   const w = state.workflows.get(name); if (!w) return;
-  openModal(`${namedId(w.description, w.name)} · DAG 任务`, `<div class="table-wrap"><table><thead><tr><th>任务</th><th>依赖</th><th>命令</th><th>启用</th></tr></thead><tbody>${w.tasks.map(t => `<tr><td><div class="primary">${esc(t.description || t.name)}</div><div class="workflow-id mono">${esc(t.name)}</div></td><td>${esc(t.depends.map(id => taskNamedId(w, id)).join(", ") || "—")}</td><td class="mono">${esc(t.command)}</td><td>${t.enabled ? "是" : "否"}</td></tr>`).join("")}</tbody></table></div>`);
+  openModal(`${namedId(w.description, w.name)} · DAG 任务`, `<div class="table-wrap"><table><thead><tr><th>任务</th><th>依赖</th><th>命令 / 类型</th><th>启用</th></tr></thead><tbody>${w.tasks.map(t => `<tr><td><div class="primary">${esc(t.description || t.name)}</div><div class="workflow-id mono">${esc(t.name)}</div></td><td>${esc(t.depends.map(id => taskNamedId(w, id)).join(", ") || "—")}</td><td class="mono">${esc(t.type === "condition" ? "条件分支" : t.command)}</td><td>${t.enabled ? "是" : "否"}</td></tr>`).join("")}</tbody></table></div>`);
 }
 
 function showDag(name) {
@@ -328,7 +329,8 @@ function buildDagSvg(tasks, workflowName, showStatuses=false) {
     const p=positions.get(task.name), title=(task.description || task.name).slice(0,22), taskId=task.name.slice(0,27);
     const status=showStatuses ? (task.status || "PENDING") : "";
     const click=showStatuses ? "" : `onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"`;
-    return `<g class="dag-node ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${status ? `<text class="dag-node-status" x="176" y="23" text-anchor="end">${esc(status)}</text>` : ""}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${status ? ` · ${esc(status)}` : ""}</title></g>`;
+    const statusText=task.type === "condition" && task.condition_result ? `→ ${task.condition_result.toUpperCase()}` : status;
+    return `<g class="dag-node ${task.type === "condition" ? "dag-condition" : ""} ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${statusText ? `<text class="dag-node-status" x="176" y="23" text-anchor="end">${esc(statusText)}</text>` : ""}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${statusText ? ` · ${esc(statusText)}` : ""}</title></g>`;
   }).join("");
   return `<svg class="dag-canvas" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(workflowName)} DAG"><defs><marker id="dagArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>${edges.join("")}${nodes}</svg>`;
 }
@@ -336,7 +338,8 @@ function buildDagSvg(tasks, workflowName, showStatuses=false) {
 function selectDagTask(workflowName, taskName) {
   const workflow=state.workflows.get(workflowName), task=workflow?.tasks.find(item => item.name===taskName), target=document.getElementById("dagTaskDetail");
   if (!task || !target) return;
-  target.innerHTML=`<div><span class="badge ${task.enabled ? "enabled" : "disabled"}">${task.enabled ? "已启用" : "已禁用"}</span> <strong>${esc(task.description || task.name)}</strong> <span class="secondary dag-inline mono">${esc(task.name)}</span></div><div class="dag-meta"><b>依赖：</b><span>${esc(task.depends.map(id => taskNamedId(workflow, id)).join(", ") || "无")}</span></div><div class="dag-meta"><b>命令：</b><code>${esc(task.command)}</code></div>`;
+  const detail=task.type === "condition" ? `<div class="dag-meta"><b>类型：</b><code>条件分支</code></div><div class="dag-meta"><b>成功：</b><span>${esc(task.success.map(id => taskNamedId(workflow, id)).join(", ") || "无")}</span></div><div class="dag-meta"><b>失败：</b><span>${esc(task.failure.map(id => taskNamedId(workflow, id)).join(", ") || "无")}</span></div>` : `<div class="dag-meta"><b>命令：</b><code>${esc(task.command)}</code></div>`;
+  target.innerHTML=`<div><span class="badge ${task.enabled ? "enabled" : "disabled"}">${task.enabled ? "已启用" : "已禁用"}</span> <strong>${esc(task.description || task.name)}</strong> <span class="secondary dag-inline mono">${esc(task.name)}</span></div><div class="dag-meta"><b>依赖：</b><span>${esc(task.depends.map(id => taskNamedId(workflow, id)).join(", ") || "无")}</span></div>${detail}`;
 }
 
 function exportYaml(name) { window.location.assign(`/api/workflows/${encodeURIComponent(name)}/yaml`); }
@@ -353,7 +356,8 @@ async function showRun(id) {
     const rows = data.tasks.map(t => {
       const label = t.task_description || t.task_name;
       const logButton = t.log_file ? `<button class="button ghost" onclick='showLog(${jsArg(id)}, ${jsArg(t.task_name)}, ${jsArg(label)})'>日志</button>` : "—";
-      return `<tr><td><div class="primary">${esc(label)}</div></td><td class="mono">${esc(t.task_name)}</td><td>${statusBadge(t.status)}</td><td>${fmt(t.start_time)}</td><td>${fmt(t.end_time)}</td><td>${t.exit_code ?? "—"}</td><td><div class="secondary" title="${esc(t.error_message)}">${esc(t.error_message || "")}</div></td><td>${logButton}</td></tr>`;
+      const handled = t.handled_by ? `<div class="handled-note">已由 ${esc(t.handled_by)} 处理</div>` : "";
+      return `<tr><td><div class="primary">${esc(label)}</div></td><td class="mono">${esc(t.task_name)}</td><td>${statusBadge(t.status)}${handled}</td><td>${fmt(t.start_time)}</td><td>${fmt(t.end_time)}</td><td>${t.exit_code ?? "—"}</td><td><div class="secondary" title="${esc(t.error_message)}">${esc(t.error_message || "")}</div></td><td>${logButton}</td></tr>`;
     }).join("");
     const dag=data.graph_tasks?.length ? `<div class="run-dag"><div class="dag-legend"><span><i class="legend-node status-running"></i>RUNNING</span><span><i class="legend-node status-success"></i>SUCCESS</span><span><i class="legend-node status-failed"></i>FAILED</span><span><i class="legend-node status-skipped"></i>SKIPPED</span><span><i class="legend-node status-pending"></i>PENDING</span></div><div class="dag-scroll">${buildDagSvg(data.graph_tasks,data.run.workflow_name,true)}</div></div>` : "";
     openModal(`${namedId(data.run.workflow_description, data.run.workflow_name)} · ${id}`, `<div class="detail-toolbar"><button class="button ghost" onclick='showRun(${jsArg(id)})'>刷新状态</button></div>${dag}<div class="table-wrap"><table><thead><tr><th>任务</th><th>ID</th><th>状态</th><th>开始</th><th>结束</th><th>Exit</th><th>错误</th><th>日志</th></tr></thead><tbody>${rows}</tbody></table></div>`);

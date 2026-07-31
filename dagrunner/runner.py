@@ -19,6 +19,10 @@ from .notifier import Notifier, NullNotifier, TaskEvent
 from .workflow import Workflow, WorkflowError
 
 
+TERMINAL_TASK_STATES = {"SUCCESS", "FAILED", "SKIPPED"}
+CONDITION_SKIP_KINDS = {"CONDITION_NOT_SELECTED", "CONDITION_PATH_NOT_SELECTED"}
+
+
 class AlreadyRunningError(RuntimeError):
     pass
 
@@ -71,7 +75,7 @@ class WorkflowRunner:
                 name
                 for name in order
                 if name not in previous_states
-                or previous_states[name]["status"] != "SUCCESS"
+                or not _is_reusable_previous_state(previous_states[name])
             }
         else:
             selected = workflow.descendants(from_task) if from_task else set(order)
@@ -84,11 +88,17 @@ class WorkflowRunner:
             from_task=from_task,
             trigger_type=trigger_type,
             task_metadata={
-                name: (workflow.tasks[name].description, workflow.tasks[name].depends)
+                name: {
+                    "description": workflow.tasks[name].description,
+                    "depends": workflow.tasks[name].depends,
+                    "task_type": workflow.tasks[name].task_type,
+                }
                 for name in order
             },
         )
         states = {name: "PENDING" for name in order}
+        handled_failures: set[str] = set()
+        benign_skips: set[str] = set()
         task_cancel_event = cancel_event or Event()
 
         try:
@@ -101,6 +111,8 @@ class WorkflowRunner:
                     previous,
                     previous_states,
                     states,
+                    handled_failures,
+                    benign_skips,
                 )
             self._run_tasks(
                 workflow,
@@ -108,12 +120,22 @@ class WorkflowRunner:
                 order,
                 states,
                 task_cancel_event,
+                handled_failures,
+                benign_skips,
             )
 
             selected_incomplete = any(
-                states[name] != "SUCCESS" and workflow.tasks[name].enabled for name in selected
+                states[name] != "SUCCESS"
+                and name not in handled_failures
+                and name not in benign_skips
+                and workflow.tasks[name].enabled
+                for name in selected
             )
-            final_status = "FAILED" if "FAILED" in states.values() or selected_incomplete else "SUCCESS"
+            unhandled_failure = any(
+                state == "FAILED" and name not in handled_failures
+                for name, state in states.items()
+            )
+            final_status = "FAILED" if unhandled_failure or selected_incomplete else "SUCCESS"
             run_error = "stopped by user" if task_cancel_event.is_set() else None
             self.database.finish_run(run_id, final_status, run_error)
             return run_id, final_status
@@ -139,6 +161,8 @@ class WorkflowRunner:
         order: list[str],
         states: dict[str, str],
         cancel_event: Event,
+        handled_failures: set[str],
+        benign_skips: set[str],
     ) -> None:
         order_index = {name: index for index, name in enumerate(order)}
         running: dict[Future, tuple[str, Path]] = {}
@@ -149,8 +173,9 @@ class WorkflowRunner:
         try:
             while any(state in {"PENDING", "RUNNING"} for state in states.values()):
                 self._resolve_unrunnable_tasks(
-                    workflow, run_id, order, states, cancel_event
+                    workflow, run_id, order, states, cancel_event, benign_skips
                 )
+                condition_evaluated = False
                 if not cancel_event.is_set():
                     for task_name in order:
                         if len(running) >= self.max_parallel_tasks:
@@ -158,8 +183,52 @@ class WorkflowRunner:
                         if states[task_name] != "PENDING":
                             continue
                         task = workflow.tasks[task_name]
-                        if not all(states[dependency] == "SUCCESS" for dependency in task.depends):
+                        if not all(
+                            states[dependency] in TERMINAL_TASK_STATES
+                            for dependency in task.depends
+                        ):
                             continue
+                        if task.is_condition:
+                            assert task.condition is not None
+                            self.database.set_task_status(run_id, task_name, "RUNNING")
+                            states[task_name] = "RUNNING"
+                            matched = task.condition.evaluate(states)
+                            decision = "success" if matched else "failure"
+                            self.database.set_task_status(
+                                run_id,
+                                task_name,
+                                "SUCCESS",
+                                condition_result=decision,
+                            )
+                            states[task_name] = "SUCCESS"
+                            for referenced in task.condition.referenced_tasks:
+                                if states[referenced] == "FAILED":
+                                    handled_failures.add(referenced)
+                                    self.database.mark_task_handled(
+                                        run_id, referenced, task_name
+                                    )
+                            unselected = task.failure if matched else task.success
+                            for target in unselected:
+                                if states[target] == "PENDING":
+                                    self._skip(
+                                        run_id,
+                                        target,
+                                        f"condition {task_name} selected {decision} branch",
+                                        states,
+                                        skip_kind="CONDITION_NOT_SELECTED",
+                                        benign_skips=benign_skips,
+                                    )
+                            condition_evaluated = True
+                            continue
+                        if task.depends and not any(
+                            states[dependency] == "SUCCESS"
+                            for dependency in task.depends
+                        ):
+                            continue
+                        if task.command is None:
+                            raise RuntimeError(
+                                f"command task {task_name!r} has no command"
+                            )
                         log_file = self.logs.path_for(
                             workflow.name, run_id, task_name
                         )
@@ -181,6 +250,8 @@ class WorkflowRunner:
                         running[future] = (task_name, log_file)
 
                 if not running:
+                    if condition_evaluated:
+                        continue
                     pending = [name for name in order if states[name] == "PENDING"]
                     if pending:
                         raise RuntimeError(
@@ -237,6 +308,7 @@ class WorkflowRunner:
         order: list[str],
         states: dict[str, str],
         cancel_event: Event,
+        benign_skips: set[str],
     ) -> None:
         changed = True
         while changed:
@@ -253,10 +325,33 @@ class WorkflowRunner:
                     self._skip(run_id, task_name, "task is disabled", states)
                     changed = True
                     continue
+                if task.is_condition:
+                    if not all(
+                        states[dependency] in TERMINAL_TASK_STATES
+                        for dependency in task.depends
+                    ):
+                        continue
+                    if task.depends and all(
+                        dependency in benign_skips for dependency in task.depends
+                    ):
+                        self._skip(
+                            run_id,
+                            task_name,
+                            "condition path was not selected",
+                            states,
+                            skip_kind="CONDITION_PATH_NOT_SELECTED",
+                            benign_skips=benign_skips,
+                        )
+                        changed = True
+                    continue
                 bad_dependencies = [
                     dependency
                     for dependency in task.depends
-                    if states[dependency] in {"FAILED", "SKIPPED"}
+                    if states[dependency] == "FAILED"
+                    or (
+                        states[dependency] == "SKIPPED"
+                        and dependency not in benign_skips
+                    )
                 ]
                 if bad_dependencies:
                     detail = ", ".join(
@@ -269,6 +364,24 @@ class WorkflowRunner:
                         states,
                     )
                     changed = True
+                    continue
+                if (
+                    task.depends
+                    and all(
+                        states[dependency] in TERMINAL_TASK_STATES
+                        for dependency in task.depends
+                    )
+                    and all(dependency in benign_skips for dependency in task.depends)
+                ):
+                    self._skip(
+                        run_id,
+                        task_name,
+                        "all dependency paths were not selected",
+                        states,
+                        skip_kind="CONDITION_PATH_NOT_SELECTED",
+                        benign_skips=benign_skips,
+                    )
+                    changed = True
 
     def _seed_resume(
         self,
@@ -279,12 +392,14 @@ class WorkflowRunner:
         previous,
         previous_states,
         states,
+        handled_failures,
+        benign_skips,
     ) -> None:
         for task_name in order:
             if task_name in selected:
                 continue
             old = previous_states.get(task_name)
-            if old is not None and old["status"] == "SUCCESS":
+            if old is not None and _is_reusable_previous_state(old):
                 log_file = old["log_file"]
                 if log_file:
                     try:
@@ -297,17 +412,25 @@ class WorkflowRunner:
                             )
                         )
                     except (OSError, ValueError):
-                        # Reusing successful state must not fail only because an old log is missing.
+                        # Reusing terminal state must not fail only because an old log is missing.
                         pass
                 self.database.set_task_status(
                     run_id,
                     task_name,
-                    "SUCCESS",
+                    old["status"],
                     exit_code=old["exit_code"],
                     log_file=log_file,
+                    error_message=old["error_message"],
                     reused_from_run_id=previous["run_id"],
+                    condition_result=old["condition_result"],
+                    handled_by=old["handled_by"],
+                    skip_kind=old["skip_kind"],
                 )
-                states[task_name] = "SUCCESS"
+                states[task_name] = old["status"]
+                if old["handled_by"]:
+                    handled_failures.add(task_name)
+                if old["skip_kind"] in CONDITION_SKIP_KINDS:
+                    benign_skips.add(task_name)
             else:
                 self._skip(
                     run_id,
@@ -316,9 +439,26 @@ class WorkflowRunner:
                     states,
                 )
 
-    def _skip(self, run_id: str, task_name: str, reason: str, states: dict[str, str]) -> None:
-        self.database.set_task_status(run_id, task_name, "SKIPPED", error_message=reason)
+    def _skip(
+        self,
+        run_id: str,
+        task_name: str,
+        reason: str,
+        states: dict[str, str],
+        *,
+        skip_kind: str | None = None,
+        benign_skips: set[str] | None = None,
+    ) -> None:
+        self.database.set_task_status(
+            run_id,
+            task_name,
+            "SKIPPED",
+            error_message=reason,
+            skip_kind=skip_kind,
+        )
         states[task_name] = "SKIPPED"
+        if skip_kind in CONDITION_SKIP_KINDS and benign_skips is not None:
+            benign_skips.add(task_name)
 
     def _notify(self, event: TaskEvent) -> None:
         try:
@@ -328,6 +468,17 @@ class WorkflowRunner:
                 self.notifier.on_task_failed(event)
         except Exception as exc:
             print(f"warning: notifier failed for {event.task_name}: {exc}", file=sys.stderr)
+
+
+def _is_reusable_previous_state(row) -> bool:
+    return (
+        row["status"] == "SUCCESS"
+        or (row["status"] == "FAILED" and bool(row["handled_by"]))
+        or (
+            row["status"] == "SKIPPED"
+            and row["skip_kind"] in CONDITION_SKIP_KINDS
+        )
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
