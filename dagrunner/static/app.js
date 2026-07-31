@@ -114,7 +114,7 @@ async function loadRuns() {
       const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.skipped_count || 0);
       const percent = r.task_count ? Math.round(complete * 100 / r.task_count) : 0;
       const actions = [`<button class="button ghost" onclick="showRun('${r.run_id}')">详情</button>`];
-      if (r.active) actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">停止</button>`);
+      if (r.status === "RUNNING") actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">停止</button>`);
       else {
         actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">重跑</button>`);
         if (r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" onclick="runAction('${r.run_id}','resume')">失败续跑</button>`);

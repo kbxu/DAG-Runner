@@ -152,10 +152,18 @@ class ExecutionService:
             print(f"workflow run {run_id} crashed: {exc}", file=sys.stderr)
 
     def stop_run(self, run_id: str) -> None:
+        run = self.database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        if run["status"] != "RUNNING":
+            raise ServiceError(f"run is not running: {run_id}")
         with self._lock:
             active = self._active.get(run_id)
             if active is None:
-                raise ServiceError(f"run is not active: {run_id}")
+                raise ServiceError(
+                    "run is not managed by this server process; restart recovery or stop "
+                    "the external process that started it"
+                )
             active.cancel_event.set()
 
     def rerun(self, run_id: str) -> str:
