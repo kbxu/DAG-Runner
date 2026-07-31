@@ -185,6 +185,8 @@ python -m dagrunner.migrate_workflows \
 `--source` 接受 `dolphinscheduler` 和 `windows-task-scheduler`。
 未传 `--output-dir` 时，转换结果写入源文件所在目录，默认文件名为
 `dagr_<源文件名>.yaml`；一个源文件包含多个工作流时，从第二个开始追加 `_2`、`_3`。
+迁移器会把 DolphinScheduler SHELL 脚本中的 CRLF/CR 换行统一为 LF，生成的
+YAML 文件也固定使用 LF，避免 Bash 执行时因残留 `\r` 报错。
 `--exclude-disabled` 会过滤 DolphinScheduler 禁用节点以及与这些节点相连的
 依赖边；不传时则保留禁用的 SHELL 节点。转换器支持 SHELL 节点、
 依赖、全局参数、启用状态和 timeout。DolphinScheduler 全局及无冲突的任务

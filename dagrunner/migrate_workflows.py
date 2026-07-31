@@ -56,6 +56,22 @@ def _converted_output_path(
     return output_dir / f"dagr_{source.stem}{suffix}.yaml"
 
 
+def _lf_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _write_yaml(destination: Path, config: dict[str, Any]) -> None:
+    content = yaml.dump(
+        config,
+        Dumper=LiteralDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        width=1000,
+    )
+    # Write bytes so Windows text-mode newline translation cannot restore CRLF.
+    destination.write_bytes(_lf_newlines(content).encode("utf-8"))
+
+
 def convert_dolphinscheduler_crontab(crontab: str) -> str:
     """Convert a DolphinScheduler Quartz cron into APScheduler's five fields."""
     fields = crontab.split()
@@ -112,16 +128,7 @@ def convert_dolphinscheduler_export(
         destination = _converted_output_path(
             source, output_dir, index, len(definitions)
         )
-        destination.write_text(
-            yaml.dump(
-                config,
-                Dumper=LiteralDumper,
-                allow_unicode=True,
-                sort_keys=False,
-                width=1000,
-            ),
-            encoding="utf-8",
-        )
+        _write_yaml(destination, config)
         written.append(destination)
         print(f"wrote {destination}")
         for warning in warnings:
@@ -151,16 +158,7 @@ def convert_windows_task_scheduler_export(
     written: list[Path] = []
     for index, config in enumerate(configs, start=1):
         destination = _converted_output_path(source, output_dir, index, len(configs))
-        destination.write_text(
-            yaml.dump(
-                config,
-                Dumper=LiteralDumper,
-                allow_unicode=True,
-                sort_keys=False,
-                width=1000,
-            ),
-            encoding="utf-8",
-        )
+        _write_yaml(destination, config)
         written.append(destination)
         print(f"wrote {destination}")
     for warning in warnings:
@@ -575,7 +573,7 @@ def convert_dolphinscheduler_definition(
         params = definition.get("taskParams") or {}
         task: dict[str, Any] = {
             "description": definition.get("name") or "",
-            "command": params.get("rawScript") or "true",
+            "command": _lf_newlines(str(params.get("rawScript") or "true")),
             "depends": [f"task_{dep}" for dep in sorted(dependencies[code])],
         }
         if definition.get("flag") == "NO" or code in disabled_by_condition:
@@ -599,7 +597,7 @@ def convert_dolphinscheduler_definition(
         except ValueError as exc:
             warnings.append(str(exc))
     combined_setup = "\n".join(
-        [*_environment_lines(setup_env, setup_shell), setup.strip()]
+        [*_environment_lines(setup_env, setup_shell), _lf_newlines(setup).strip()]
     ).strip()
     config: dict[str, Any] = {
         "name": workflow_name,
