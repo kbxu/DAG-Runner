@@ -7,7 +7,10 @@
   <link rel="icon" href="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='login.css') }}">
 </head>
-<body data-next-url="{{ next_url }}">
+<body
+  data-next-url="{{ next_url }}"
+  data-allow-insecure-remote-login="{{ 'true' if allow_insecure_remote_login else 'false' }}"
+>
   <main class="login-shell">
     <section class="login-card" aria-labelledby="loginTitle">
       <div class="login-brand">
@@ -26,7 +29,11 @@
         <p id="loginError" class="login-error" role="alert" aria-live="polite"></p>
         <button id="loginButton" type="submit">登录</button>
       </form>
+      {% if allow_insecure_remote_login %}
+      <p class="login-note">已允许通过 HTTP 从局域网登录。登录状态默认保持 36 小时，请勿将服务暴露到公网。</p>
+      {% else %}
       <p class="login-note">登录状态默认保持 36 小时。请通过 HTTPS 访问非本机部署。</p>
+      {% endif %}
     </section>
   </main>
   <script src="{{ url_for('static', filename='login.js') }}"></script>

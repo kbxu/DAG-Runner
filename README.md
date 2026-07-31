@@ -64,7 +64,8 @@ PBKDF2-HMAC-SHA256（600,000 次迭代）生成数据库校验值。前端摘要
 密码凭据，不能代替传输加密；非本机部署必须启用 HTTPS，并设置
 `DAGRUNNER_COOKIE_SECURE=1`，确保会话 Cookie 只通过 HTTPS 发送。确需在可信局域网中
 使用 HTTP 时，可同时指定 `--host 0.0.0.0 --allow-insecure-remote-login`；该参数会允许
-HTTP 会话 Cookie，即使设置了 `DAGRUNNER_COOKIE_SECURE=1`，也不应在公网环境中使用。
+HTTP 会话 Cookie，并在浏览器 Web Crypto 不可用时启用页面内置的 SHA-256 实现。即使
+设置了 `DAGRUNNER_COOKIE_SECURE=1`，该模式也允许 HTTP 登录，因此不应在公网环境中使用。
 
 ## 定义工作流
 

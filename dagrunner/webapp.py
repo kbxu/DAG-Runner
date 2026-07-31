@@ -101,7 +101,9 @@ def create_app(
         if auth.authenticate(request.cookies.get(SESSION_COOKIE)):
             return redirect(_safe_next(request.args.get("next")))
         return render_template(
-            "login.html", next_url=_safe_next(request.args.get("next"))
+            "login.html",
+            next_url=_safe_next(request.args.get("next")),
+            allow_insecure_remote_login=allow_insecure_remote_login,
         )
 
     @app.post("/api/auth/login")
