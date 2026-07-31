@@ -16,12 +16,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument(
+        "--allow-insecure-remote-login",
+        action="store_true",
+        help=(
+            "allow non-local clients to keep login sessions over HTTP; "
+            "use only on a trusted network"
+        ),
+    )
     args = parser.parse_args(argv)
     app = create_app(
         database_path=args.db,
         logs_path=args.logs,
+        allow_insecure_remote_login=args.allow_insecure_remote_login,
     )
     print(f"dag-runner service listening on http://{args.host}:{args.port}")
+    if args.allow_insecure_remote_login:
+        print("warning: insecure remote HTTP login is enabled")
     serve(app, host=args.host, port=args.port, threads=args.threads)
     return 0
 

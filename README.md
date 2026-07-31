@@ -43,6 +43,7 @@ python -m dagrunner.server
 | `--db` | `var/scheduler.db` | SQLite 数据库文件路径 |
 | `--logs` | `var/logs` | 工作流和任务日志目录 |
 | `--threads` | `8` | 任务执行线程池大小 |
+| `--allow-insecure-remote-login` | 关闭 | 允许非本机客户端通过 HTTP 保持登录，仅建议在可信局域网临时使用 |
 
 例如，允许局域网访问并使用自定义数据目录：
 
@@ -52,7 +53,8 @@ python -m dagrunner.server \
   --port 7119 \
   --db var/scheduler.db \
   --logs var/logs \
-  --threads 8
+  --threads 8 \
+  --allow-insecure-remote-login
 ```
 
 启动后访问 <http://127.0.0.1:7119>。数据库表会在服务启动时自动创建，无需手工建表。
@@ -60,7 +62,9 @@ python -m dagrunner.server \
 Web 登录的密码会先在浏览器中计算 SHA-256，再由后端使用随机盐和
 PBKDF2-HMAC-SHA256（600,000 次迭代）生成数据库校验值。前端摘要仍然属于可重放的
 密码凭据，不能代替传输加密；非本机部署必须启用 HTTPS，并设置
-`DAGRUNNER_COOKIE_SECURE=1`，确保会话 Cookie 只通过 HTTPS 发送。
+`DAGRUNNER_COOKIE_SECURE=1`，确保会话 Cookie 只通过 HTTPS 发送。确需在可信局域网中
+使用 HTTP 时，可同时指定 `--host 0.0.0.0 --allow-insecure-remote-login`；该参数会允许
+HTTP 会话 Cookie，即使设置了 `DAGRUNNER_COOKIE_SECURE=1`，也不应在公网环境中使用。
 
 ## 定义工作流
 

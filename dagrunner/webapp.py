@@ -26,6 +26,7 @@ def create_app(
     database_path="var/scheduler.db",
     logs_path="var/logs",
     start_scheduler: bool = True,
+    allow_insecure_remote_login: bool = False,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     database = StateDatabase(database_path)
@@ -144,7 +145,7 @@ def create_app(
             max_age=SESSION_HOURS * 3600,
             expires=result.expires_at,
             httponly=True,
-            secure=_secure_cookie_enabled(),
+            secure=_secure_cookie_enabled(allow_insecure_remote_login),
             samesite="Strict",
             path="/",
         )
@@ -158,7 +159,7 @@ def create_app(
             SESSION_COOKIE,
             path="/",
             httponly=True,
-            secure=_secure_cookie_enabled(),
+            secure=_secure_cookie_enabled(allow_insecure_remote_login),
             samesite="Strict",
         )
         return response
@@ -482,6 +483,9 @@ def _safe_next(value) -> str:
     return candidate
 
 
-def _secure_cookie_enabled() -> bool:
+def _secure_cookie_enabled(allow_insecure_remote_login: bool = False) -> bool:
     configured = os.getenv("DAGRUNNER_COOKIE_SECURE", "").strip().lower()
-    return request.is_secure or configured in {"1", "true", "yes", "on"}
+    return request.is_secure or (
+        not allow_insecure_remote_login
+        and configured in {"1", "true", "yes", "on"}
+    )
