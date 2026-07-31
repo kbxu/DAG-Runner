@@ -6,6 +6,7 @@ import os
 import sys
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -29,11 +30,15 @@ class WorkflowRunner:
         logs: TaskLogManager,
         executor: TaskExecutor | None = None,
         notifier: Notifier | None = None,
+        max_parallel_tasks: int = 4,
     ):
+        if max_parallel_tasks <= 0:
+            raise ValueError("max_parallel_tasks must be positive")
         self.database = database
         self.logs = logs
         self.executor = executor or TaskExecutor()
         self.notifier = notifier or NullNotifier()
+        self.max_parallel_tasks = max_parallel_tasks
 
     def run(
         self,
@@ -43,13 +48,33 @@ class WorkflowRunner:
         run_id: str | None = None,
         trigger_type: str = "manual",
         cancel_event: Event | None = None,
+        resume_run_id: str | None = None,
     ) -> tuple[str, str]:
+        if from_task and resume_run_id:
+            raise WorkflowError("from_task and resume_run_id cannot be used together")
         order = workflow.topological_order()
-        previous = self.database.latest_run(workflow.name) if from_task else None
-        if from_task and previous is None:
+        previous = (
+            self.database.get_run(resume_run_id)
+            if resume_run_id
+            else self.database.latest_run(workflow.name) if from_task else None
+        )
+        if (from_task or resume_run_id) and previous is None:
             raise WorkflowError(f"cannot resume {workflow.name!r}: no previous run exists")
-        selected = workflow.descendants(from_task) if from_task else set(order)
+        if previous and previous["workflow_name"] != workflow.name:
+            raise WorkflowError(
+                f"run {previous['run_id']!r} belongs to workflow "
+                f"{previous['workflow_name']!r}, not {workflow.name!r}"
+            )
         previous_states = self.database.task_states(previous["run_id"]) if previous else {}
+        if resume_run_id:
+            selected = {
+                name
+                for name in order
+                if name not in previous_states
+                or previous_states[name]["status"] != "SUCCESS"
+            }
+        else:
+            selected = workflow.descendants(from_task) if from_task else set(order)
         run_id = run_id or new_run_id()
         self.database.create_run(
             run_id,
@@ -58,73 +83,42 @@ class WorkflowRunner:
             resumed_from_run_id=previous["run_id"] if previous else None,
             from_task=from_task,
             trigger_type=trigger_type,
+            task_metadata={
+                name: (workflow.tasks[name].description, workflow.tasks[name].depends)
+                for name in order
+            },
         )
         states = {name: "PENDING" for name in order}
+        task_cancel_event = cancel_event or Event()
 
         try:
-            if from_task:
-                self._seed_resume(run_id, order, selected, previous, previous_states, states)
-            for task_name in order:
-                if states[task_name] != "PENDING":
-                    continue
-                if cancel_event and cancel_event.is_set():
-                    self._skip(run_id, task_name, "run stopped by user", states)
-                    continue
-                task = workflow.tasks[task_name]
-                if not task.enabled:
-                    self._skip(run_id, task_name, "task is disabled", states)
-                    continue
-                bad_dependencies = [
-                    dependency for dependency in task.depends if states[dependency] != "SUCCESS"
-                ]
-                if bad_dependencies:
-                    detail = ", ".join(
-                        f"{name}={states[name]}" for name in bad_dependencies
-                    )
-                    self._skip(run_id, task_name, f"dependency not successful: {detail}", states)
-                    continue
-                log_file = self.logs.path_for(workflow.name, run_id, task_name)
-                self.database.set_task_status(
-                    run_id, task_name, "RUNNING", log_file=str(log_file)
-                )
-                states[task_name] = "RUNNING"
-                result = self.executor.execute(
-                    task,
-                    cwd=workflow.task_cwd(task),
-                    workflow_env=workflow.env,
-                    workflow_setup=workflow.setup_for_current_platform(),
-                    log_file=log_file,
-                    cancel_event=cancel_event,
-                )
-                status = "SUCCESS" if result.exit_code == 0 else "FAILED"
-                self.database.set_task_status(
+            if previous:
+                self._seed_resume(
                     run_id,
-                    task_name,
-                    status,
-                    exit_code=result.exit_code,
-                    log_file=str(log_file),
-                    error_message=result.error_message,
+                    workflow.name,
+                    order,
+                    selected,
+                    previous,
+                    previous_states,
+                    states,
                 )
-                states[task_name] = status
-                event = TaskEvent(
-                    workflow_name=workflow.name,
-                    run_id=run_id,
-                    task_name=task_name,
-                    status=status,
-                    log_file=str(log_file),
-                    exit_code=result.exit_code,
-                    error_message=result.error_message,
-                )
-                self._notify(event)
+            self._run_tasks(
+                workflow,
+                run_id,
+                order,
+                states,
+                task_cancel_event,
+            )
 
             selected_incomplete = any(
                 states[name] != "SUCCESS" and workflow.tasks[name].enabled for name in selected
             )
             final_status = "FAILED" if "FAILED" in states.values() or selected_incomplete else "SUCCESS"
-            run_error = "stopped by user" if cancel_event and cancel_event.is_set() else None
+            run_error = "stopped by user" if task_cancel_event.is_set() else None
             self.database.finish_run(run_id, final_status, run_error)
             return run_id, final_status
         except BaseException as exc:
+            task_cancel_event.set()
             # Persist a truthful terminal state even for Ctrl-C or an unexpected notifier/DB error.
             for name, state in states.items():
                 if state == "RUNNING":
@@ -138,18 +132,179 @@ class WorkflowRunner:
             self.database.finish_run(run_id, "FAILED", str(exc))
             raise
 
-    def _seed_resume(self, run_id, order, selected, previous, previous_states, states) -> None:
+    def _run_tasks(
+        self,
+        workflow: Workflow,
+        run_id: str,
+        order: list[str],
+        states: dict[str, str],
+        cancel_event: Event,
+    ) -> None:
+        order_index = {name: index for index, name in enumerate(order)}
+        running: dict[Future, tuple[str, Path]] = {}
+        pool = ThreadPoolExecutor(
+            max_workers=self.max_parallel_tasks,
+            thread_name_prefix="dag-task",
+        )
+        try:
+            while any(state in {"PENDING", "RUNNING"} for state in states.values()):
+                self._resolve_unrunnable_tasks(
+                    workflow, run_id, order, states, cancel_event
+                )
+                if not cancel_event.is_set():
+                    for task_name in order:
+                        if len(running) >= self.max_parallel_tasks:
+                            break
+                        if states[task_name] != "PENDING":
+                            continue
+                        task = workflow.tasks[task_name]
+                        if not all(states[dependency] == "SUCCESS" for dependency in task.depends):
+                            continue
+                        log_file = self.logs.path_for(
+                            workflow.name, run_id, task_name
+                        )
+                        self.database.set_task_status(
+                            run_id,
+                            task_name,
+                            "RUNNING",
+                            log_file=str(log_file),
+                        )
+                        states[task_name] = "RUNNING"
+                        future = pool.submit(
+                            self.executor.execute,
+                            task,
+                            cwd=workflow.task_cwd(task),
+                            workflow_setup=workflow.setup_for_current_platform(),
+                            log_file=log_file,
+                            cancel_event=cancel_event,
+                        )
+                        running[future] = (task_name, log_file)
+
+                if not running:
+                    pending = [name for name in order if states[name] == "PENDING"]
+                    if pending:
+                        raise RuntimeError(
+                            f"no runnable tasks remain: {', '.join(pending)}"
+                        )
+                    break
+
+                completed, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in sorted(
+                    completed, key=lambda item: order_index[running[item][0]]
+                ):
+                    task_name, log_file = running.pop(future)
+                    try:
+                        result = future.result()
+                        status = "SUCCESS" if result.exit_code == 0 else "FAILED"
+                        exit_code = result.exit_code
+                        error_message = result.error_message
+                    except Exception as exc:
+                        status = "FAILED"
+                        exit_code = None
+                        error_message = f"task executor crashed: {exc}"
+                    self.database.set_task_status(
+                        run_id,
+                        task_name,
+                        status,
+                        exit_code=exit_code,
+                        log_file=str(log_file),
+                        error_message=error_message,
+                    )
+                    states[task_name] = status
+                    self._notify(
+                        TaskEvent(
+                            workflow_name=workflow.name,
+                            run_id=run_id,
+                            task_name=task_name,
+                            status=status,
+                            log_file=str(log_file),
+                            exit_code=exit_code,
+                            error_message=error_message,
+                        )
+                    )
+        except BaseException:
+            cancel_event.set()
+            for future in running:
+                future.cancel()
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def _resolve_unrunnable_tasks(
+        self,
+        workflow: Workflow,
+        run_id: str,
+        order: list[str],
+        states: dict[str, str],
+        cancel_event: Event,
+    ) -> None:
+        changed = True
+        while changed:
+            changed = False
+            for task_name in order:
+                if states[task_name] != "PENDING":
+                    continue
+                if cancel_event.is_set():
+                    self._skip(run_id, task_name, "run stopped by user", states)
+                    changed = True
+                    continue
+                task = workflow.tasks[task_name]
+                if not task.enabled:
+                    self._skip(run_id, task_name, "task is disabled", states)
+                    changed = True
+                    continue
+                bad_dependencies = [
+                    dependency
+                    for dependency in task.depends
+                    if states[dependency] in {"FAILED", "SKIPPED"}
+                ]
+                if bad_dependencies:
+                    detail = ", ".join(
+                        f"{name}={states[name]}" for name in bad_dependencies
+                    )
+                    self._skip(
+                        run_id,
+                        task_name,
+                        f"dependency not successful: {detail}",
+                        states,
+                    )
+                    changed = True
+
+    def _seed_resume(
+        self,
+        run_id,
+        workflow_name,
+        order,
+        selected,
+        previous,
+        previous_states,
+        states,
+    ) -> None:
         for task_name in order:
             if task_name in selected:
                 continue
             old = previous_states.get(task_name)
             if old is not None and old["status"] == "SUCCESS":
+                log_file = old["log_file"]
+                if log_file:
+                    try:
+                        log_file = str(
+                            self.logs.copy_for_run(
+                                log_file,
+                                workflow_name,
+                                run_id,
+                                task_name,
+                            )
+                        )
+                    except (OSError, ValueError):
+                        # Reusing successful state must not fail only because an old log is missing.
+                        pass
                 self.database.set_task_status(
                     run_id,
                     task_name,
                     "SUCCESS",
                     exit_code=old["exit_code"],
-                    log_file=old["log_file"],
+                    log_file=log_file,
                     reused_from_run_id=previous["run_id"],
                 )
                 states[task_name] = "SUCCESS"
@@ -176,13 +331,11 @@ class WorkflowRunner:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a single-host YAML DAG workflow")
-    parser.add_argument("--workflow", help="workflow name (loads workflows/<name>.yaml)")
-    parser.add_argument("--config", type=Path, help="explicit workflow YAML path")
+    parser = argparse.ArgumentParser(description="Run a database-backed DAG workflow")
+    parser.add_argument("--workflow", help="imported workflow ID, for example workflow_000001")
     parser.add_argument("--from", dest="from_task", help="rerun this task and its descendants")
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
-    parser.add_argument("--config-dir", type=Path, default=Path("workflows"))
     parser.add_argument("--list-runs", action="store_true", help="show persisted workflow runs")
     parser.add_argument("--status", action="store_true", help="show tasks for --run-id")
     parser.add_argument("--show-log", action="store_true", help="print log for --run-id and --task")
@@ -206,16 +359,16 @@ def main(argv: list[str] | None = None) -> int:
             _print_rows(database.list_runs(args.workflow, args.limit), RUN_COLUMNS)
             return 0
 
-        workflow_path = args.config or (
-            args.config_dir / f"{args.workflow}.yaml" if args.workflow else None
+        if not args.workflow:
+            raise WorkflowError("provide --workflow with an imported workflow ID")
+        stored = database.get_workflow(args.workflow)
+        if stored is None:
+            raise WorkflowError(f"workflow not found: {args.workflow}")
+        workflow = Workflow.from_yaml(
+            stored["definition"],
+            name_override=stored["workflow_key"],
+            description_override=stored["name"],
         )
-        if workflow_path is None:
-            raise WorkflowError("provide --workflow or --config")
-        workflow = Workflow.load(workflow_path)
-        if args.workflow and workflow.name != args.workflow:
-            raise WorkflowError(
-                f"requested workflow {args.workflow!r}, but config declares {workflow.name!r}"
-            )
         lock_path = args.db.resolve().parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             recovered = database.mark_orphaned(workflow.name)

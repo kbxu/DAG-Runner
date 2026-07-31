@@ -1,0 +1,24 @@
+name: wts_MarketReport
+description: 每日市场报告示例
+tasks:
+  action_1:
+    description: 执行 python.exe
+    command:
+    - C:\Tools\Python\python.exe
+    - C:\Example Jobs\market_report.py
+    - --mode
+    - demo
+    depends: []
+    cwd: C:\Example Jobs
+    timeout: 1800
+schedule:
+  cron: 15 18 * * mon,tue,wed,thu,fri
+  timezone: Asia/Shanghai
+  enabled: false
+migration:
+  source: windows-task-scheduler
+  source_uri: \Examples\MarketReport
+  source_author: EXAMPLE\demo-user
+  source_enabled: true
+  source_trigger_type: CalendarTrigger
+  requires_manual_review: true

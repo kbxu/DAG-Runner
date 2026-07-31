@@ -20,7 +20,7 @@
     <section class="panel">
       <div class="panel-head">
         <div><h2>工作流与定时</h2><p>查看任务 DAG，配置 cron，或立即发起运行</p></div>
-        <button class="button ghost" onclick="loadWorkflows()">刷新配置</button>
+        <div class="panel-actions"><button class="button" onclick="openImportWorkflow()">导入工作流</button><button class="button ghost" onclick="loadWorkflows()">刷新</button></div>
       </div>
       <div class="table-wrap">
         <table>
@@ -49,6 +49,28 @@
     <div class="modal-card">
       <div class="modal-head"><h3 id="modalTitle"></h3><button class="icon-button" onclick="closeModal()">×</button></div>
       <div id="modalBody" class="modal-body"></div>
+    </div>
+  </div>
+  <div id="logModal" class="modal log-modal hidden" onclick="closeLogModalFromBackdrop(event)">
+    <div class="modal-card log-modal-card">
+      <div class="modal-head">
+        <h3 id="logModalTitle"></h3>
+        <div class="modal-head-actions">
+          <button class="button ghost" onclick="copyLog()">复制日志</button>
+          <button class="icon-button" onclick="closeLogModal()">×</button>
+        </div>
+      </div>
+      <div class="modal-body"><pre id="logContent"></pre></div>
+    </div>
+  </div>
+  <div id="deleteConfirmModal" class="modal confirm-modal hidden" onclick="closeDeleteConfirmFromBackdrop(event)">
+    <div class="confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="deleteConfirmTitle">
+      <h3 id="deleteConfirmTitle"></h3>
+      <p id="deleteConfirmMessage"></p>
+      <div class="confirm-actions">
+        <button class="button ghost" onclick="resolveDeleteConfirm(false)">取消</button>
+        <button class="button danger" onclick="resolveDeleteConfirm(true)">确认删除</button>
+      </div>
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>

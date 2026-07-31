@@ -16,6 +16,83 @@ class WorkflowError(ValueError):
     """Raised when a workflow definition is invalid."""
 
 
+def migrate_legacy_env(content: str) -> tuple[str, bool]:
+    """Promote legacy workflow/task env mappings into setup."""
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return content, False
+    if not isinstance(data, dict):
+        return content, False
+    had_legacy_env = "env" in data
+    values = data.pop("env", {}) or {}
+    if not isinstance(values, dict):
+        return content, False
+    values = {str(name): str(value) for name, value in values.items()}
+    tasks = data.get("tasks") or {}
+    if isinstance(tasks, dict):
+        for task_name, task in tasks.items():
+            if not isinstance(task, dict) or "env" not in task:
+                continue
+            had_legacy_env = True
+            task_values = task.pop("env") or {}
+            if not isinstance(task_values, dict):
+                raise WorkflowError(f"task {task_name!r} env must be a mapping")
+            for name, value in task_values.items():
+                name, value = str(name), str(value)
+                if name in values and values[name] != value:
+                    raise WorkflowError(
+                        f"legacy env {name!r} has conflicting values; migrate it manually"
+                    )
+                values[name] = value
+    if not values and not had_legacy_env:
+        return content, False
+    if not values:
+        return yaml.safe_dump(
+            data, allow_unicode=True, sort_keys=False, width=1000
+        ), True
+
+    def assignments(shell: str) -> str:
+        lines = []
+        for name, value in values.items():
+            escaped = value.replace("'", "''" if shell == "powershell" else "'\"'\"'")
+            lines.append(
+                f"$env:{name} = '{escaped}'"
+                if shell == "powershell"
+                else f"export {name}='{escaped}'"
+            )
+        return "\n".join(lines)
+
+    setup = data.get("setup")
+    if isinstance(setup, dict):
+        if setup:
+            updated = dict(setup)
+            for platform, script in setup.items():
+                shell = "powershell" if platform == "windows" else "bash"
+                updated[platform] = "\n".join((assignments(shell), str(script).strip())).strip()
+        else:
+            updated = {
+                "linux": assignments("bash"),
+                "windows": assignments("powershell"),
+            }
+        data["setup"] = updated
+    elif isinstance(setup, str) and setup.strip():
+        shell = (
+            "powershell"
+            if "$env:" in setup or "Set-Location" in setup
+            else "bash"
+        )
+        data["setup"] = "\n".join((assignments(shell), setup.strip())).strip()
+    else:
+        data["setup"] = {
+            "linux": assignments("bash"),
+            "windows": assignments("powershell"),
+        }
+    return yaml.safe_dump(
+        data, allow_unicode=True, sort_keys=False, width=1000
+    ), True
+
+
 @dataclass(frozen=True)
 class Task:
     name: str
@@ -23,7 +100,6 @@ class Task:
     depends: tuple[str, ...] = ()
     args: tuple[str, ...] = ()
     cwd: str | None = None
-    env: dict[str, str] = field(default_factory=dict)
     timeout: int | None = None
     enabled: bool = True
     description: str = ""
@@ -40,8 +116,7 @@ class ScheduleDefinition:
 class Workflow:
     name: str
     tasks: dict[str, Task]
-    workdir: Path
-    env: dict[str, str] = field(default_factory=dict)
+    config_dir: Path = field(default_factory=Path.cwd, repr=False, compare=False)
     setup: str | dict[str, str] = ""
     schedule: ScheduleDefinition | None = None
     description: str = ""
@@ -50,15 +125,35 @@ class Workflow:
     def load(cls, path: str | Path) -> "Workflow":
         config_path = Path(path).resolve()
         try:
-            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            content = config_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise WorkflowError(f"cannot read workflow file {config_path}: {exc}") from exc
+        return cls.from_yaml(content, config_dir=config_path.parent, fallback_name=config_path.stem)
+
+    @classmethod
+    def from_yaml(
+        cls,
+        content: str,
+        *,
+        config_dir: str | Path | None = None,
+        fallback_name: str = "imported_workflow",
+        name_override: str | None = None,
+        description_override: str | None = None,
+    ) -> "Workflow":
+        try:
+            data = yaml.safe_load(content)
         except yaml.YAMLError as exc:
-            raise WorkflowError(f"invalid YAML in {config_path}: {exc}") from exc
+            raise WorkflowError(f"invalid workflow YAML: {exc}") from exc
 
         if not isinstance(data, dict):
             raise WorkflowError("workflow YAML must be a mapping")
-        name = data.get("name") or config_path.stem
+        if "workdir" in data:
+            raise WorkflowError(
+                "workflow 'workdir' is no longer supported; change directories in 'setup'"
+            )
+        if "env" in data:
+            raise WorkflowError("workflow 'env' is no longer supported; define variables in 'setup'")
+        name = name_override or data.get("name") or fallback_name
         if not isinstance(name, str) or not name.strip():
             raise WorkflowError("workflow 'name' must be a non-empty string")
         if not _IDENTIFIER.fullmatch(name):
@@ -77,6 +172,10 @@ class Workflow:
                 )
             if not isinstance(raw, dict):
                 raise WorkflowError(f"task {task_name!r} must be a mapping")
+            if "env" in raw:
+                raise WorkflowError(
+                    f"task {task_name!r} env is no longer supported; define variables in setup or command"
+                )
             command = raw.get("command")
             if isinstance(command, list) and all(isinstance(x, str) for x in command):
                 command = tuple(command)
@@ -93,26 +192,22 @@ class Workflow:
                 depends=depends,
                 args=args,
                 cwd=_optional_string(raw.get("cwd"), task_name, "cwd"),
-                env=_string_dict(raw.get("env", {}), f"task {task_name!r} env"),
                 timeout=timeout,
                 enabled=bool(raw.get("enabled", True)),
                 description=str(raw.get("description", "")),
             )
 
-        workdir_value = data.get("workdir", ".")
-        if not isinstance(workdir_value, str):
-            raise WorkflowError("workflow 'workdir' must be a string")
-        workdir = Path(workdir_value)
-        if not workdir.is_absolute():
-            workdir = (config_path.parent / workdir).resolve()
         workflow = cls(
             name=name,
             tasks=tasks,
-            workdir=workdir,
-            env=_string_dict(data.get("env", {}), "workflow env"),
+            config_dir=Path(config_dir or Path.cwd()).resolve(),
             setup=_setup_value(data.get("setup", "")),
             schedule=_schedule_value(data.get("schedule")),
-            description=str(data.get("description", "")),
+            description=(
+                description_override
+                if description_override is not None
+                else str(data.get("description", ""))
+            ),
         )
         workflow.topological_order()  # Validate references and cycles now.
         return workflow
@@ -162,9 +257,9 @@ class Workflow:
 
     def task_cwd(self, task: Task) -> Path:
         if not task.cwd:
-            return self.workdir
+            return self.config_dir
         value = Path(task.cwd)
-        return value if value.is_absolute() else (self.workdir / value).resolve()
+        return value if value.is_absolute() else (self.config_dir / value).resolve()
 
     def setup_for_current_platform(self) -> str:
         if isinstance(self.setup, str):
@@ -177,12 +272,6 @@ def _string_tuple(value: Any, task_name: str, field_name: str) -> tuple[str, ...
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise WorkflowError(f"task {task_name!r} {field_name} must be a list of strings")
     return tuple(value)
-
-
-def _string_dict(value: Any, label: str) -> dict[str, str]:
-    if not isinstance(value, dict):
-        raise WorkflowError(f"{label} must be a mapping")
-    return {str(key): str(item) for key, item in value.items()}
 
 
 def _optional_string(value: Any, task_name: str, field_name: str) -> str | None:

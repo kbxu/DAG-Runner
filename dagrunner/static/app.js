@@ -4,7 +4,8 @@ let serviceState = "checking";
 async function api(url, options = {}) {
   let response;
   try {
-    response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
+    const headers = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
+    response = await fetch(url, { headers, ...options });
     setServiceStatus("online");
   } catch (cause) {
     setServiceStatus("offline");
@@ -30,7 +31,57 @@ function setServiceStatus(status) {
 }
 
 function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c])); }
-function fmt(value) { if (!value) return "—"; const d = new Date(value); return Number.isNaN(d.valueOf()) ? esc(value) : d.toLocaleString(); }
+function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"); }
+function namedId(name, id) { return name && name !== id ? `${name}（${id}）` : id; }
+function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
+const usefulTopKeys = new Set(["description", "setup", "tasks"]);
+const usefulTaskKeys = new Set(["description", "command", "depends", "args", "cwd", "timeout", "enabled"]);
+function yamlEditor(id, value, includeSchedule=false) {
+  return `<div class="yaml-editor"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div>`;
+}
+function highlightShellVariables(text) {
+  const source=String(text), pattern=/(\$env:[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\b[A-Z_][A-Z0-9_]*(?=\s*=))/g;
+  let result="", cursor=0;
+  for (const match of source.matchAll(pattern)) {
+    result+=esc(source.slice(cursor,match.index));
+    result+=`<span class="yaml-useful-var">${esc(match[0])}</span>`;
+    cursor=match.index+match[0].length;
+  }
+  return result+esc(source.slice(cursor));
+}
+function highlightUsefulYaml(value, includeSchedule=false) {
+  let topSection="", taskField="";
+  return String(value).split("\n").map(line => {
+    const match=line.match(/^(\s*)([^#\s][^:]*):(.*)$/);
+    if (!match) return highlightShellVariables(line);
+    const indent=match[1].replace(/\t/g,"  ").length;
+    const rawKey=match[2], key=rawKey.trim().replace(/^(['"])(.*)\1$/,"$2");
+    if (indent===0) { topSection=key; taskField=""; }
+    if (topSection==="tasks" && indent===4) taskField=key;
+    const useful =
+      (indent===0 && usefulTopKeys.has(key)) ||
+      (topSection==="tasks" && indent===2) ||
+      (topSection==="tasks" && indent===4 && usefulTaskKeys.has(key)) ||
+      (topSection==="setup" && indent===2 && ["linux","windows","default"].includes(key)) ||
+      (includeSchedule && indent===0 && key==="schedule") ||
+      (includeSchedule && topSection==="schedule" && indent===2 && ["cron","timezone","enabled"].includes(key));
+    if (!useful) return highlightShellVariables(line);
+    return `${esc(match[1])}<span class="yaml-useful-key">${esc(rawKey)}</span>:${highlightShellVariables(match[3])}`;
+  }).join("\n");
+}
+function syncYamlHighlight(id) {
+  const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
+  if (input && highlight) { highlight.innerHTML=`${highlightUsefulYaml(input.value,input.dataset.includeSchedule==="true")}\n`; syncYamlScroll(id); }
+}
+function syncYamlScroll(id) {
+  const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
+  if (input && highlight) { highlight.scrollTop=input.scrollTop; highlight.scrollLeft=input.scrollLeft; }
+}
+function fmt(value) {
+  if (!value) return "—";
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  return match ? `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}:${match[6]}` : esc(value);
+}
 function duration(start, end) { if (!start) return "—"; const seconds = Math.max(0, (new Date(end || Date.now()) - new Date(start)) / 1000); return seconds < 60 ? `${Math.round(seconds)} 秒` : `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`; }
 function statusBadge(status) { return `<span class="badge ${esc(status)}">${esc(status)}</span>`; }
 
@@ -46,9 +97,9 @@ async function loadWorkflows() {
         <td><span class="badge ${s.enabled ? "enabled" : "disabled"}">${s.enabled ? "已启用" : "未启用"}</span></td>
         <td><div class="mono">${esc(s.cron || "未配置")}</div><div class="secondary">${esc(s.timezone)}</div></td>
         <td>${fmt(s.next_run_time)}</td>
-        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button><button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button></div></td>
+        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">编辑</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button><button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">删除</button></div></td>
       </tr>`;
-    }).join("") || `<tr><td colspan="6" class="empty">没有找到 YAML 工作流</td></tr>`;
+    }).join("") || `<tr><td colspan="6" class="empty">还没有导入工作流</td></tr>`;
     const errors = Object.entries(data.config_errors || {});
     const box = document.getElementById("configErrors");
     box.classList.toggle("hidden", !errors.length);
@@ -67,27 +118,96 @@ async function loadRuns() {
       else {
         actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">重跑</button>`);
         if (r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" onclick="runAction('${r.run_id}','resume')">失败续跑</button>`);
+        actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">删除</button>`);
       }
-      return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td class="primary">${esc(r.workflow_name)}</td><td>${esc(r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · 成功 ${r.success_count || 0}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td><div class="primary">${esc(r.workflow_description || r.workflow_name)}</div><div class="workflow-id mono">${esc(r.workflow_name)}</div></td><td>${esc(r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · 成功 ${r.success_count || 0}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">还没有运行记录</td></tr>`;
   } catch (error) { if (!error.offline) toast(error.message, true); }
 }
 
 async function runWorkflow(name) { try { const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:"{}"}); toast(`已提交 ${r.run_id}`); setTimeout(loadRuns, 250); } catch(e) { toast(e.message, true); } }
+let pendingImportFilename = "workflow.yaml";
+function openImportWorkflow() {
+  const input=document.createElement("input");
+  input.type="file"; input.accept=".yaml,.yml,text/yaml";
+  input.onchange=async () => {
+    const file=input.files[0]; if (!file) return;
+    pendingImportFilename=file.name;
+    try {
+      const [definition,nextId]=await Promise.all([file.text(),api("/api/workflows/next-id")]);
+      openModal("导入并编辑工作流", `<div class="form-stack"><label>拟分配 ID<input value="${esc(nextId.id)}" readonly></label><label>工作流 YAML${yamlEditor("importDefinition",definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">高亮字段</i>会在导入或运行时使用；中文名称取自 description。顶层 name 和 migration 仅作来源信息，导入后的定时由数据库单独管理。</span><button class="button" onclick="submitImportWorkflow()">导入</button></div>`, false);
+    } catch(e) { toast(`读取文件失败：${e.message}`,true); }
+  };
+  input.click();
+}
+async function submitImportWorkflow() {
+  const definition=document.getElementById("importDefinition").value;
+  const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
+  const form=new FormData(); form.append("file",file);
+  try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); toast(`已导入 ${result.name}（${result.id}）`); await loadWorkflows(); } catch(e) { toast(e.message,true); }
+}
+async function editWorkflow(name) {
+  const workflow=state.workflows.get(name); if (!workflow || workflow.schedule.enabled) return toast("请先下线定时",true);
+  try {
+    const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
+    openModal(`${namedId(workflow.description,name)} · 编辑`, `<div class="form-stack"><label>工作流 ID<input value="${esc(name)}" readonly></label><label>工作流 YAML${yamlEditor("workflowDefinition",definition)}</label><span class="form-hint"><i class="yaml-key-sample">高亮字段</i>会被运行时使用；顶层 name、migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>保存</button></div>`, false);
+  } catch(e) { toast(e.message,true); }
+}
+async function saveWorkflow(name) {
+  try {
+    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:document.getElementById("workflowDefinition").value})});
+    closeModal(); toast("工作流已更新"); await loadWorkflows();
+  } catch(e) { toast(e.message,true); }
+}
 async function runAction(id, action) { if (action === "stop" && !confirm("确定停止这个运行实例？当前子进程会被终止。")) return; try { const r = await api(`/api/runs/${encodeURIComponent(id)}/${action}`, {method:"POST", body:"{}"}); toast(action === "stop" ? "已发送停止请求" : `已提交新运行 ${r.run_id}`); setTimeout(loadRuns, 300); } catch(e) { toast(e.message, true); } }
+async function deleteWorkflow(name) {
+  const workflow = state.workflows.get(name), label = namedId(workflow?.description, name);
+  if (!await confirmDelete(`删除工作流“${label}”？`, "将同时删除工作流正文、定时配置、全部历史运行记录、任务记录和对应日志，此操作不可恢复。")) return;
+  try {
+    await api(`/api/workflows/${encodeURIComponent(name)}`, {method:"DELETE"});
+    toast(`已删除工作流 ${label}`);
+    await loadWorkflows();
+  } catch(e) { toast(e.message, true); }
+}
+async function deleteRun(id) {
+  if (!await confirmDelete("删除这条运行记录？", `${id}\n对应的任务日志也会一并删除。`)) return;
+  try {
+    await api(`/api/runs/${encodeURIComponent(id)}`, {method:"DELETE"});
+    toast(`已删除运行记录 ${id}`);
+    await loadRuns();
+  } catch(e) { toast(e.message, true); }
+}
+
+let deleteConfirmResolver = null;
+function confirmDelete(title, message) {
+  if (deleteConfirmResolver) deleteConfirmResolver(false);
+  document.getElementById("deleteConfirmTitle").textContent = title;
+  document.getElementById("deleteConfirmMessage").textContent = message;
+  document.getElementById("deleteConfirmModal").classList.remove("hidden");
+  return new Promise(resolve => { deleteConfirmResolver = resolve; });
+}
+function resolveDeleteConfirm(confirmed) {
+  document.getElementById("deleteConfirmModal").classList.add("hidden");
+  const resolve = deleteConfirmResolver;
+  deleteConfirmResolver = null;
+  if (resolve) resolve(confirmed);
+}
+function closeDeleteConfirmFromBackdrop(event) {
+  if (event.target.id === "deleteConfirmModal") resolveDeleteConfirm(false);
+}
 
 function showTasks(name) {
   const w = state.workflows.get(name); if (!w) return;
-  openModal(`${name} · DAG 任务`, `<div class="table-wrap"><table><thead><tr><th>任务</th><th>依赖</th><th>命令</th><th>启用</th></tr></thead><tbody>${w.tasks.map(t => `<tr><td><div class="primary">${esc(t.description || t.name)}</div><div class="workflow-id mono">${esc(t.name)}</div></td><td class="mono">${esc(t.depends.join(", ") || "—")}</td><td class="mono">${esc(t.command)}</td><td>${t.enabled ? "是" : "否"}</td></tr>`).join("")}</tbody></table></div>`);
+  openModal(`${namedId(w.description, w.name)} · DAG 任务`, `<div class="table-wrap"><table><thead><tr><th>任务</th><th>依赖</th><th>命令</th><th>启用</th></tr></thead><tbody>${w.tasks.map(t => `<tr><td><div class="primary">${esc(t.description || t.name)}</div><div class="workflow-id mono">${esc(t.name)}</div></td><td>${esc(t.depends.map(id => taskNamedId(w, id)).join(", ") || "—")}</td><td class="mono">${esc(t.command)}</td><td>${t.enabled ? "是" : "否"}</td></tr>`).join("")}</tbody></table></div>`);
 }
 
 function showDag(name) {
   const workflow = state.workflows.get(name); if (!workflow) return;
   const svg = buildDagSvg(workflow.tasks, name);
-  openModal(`${name} · DAG 结构`, `<div class="dag-legend"><span><i class="legend-node active-node"></i>启用节点</span><span><i class="legend-node inactive-node"></i>禁用节点</span><span>从左向右表示依赖方向</span></div><div class="dag-scroll">${svg}</div><div id="dagTaskDetail" class="dag-detail"><span class="secondary">点击节点查看任务命令和依赖</span></div>`);
+  openModal(`${namedId(workflow.description, workflow.name)} · DAG 结构`, `<div class="dag-legend"><span><i class="legend-node active-node"></i>启用节点</span><span><i class="legend-node inactive-node"></i>禁用节点</span><span>从左向右表示依赖方向</span></div><div class="dag-scroll">${svg}</div><div id="dagTaskDetail" class="dag-detail"><span class="secondary">点击节点查看任务命令和依赖</span></div>`);
 }
 
-function buildDagSvg(tasks, workflowName) {
+function buildDagSvg(tasks, workflowName, showStatuses=false) {
   const byName = new Map(tasks.map(task => [task.name, task]));
   const levels = new Map();
   function getLevel(task) {
@@ -117,7 +237,9 @@ function buildDagSvg(tasks, workflowName) {
   }));
   const nodes=tasks.map(task => {
     const p=positions.get(task.name), title=(task.description || task.name).slice(0,22), taskId=task.name.slice(0,27);
-    return `<g class="dag-node ${task.enabled ? "dag-enabled" : "dag-disabled"}" transform="translate(${p.x},${p.y})" onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text><text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}</title></g>`;
+    const status=showStatuses ? (task.status || "PENDING") : "";
+    const click=showStatuses ? "" : `onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"`;
+    return `<g class="dag-node ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${status ? `<text class="dag-node-status" x="176" y="23" text-anchor="end">${esc(status)}</text>` : ""}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${status ? ` · ${esc(status)}` : ""}</title></g>`;
   }).join("");
   return `<svg class="dag-canvas" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(workflowName)} DAG"><defs><marker id="dagArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>${edges.join("")}${nodes}</svg>`;
 }
@@ -125,29 +247,64 @@ function buildDagSvg(tasks, workflowName) {
 function selectDagTask(workflowName, taskName) {
   const workflow=state.workflows.get(workflowName), task=workflow?.tasks.find(item => item.name===taskName), target=document.getElementById("dagTaskDetail");
   if (!task || !target) return;
-  target.innerHTML=`<div><span class="badge ${task.enabled ? "enabled" : "disabled"}">${task.enabled ? "已启用" : "已禁用"}</span> <strong>${esc(task.name)}</strong> <span class="secondary dag-inline">${esc(task.description)}</span></div><div class="dag-meta"><b>依赖：</b><span class="mono">${esc(task.depends.join(", ") || "无")}</span></div><div class="dag-meta"><b>命令：</b><code>${esc(task.command)}</code></div>`;
+  target.innerHTML=`<div><span class="badge ${task.enabled ? "enabled" : "disabled"}">${task.enabled ? "已启用" : "已禁用"}</span> <strong>${esc(task.description || task.name)}</strong> <span class="secondary dag-inline mono">${esc(task.name)}</span></div><div class="dag-meta"><b>依赖：</b><span>${esc(task.depends.map(id => taskNamedId(workflow, id)).join(", ") || "无")}</span></div><div class="dag-meta"><b>命令：</b><code>${esc(task.command)}</code></div>`;
 }
 
 function exportYaml(name) { window.location.assign(`/api/workflows/${encodeURIComponent(name)}/yaml`); }
 
 function editSchedule(name) {
-  const s = state.workflows.get(name).schedule;
-  openModal(`${name} · 定时配置`, `<div class="form-grid"><label>Cron（5 字段）<input id="cronInput" value="${esc(s.cron || "0 18 * * mon-fri")}"></label><label>时区<input id="timezoneInput" value="${esc(s.timezone || "Asia/Shanghai")}"></label></div><label class="check"><input id="enabledInput" type="checkbox" ${s.enabled ? "checked" : ""}>启用自动调度</label><button class="button" onclick="saveSchedule('${esc(name)}')">保存配置</button>`);
+  const workflow = state.workflows.get(name), s = workflow.schedule;
+  openModal(`${namedId(workflow.description, workflow.name)} · 定时配置`, `<div class="form-grid"><label>Cron（5 字段）<input id="cronInput" value="${esc(s.cron || "0 18 * * mon-fri")}"><span class="form-hint">每小时第 10 分钟：10 * * * *　每天 10:00：0 10 * * *</span></label><label>时区<input id="timezoneInput" value="${esc(s.timezone || "Asia/Shanghai")}"></label></div><label class="check"><input id="enabledInput" type="checkbox" ${s.enabled ? "checked" : ""}>启用自动调度</label><button class="button" onclick="saveSchedule('${esc(name)}')">保存配置</button>`);
 }
 async function saveSchedule(name) { try { await api(`/api/workflows/${encodeURIComponent(name)}/schedule`, {method:"PUT", body:JSON.stringify({cron:document.getElementById("cronInput").value, timezone:document.getElementById("timezoneInput").value, enabled:document.getElementById("enabledInput").checked})}); closeModal(); toast("定时配置已保存"); loadWorkflows(); } catch(e) { toast(e.message, true); } }
 
 async function showRun(id) {
   try {
     const data = await api(`/api/runs/${encodeURIComponent(id)}`);
-    const rows = data.tasks.map(t => `<tr><td><div class="primary">${esc(t.task_name)}</div></td><td>${statusBadge(t.status)}</td><td>${fmt(t.start_time)}</td><td>${fmt(t.end_time)}</td><td>${t.exit_code ?? "—"}</td><td><div class="secondary" title="${esc(t.error_message)}">${esc(t.error_message || "")}</div></td><td>${t.log_file ? `<button class="button ghost" onclick="showLog('${id}','${esc(t.task_name)}')">日志</button>` : "—"}</td></tr>`).join("");
-    openModal(`${data.run.workflow_name} · ${id}`, `<div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>开始</th><th>结束</th><th>Exit</th><th>错误</th><th>日志</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    const rows = data.tasks.map(t => {
+      const label = t.task_description || t.task_name;
+      const logButton = t.log_file ? `<button class="button ghost" onclick='showLog(${jsArg(id)}, ${jsArg(t.task_name)}, ${jsArg(label)})'>日志</button>` : "—";
+      return `<tr><td><div class="primary">${esc(label)}</div></td><td class="mono">${esc(t.task_name)}</td><td>${statusBadge(t.status)}</td><td>${fmt(t.start_time)}</td><td>${fmt(t.end_time)}</td><td>${t.exit_code ?? "—"}</td><td><div class="secondary" title="${esc(t.error_message)}">${esc(t.error_message || "")}</div></td><td>${logButton}</td></tr>`;
+    }).join("");
+    const dag=data.graph_tasks?.length ? `<div class="run-dag"><div class="dag-legend"><span><i class="legend-node status-running"></i>RUNNING</span><span><i class="legend-node status-success"></i>SUCCESS</span><span><i class="legend-node status-failed"></i>FAILED</span><span><i class="legend-node status-skipped"></i>SKIPPED</span><span><i class="legend-node status-pending"></i>PENDING</span></div><div class="dag-scroll">${buildDagSvg(data.graph_tasks,data.run.workflow_name,true)}</div></div>` : "";
+    openModal(`${namedId(data.run.workflow_description, data.run.workflow_name)} · ${id}`, `<div class="detail-toolbar"><button class="button ghost" onclick='showRun(${jsArg(id)})'>刷新状态</button></div>${dag}<div class="table-wrap"><table><thead><tr><th>任务</th><th>ID</th><th>状态</th><th>开始</th><th>结束</th><th>Exit</th><th>错误</th><th>日志</th></tr></thead><tbody>${rows}</tbody></table></div>`);
   } catch(e) { toast(e.message, true); }
 }
-async function showLog(runId, task) { try { const text = await api(`/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(task)}/log`); openModal(`${task} · 日志`, `<pre>${esc(text)}</pre>`); } catch(e) { toast(e.message, true); } }
+async function showLog(runId, task, label) {
+  try {
+    const text = await api(`/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(task)}/log`);
+    document.getElementById("logModalTitle").textContent = `${label || task}（${task}）`;
+    document.getElementById("logContent").textContent = text;
+    document.getElementById("logModal").classList.remove("hidden");
+  } catch(e) { toast(e.message, true); }
+}
 
-function openModal(title, body) { document.getElementById("modalTitle").textContent = title; document.getElementById("modalBody").innerHTML = body; document.getElementById("modal").classList.remove("hidden"); }
-function closeModal() { document.getElementById("modal").classList.add("hidden"); }
-function closeModalFromBackdrop(event) { if (event.target.id === "modal") closeModal(); }
+async function copyLog() {
+  const content = document.getElementById("logContent");
+  if (!content) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(content.textContent);
+    } else {
+      const input = document.createElement("textarea");
+      input.value = content.textContent;
+      input.className = "clipboard-fallback";
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      if (!copied) throw new Error("浏览器不支持自动复制");
+    }
+    toast("日志已复制");
+  } catch(e) { toast(`复制失败：${e.message}`, true); }
+}
+
+let modalBackdropClosable = true;
+function openModal(title, body, closeOnBackdrop=true) { modalBackdropClosable=closeOnBackdrop; document.getElementById("modalTitle").textContent = title; document.getElementById("modalBody").innerHTML = body; document.getElementById("modal").classList.remove("hidden"); }
+function closeModal() { closeLogModal(); document.getElementById("modal").classList.add("hidden"); }
+function closeModalFromBackdrop(event) { if (event.target.id === "modal" && modalBackdropClosable) closeModal(); }
+function closeLogModal() { document.getElementById("logModal").classList.add("hidden"); }
+function closeLogModalFromBackdrop(event) { if (event.target.id === "logModal") closeLogModal(); }
 let toastTimer; function toast(message, error=false) { const box=document.getElementById("toast"); box.textContent=message; box.style.background=error?"#b42318":"#182230"; box.classList.remove("hidden"); clearTimeout(toastTimer); toastTimer=setTimeout(()=>box.classList.add("hidden"),4000); }
 
 loadWorkflows(); loadRuns(); setInterval(loadRuns, 3000); setInterval(loadWorkflows, 15000);

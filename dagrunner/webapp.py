@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 import atexit
-from pathlib import Path
+import json
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request
 
 from .database import StateDatabase
 from .logger import TaskLogManager
-from .service import ExecutionService, ScheduleService, ServiceError, WorkflowRegistry
-from .workflow import WorkflowError
+from .service import (
+    DEFAULT_SCHEDULE_CRON,
+    DEFAULT_SCHEDULE_TIMEZONE,
+    ExecutionService,
+    ScheduleService,
+    ServiceError,
+    WorkflowRegistry,
+)
+from .workflow import Workflow, WorkflowError, migrate_legacy_env
 
 
 def create_app(
     *,
-    config_dir: str | Path = Path("workflows"),
-    database_path: str | Path = Path("var") / "scheduler.db",
-    logs_path: str | Path = Path("var") / "logs",
+    database_path="var/scheduler.db",
+    logs_path="var/logs",
     start_scheduler: bool = True,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     database = StateDatabase(database_path)
-    registry = WorkflowRegistry(config_dir)
+    for stored in database.list_workflows():
+        migrated, changed = migrate_legacy_env(stored["definition"])
+        if changed:
+            database.update_workflow(
+                stored["workflow_key"], stored["name"], migrated
+            )
+    registry = WorkflowRegistry(database)
     logs = TaskLogManager(logs_path)
     executions = ExecutionService(database, registry, logs)
     schedules = ScheduleService(database, registry, executions)
@@ -53,9 +65,8 @@ def create_app(
             result.append(
                 {
                     "name": name,
+                    "db_id": registry.rows[name]["id"],
                     "description": workflow.description,
-                    "config_file": str(registry.paths[name]),
-                    "workdir": str(workflow.workdir),
                     "task_count": len(workflow.tasks),
                     "tasks": [
                         {
@@ -77,17 +88,73 @@ def create_app(
             )
         return jsonify({"workflows": result, "config_errors": registry.errors})
 
+    @app.post("/api/workflows/import")
+    def import_workflow():
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            raise ServiceError("请选择 YAML 文件")
+        try:
+            definition = uploaded.read().decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ServiceError("YAML 文件必须使用 UTF-8 编码") from exc
+        parsed = Workflow.from_yaml(
+            definition,
+            fallback_name=uploaded.filename.rsplit(".", 1)[0],
+        )
+        display_name = parsed.description.strip() or parsed.name
+        row = database.create_workflow(display_name, definition)
+        workflow_name = row["workflow_key"]
+        registry.refresh()
+        schedule = parsed.schedule
+        try:
+            schedules.update(
+                workflow_name,
+                schedule.cron if schedule else DEFAULT_SCHEDULE_CRON,
+                schedule.timezone if schedule else DEFAULT_SCHEDULE_TIMEZONE,
+                False,
+            )
+        except Exception:
+            database.delete_workflow(workflow_name)
+            registry.refresh()
+            raise
+        return jsonify({"ok": True, "id": workflow_name, "name": display_name}), 201
+
+    @app.get("/api/workflows/next-id")
+    def next_workflow_id():
+        return jsonify({"id": database.next_workflow_key()})
+
     @app.get("/api/workflows/<workflow_name>/yaml")
     def export_workflow_yaml(workflow_name: str):
-        registry.refresh()
-        registry.get(workflow_name)
-        path = registry.paths[workflow_name]
-        return send_file(
-            path,
+        definition = registry.definition(workflow_name)
+        return Response(
+            definition,
             mimetype="application/yaml",
-            as_attachment=True,
-            download_name=f"{workflow_name}.yaml",
+            headers={
+                "Content-Disposition": f'attachment; filename="{workflow_name}.yaml"'
+            },
         )
+
+    @app.put("/api/workflows/<workflow_name>")
+    def edit_workflow(workflow_name: str):
+        if executions.is_workflow_active(workflow_name):
+            raise ServiceError("工作流运行中，不能编辑")
+        schedule = database.get_schedule(workflow_name)
+        if schedule and schedule["enabled"]:
+            raise ServiceError("请先下线定时，再编辑工作流")
+        payload = request.get_json(silent=True) or {}
+        definition = str(payload.get("definition", ""))
+        current = database.get_workflow(workflow_name)
+        if current is None:
+            raise ServiceError(f"workflow not found: {workflow_name}")
+        parsed = Workflow.from_yaml(
+            definition,
+            name_override=workflow_name,
+        )
+        display_name = parsed.description.strip() or current["name"]
+        database.update_workflow(workflow_name, display_name, definition)
+        database.update_schedule_description(workflow_name, display_name)
+        registry.refresh()
+        return jsonify({"ok": True})
 
     @app.put("/api/workflows/<workflow_name>/schedule")
     def update_schedule(workflow_name: str):
@@ -105,17 +172,37 @@ def create_app(
         run_id = executions.start_run(workflow_name, trigger_type="manual")
         return jsonify({"ok": True, "run_id": run_id}), 202
 
+    @app.delete("/api/workflows/<workflow_name>")
+    def delete_workflow(workflow_name: str):
+        if executions.is_workflow_active(workflow_name):
+            raise ServiceError("cannot delete a workflow while it is running")
+        schedules.delete(workflow_name)
+        registry.delete(workflow_name)
+        try:
+            logs.delete_workflow(workflow_name)
+        except (OSError, ValueError) as exc:
+            raise ServiceError(
+                f"workflow and run records deleted, but logs could not be removed: {exc}"
+            ) from exc
+        return jsonify({"ok": True})
+
     @app.get("/api/runs")
     def runs():
+        registry.refresh()
         limit = min(max(request.args.get("limit", 100, type=int), 1), 500)
         active_ids = executions.active_run_ids()
+        run_rows = []
+        for row in database.list_all_runs(limit):
+            item = {**_row_dict(row), "active": row["run_id"] in active_ids}
+            workflow = registry.workflows.get(row["workflow_name"])
+            item["workflow_description"] = (
+                workflow.description
+                if workflow and workflow.description
+                else row["workflow_name"]
+            )
+            run_rows.append(item)
         return jsonify(
-            {
-                "runs": [
-                    {**_row_dict(row), "active": row["run_id"] in active_ids}
-                    for row in database.list_all_runs(limit)
-                ]
-            }
+            {"runs": run_rows}
         )
 
     @app.get("/api/runs/<run_id>")
@@ -123,8 +210,42 @@ def create_app(
         run = database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
-        tasks = [_row_dict(row) for row in database.task_states(run_id).values()]
-        return jsonify({"run": _row_dict(run), "tasks": tasks})
+        registry.refresh()
+        workflow = registry.workflows.get(run["workflow_name"])
+        run_data = _row_dict(run)
+        run_data["workflow_description"] = (
+            workflow.description
+            if workflow and workflow.description
+            else run["workflow_name"]
+        )
+        tasks = []
+        graph_tasks = []
+        for row in database.task_states(run_id).values():
+            task = _row_dict(row)
+            definition = workflow.tasks.get(row["task_name"]) if workflow else None
+            snapshot = bool(row["snapshot_version"])
+            description = (
+                row["task_description"]
+                if snapshot
+                else definition.description if definition else ""
+            )
+            depends = (
+                json.loads(row["depends_json"])
+                if snapshot
+                else list(definition.depends) if definition else []
+            )
+            task["task_description"] = description or row["task_name"]
+            tasks.append(task)
+            graph_tasks.append(
+                {
+                    "name": row["task_name"],
+                    "description": description,
+                    "depends": depends,
+                    "enabled": definition.enabled if definition else True,
+                    "status": row["status"],
+                }
+            )
+        return jsonify({"run": run_data, "tasks": tasks, "graph_tasks": graph_tasks})
 
     @app.post("/api/runs/<run_id>/stop")
     def stop_run(run_id: str):
@@ -140,6 +261,20 @@ def create_app(
     def resume(run_id: str):
         new_id = executions.resume_failed(run_id)
         return jsonify({"ok": True, "run_id": new_id}), 202
+
+    @app.delete("/api/runs/<run_id>")
+    def delete_run(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        if run_id in executions.active_run_ids():
+            raise ServiceError("cannot delete a run while it is active")
+        database.delete_run(run_id)
+        try:
+            logs.delete_run(run["workflow_name"], run_id)
+        except (OSError, ValueError) as exc:
+            raise ServiceError(f"run record deleted, but logs could not be removed: {exc}") from exc
+        return jsonify({"ok": True})
 
     @app.get("/api/runs/<run_id>/tasks/<task_name>/log")
     def task_log(run_id: str, task_name: str):

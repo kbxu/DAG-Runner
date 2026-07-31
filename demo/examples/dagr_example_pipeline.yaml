@@ -1,10 +1,14 @@
 name: example_pipeline
 description: 示例数据处理流程
-workdir: ..
-env:
-  DEMO_ENV: local
-setup: |
-  export PYTHONUNBUFFERED=1
+setup:
+  linux: |
+    cd demo
+    export DEMO_ENV='local'
+    export PYTHONUNBUFFERED=1
+  windows: |
+    Set-Location demo
+    $env:DEMO_ENV = 'local'
+    $env:PYTHONUNBUFFERED = "1"
 schedule:
   cron: "0 9 * * mon-fri"
   timezone: Asia/Shanghai

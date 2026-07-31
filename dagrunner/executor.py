@@ -24,21 +24,18 @@ class TaskExecutor:
         task: Task,
         *,
         cwd: Path,
-        workflow_env: dict[str, str],
         workflow_setup: str,
         log_file: Path,
         cancel_event: Event | None = None,
     ) -> ExecutionResult:
         environment = os.environ.copy()
-        environment.update(workflow_env)
-        environment.update(task.env)
         if isinstance(task.command, str):
             task_command = task.command
             if task.args:
                 task_command += " " + " ".join(shlex.quote(arg) for arg in task.args)
         else:
             argv = [*task.command, *task.args]
-            task_command = shlex.join(argv)
+            task_command = _shell_join(argv)
 
         if workflow_setup:
             # Shell activation/export must happen in the same process that starts the task.
@@ -107,6 +104,14 @@ def _shell_command(setup: str, task_command: str) -> list[str]:
         script += setup + "\n"
     script += task_command
     return ["/bin/bash", "-lc", script]
+
+
+def _shell_join(argv: list[str]) -> str:
+    if os.name == "nt":
+        return "& " + " ".join(
+            "'" + argument.replace("'", "''") + "'" for argument in argv
+        )
+    return shlex.join(argv)
 
 
 def _terminate_process(process: subprocess.Popen) -> None:

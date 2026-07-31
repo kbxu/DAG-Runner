@@ -1,11 +1,14 @@
 name: ds_9000001001
 description: 示例数据处理流程
-workdir: ..
-env:
-  DEMO_ENV: local
-setup: |-
-  # This public example is intentionally environment-neutral.
-  export PYTHONUNBUFFERED=1
+setup:
+  linux: |-
+    cd demo
+    export DEMO_ENV='local'
+    export PYTHONUNBUFFERED=1
+  windows: |-
+    Set-Location demo
+    $env:DEMO_ENV = 'local'
+    $env:PYTHONUNBUFFERED = "1"
 tasks:
   task_9000001101:
     description: 提取示例数据

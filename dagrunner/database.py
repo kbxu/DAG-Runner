@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 
@@ -11,8 +12,16 @@ TASK_STATUSES = {"PENDING", "RUNNING", "SUCCESS", "FAILED", "SKIPPED"}
 RUN_STATUSES = {"RUNNING", "SUCCESS", "FAILED"}
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def local_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _as_local_time(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.astimezone().isoformat(timespec="seconds")
 
 
 class StateDatabase:
@@ -41,6 +50,14 @@ class StateDatabase:
             connection.executescript(
                 """
                 PRAGMA journal_mode = WAL;
+                CREATE TABLE IF NOT EXISTS workflows (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workflow_key TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    definition TEXT NOT NULL,
+                    created_time TEXT NOT NULL,
+                    updated_time TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS workflow_runs (
                     run_id TEXT PRIMARY KEY,
                     workflow_name TEXT NOT NULL,
@@ -67,6 +84,9 @@ class StateDatabase:
                     log_file TEXT,
                     error_message TEXT,
                     reused_from_run_id TEXT,
+                    task_description TEXT NOT NULL DEFAULT '',
+                    depends_json TEXT NOT NULL DEFAULT '[]',
+                    snapshot_version INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (run_id, task_name),
                     FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
                     FOREIGN KEY (reused_from_run_id) REFERENCES workflow_runs(run_id)
@@ -76,6 +96,7 @@ class StateDatabase:
 
                 CREATE TABLE IF NOT EXISTS schedules (
                     workflow_name TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
                     cron_expression TEXT NOT NULL,
                     timezone TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -90,6 +111,104 @@ class StateDatabase:
                 "trigger_type",
                 "TEXT NOT NULL DEFAULT 'manual'",
             )
+            self._ensure_column(
+                connection,
+                "schedules",
+                "description",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection, "task_runs", "task_description", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                connection, "task_runs", "depends_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._ensure_column(
+                connection, "task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._normalize_timestamps(connection)
+
+    def create_workflow(self, name: str, definition: str) -> sqlite3.Row:
+        now = local_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO workflows
+                   (workflow_key, name, definition, created_time, updated_time)
+                   VALUES (NULL, ?, ?, ?, ?)""",
+                (name, definition, now, now),
+            )
+            workflow_key = f"workflow_{cursor.lastrowid:06d}"
+            connection.execute(
+                "UPDATE workflows SET workflow_key = ? WHERE id = ?",
+                (workflow_key, cursor.lastrowid),
+            )
+            return connection.execute(
+                "SELECT * FROM workflows WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+
+    def next_workflow_key(self) -> str:
+        with self.connect() as connection:
+            sequence = connection.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'workflows'"
+            ).fetchone()
+            next_id = (
+                sequence[0] + 1
+                if sequence
+                else connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) + 1 FROM workflows"
+                ).fetchone()[0]
+            )
+        return f"workflow_{next_id:06d}"
+
+    def list_workflows(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute("SELECT * FROM workflows ORDER BY id").fetchall()
+
+    def get_workflow(self, workflow_key: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM workflows WHERE workflow_key = ?", (workflow_key,)
+            ).fetchone()
+
+    def update_workflow(self, workflow_key: str, name: str, definition: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE workflows SET name = ?, definition = ?, updated_time = ?
+                   WHERE workflow_key = ?""",
+                (name, definition, local_now(), workflow_key),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"workflow not found: {workflow_key}")
+
+    def delete_workflow(self, workflow_key: str) -> None:
+        with self.connect() as connection:
+            # Runs may reference earlier runs through resume/reuse metadata. Clear
+            # those references first so deleting one workflow cannot violate the
+            # self-referencing foreign keys of runs belonging to another workflow.
+            connection.execute(
+                "UPDATE workflow_runs SET resumed_from_run_id = NULL "
+                "WHERE resumed_from_run_id IN ("
+                "SELECT run_id FROM workflow_runs WHERE workflow_name = ?)",
+                (workflow_key,),
+            )
+            connection.execute(
+                "UPDATE task_runs SET reused_from_run_id = NULL "
+                "WHERE reused_from_run_id IN ("
+                "SELECT run_id FROM workflow_runs WHERE workflow_name = ?)",
+                (workflow_key,),
+            )
+            # task_runs are removed by the ON DELETE CASCADE on their run_id.
+            connection.execute(
+                "DELETE FROM workflow_runs WHERE workflow_name = ?", (workflow_key,)
+            )
+            connection.execute(
+                "DELETE FROM schedules WHERE workflow_name = ?", (workflow_key,)
+            )
+            cursor = connection.execute(
+                "DELETE FROM workflows WHERE workflow_key = ?", (workflow_key,)
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"workflow not found: {workflow_key}")
 
     @staticmethod
     def _ensure_column(
@@ -99,6 +218,31 @@ class StateDatabase:
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    @staticmethod
+    def _normalize_timestamps(connection: sqlite3.Connection) -> None:
+        for table, columns in (
+            ("workflows", ("created_time", "updated_time")),
+            ("workflow_runs", ("start_time", "end_time")),
+            ("task_runs", ("start_time", "end_time")),
+            ("schedules", ("created_time", "updated_time")),
+        ):
+            selected = ", ".join(columns)
+            for row in connection.execute(
+                f"SELECT rowid, {selected} FROM {table}"
+            ).fetchall():
+                values = tuple(
+                    _as_local_time(row[column]) if row[column] else None
+                    for column in columns
+                )
+                original = tuple(row[column] for column in columns)
+                if values == original:
+                    continue
+                assignments = ", ".join(f"{column} = ?" for column in columns)
+                connection.execute(
+                    f"UPDATE {table} SET {assignments} WHERE rowid = ?",
+                    (*values, row["rowid"]),
+                )
+
     def create_run(
         self,
         run_id: str,
@@ -107,8 +251,9 @@ class StateDatabase:
         resumed_from_run_id: str | None = None,
         from_task: str | None = None,
         trigger_type: str = "manual",
+        task_metadata: dict[str, tuple[str, Sequence[str]]] | None = None,
     ) -> None:
-        now = utc_now()
+        now = local_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO workflow_runs
@@ -117,10 +262,22 @@ class StateDatabase:
                    VALUES (?, ?, 'RUNNING', ?, ?, ?, ?)""",
                 (run_id, workflow_name, now, resumed_from_run_id, from_task, trigger_type),
             )
+            metadata = task_metadata or {}
             connection.executemany(
-                """INSERT INTO task_runs (run_id, workflow_name, task_name, status)
-                   VALUES (?, ?, ?, 'PENDING')""",
-                [(run_id, workflow_name, name) for name in task_names],
+                """INSERT INTO task_runs
+                   (run_id, workflow_name, task_name, status, task_description, depends_json,
+                    snapshot_version)
+                   VALUES (?, ?, ?, 'PENDING', ?, ?, 1)""",
+                [
+                    (
+                        run_id,
+                        workflow_name,
+                        name,
+                        metadata.get(name, ("", ()))[0],
+                        json.dumps(metadata.get(name, ("", ()))[1], ensure_ascii=False),
+                    )
+                    for name in task_names
+                ],
             )
 
     def set_task_status(
@@ -136,7 +293,7 @@ class StateDatabase:
     ) -> None:
         if status not in TASK_STATUSES:
             raise ValueError(f"invalid task status: {status}")
-        now = utc_now()
+        now = local_now()
         start_time = now if status == "RUNNING" else None
         end_time = now if status in {"SUCCESS", "FAILED", "SKIPPED"} else None
         with self.connect() as connection:
@@ -170,7 +327,7 @@ class StateDatabase:
             connection.execute(
                 """UPDATE workflow_runs SET status = ?, end_time = ?, error_message = ?
                    WHERE run_id = ?""",
-                (status, utc_now(), error_message, run_id),
+                (status, local_now(), error_message, run_id),
             )
 
     def latest_run(self, workflow_name: str) -> sqlite3.Row | None:
@@ -225,21 +382,54 @@ class StateDatabase:
                 (run_id, task_name),
             ).fetchone()
 
+    def delete_run(self, run_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE workflow_runs SET resumed_from_run_id = NULL "
+                "WHERE resumed_from_run_id = ?",
+                (run_id,),
+            )
+            connection.execute(
+                "UPDATE task_runs SET reused_from_run_id = NULL "
+                "WHERE reused_from_run_id = ?",
+                (run_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM workflow_runs WHERE run_id = ?", (run_id,)
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"run not found: {run_id}")
+
     def upsert_schedule(
-        self, workflow_name: str, cron_expression: str, timezone_name: str, enabled: bool
+        self,
+        workflow_name: str,
+        description: str,
+        cron_expression: str,
+        timezone_name: str,
+        enabled: bool,
     ) -> None:
-        now = utc_now()
+        now = local_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO schedules
-                       (workflow_name, cron_expression, timezone, enabled, created_time, updated_time)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                       (workflow_name, description, cron_expression, timezone, enabled,
+                        created_time, updated_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(workflow_name) DO UPDATE SET
+                       description = excluded.description,
                        cron_expression = excluded.cron_expression,
                        timezone = excluded.timezone,
                        enabled = excluded.enabled,
                        updated_time = excluded.updated_time""",
-                (workflow_name, cron_expression, timezone_name, int(enabled), now, now),
+                (
+                    workflow_name,
+                    description,
+                    cron_expression,
+                    timezone_name,
+                    int(enabled),
+                    now,
+                    now,
+                ),
             )
 
     def get_schedule(self, workflow_name: str) -> sqlite3.Row | None:
@@ -248,15 +438,30 @@ class StateDatabase:
                 "SELECT * FROM schedules WHERE workflow_name = ?", (workflow_name,)
             ).fetchone()
 
+    def update_schedule_description(
+        self, workflow_name: str, description: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE schedules SET description = ? WHERE workflow_name = ?",
+                (description, workflow_name),
+            )
+
     def list_schedules(self) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
                 "SELECT * FROM schedules ORDER BY workflow_name"
             ).fetchall()
 
+    def delete_schedule(self, workflow_name: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM schedules WHERE workflow_name = ?", (workflow_name,)
+            )
+
     def mark_orphaned(self, workflow_name: str) -> int:
         """Close runs left RUNNING after a process or host crash (call while holding lock)."""
-        now = utc_now()
+        now = local_now()
         message = "runner stopped before completion; recovered on next startup"
         with self.connect() as connection:
             run_ids = [
