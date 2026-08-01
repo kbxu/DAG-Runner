@@ -1,12 +1,12 @@
 const state = {
   workflows: new Map(),
-  workflowSort: { key: "", direction: "asc" },
+  workflowSort: { key: "next_run_time", direction: "asc" },
   workflowPage: 1,
   workflowPageSize: 15,
   runs: [],
   runPage: 1,
-  runPageSize: 20,
-  runPagination: { page: 1, page_size: 20, total: 0, total_pages: 1 },
+  runPageSize: 15,
+  runPagination: { page: 1, page_size: 15, total: 0, total_pages: 1 },
   runFilters: { workflow: "", status: "", trigger: "" },
 };
 let serviceState = "checking";
@@ -146,7 +146,7 @@ function renderWorkflows() {
         <td><div class="mono">${esc(s.cron || "未配置")}</div><div class="secondary">${esc(s.timezone)}</div></td>
         <td>${fmt(w.last_run_time)}</td>
         <td>${fmt(s.next_run_time)}</td>
-        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">编辑</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button><button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">删除</button></div></td>
+        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">运行</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">任务</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">定时</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">编辑</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">导出 YAML</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">删除</button>`}</div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">还没有导入工作流</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>共 ${workflows.length} 条 · 第 ${state.workflowPage} / ${totalPages} 页</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">上一页</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">下一页</button></div>`;
