@@ -4,24 +4,6 @@
 
 用 YAML 定义任务和依赖，启动一个服务，就可以在浏览器里配置定时、查看 DAG、运行任务、停止任务、失败续跑和查看日志。不需要为每个工作流维护系统 cron，也不需要部署分布式调度集群。
 
-## 首次登录
-
-DAG Runner 不提供默认密码。首次启动服务前，在项目目录执行：
-
-```bash
-python -m dagrunner.auth --generate
-```
-
-命令会创建管理员账号 `admin`，并在终端中显示一次随机强密码。启动服务后访问
-<http://127.0.0.1:7119>，使用该账号和密码登录。请立即妥善保存密码；如果密码遗失，
-再次执行上述命令即可重置，重置后该账号已有的登录会话会立即失效。
-
-如果启动服务时通过 `--db` 指定了其他数据库文件，生成密码时必须使用相同路径，例如：
-
-```bash
-python -m dagrunner.auth --db /path/to/scheduler.db --generate
-```
-
 ![DAG Runner Web Console](docs/images/dashboard.png)
 ![DAG Runner DAG View](docs/images/dag.png)
 
@@ -48,7 +30,9 @@ flowchart LR
 
 ## 快速开始
 
-推荐使用 Conda 创建独立环境：
+### 1. 创建运行环境
+
+推荐先使用 Conda 创建并激活独立环境，再安装项目依赖：
 
 ```bash
 git clone https://github.com/kbxu/DAG-Runner.git
@@ -56,13 +40,34 @@ cd DAG-Runner
 conda create -n dagr python=3.11.* -y
 conda activate dagr
 python -m pip install -r requirements.txt
+```
+
+### 2. 创建首次登录账号
+
+确认上述 Conda 环境已经激活且依赖安装完成后，执行：
+
+```bash
 python -m dagrunner.auth --generate
+```
+
+DAG Runner 不提供默认密码。该命令会创建或重置管理员账号 `admin`，并且只在终端中
+显示一次随机强密码，请立即妥善保存。也可以不传 `--generate`，按提示手工输入至少
+16 位的密码。密码遗失时可重新执行该命令进行重置，重置后已有登录会话会立即失效。
+
+如果启动服务时通过 `--db` 指定其他数据库文件，创建账号时必须使用相同路径，例如：
+
+```bash
+python -m dagrunner.auth --db /path/to/scheduler.db --generate
+```
+
+### 3. 启动并登录
+
+```bash
 python -m dagrunner.server
 ```
 
-`dagrunner.auth --generate` 默认创建或重置 `admin`，并且只在命令输出中显示一次随机
-强密码；重置密码会让该账号已有会话立即失效。也可以不传 `--generate`，按提示手工输入
-至少 16 位的密码。
+启动后访问 <http://127.0.0.1:7119>，使用账号 `admin` 和刚生成的密码登录。数据库表会在
+服务启动时自动创建，无需手工建表。
 
 `dagrunner.server` 参数：
 
@@ -86,8 +91,6 @@ python -m dagrunner.server \
   --threads 8 \
   --allow-insecure-remote-login
 ```
-
-启动后访问 <http://127.0.0.1:7119>。数据库表会在服务启动时自动创建，无需手工建表。
 
 Web 登录的密码会先在浏览器中计算 SHA-256，再由后端使用随机盐和
 PBKDF2-HMAC-SHA256（600,000 次迭代）生成数据库校验值。前端摘要仍然属于可重放的
@@ -149,12 +152,15 @@ tasks:
 
 ### 2. 使用命令行转换
 
+命令格式中的 `EXPORT` 是位置参数占位符，不需要原样输入。它表示从外部调度器导出的
+源文件路径：DolphinScheduler 使用 JSON 文件，Windows 任务计划程序使用 XML 文件。
+可以传入一个或多个文件路径；相对路径以当前命令行目录为基准，也可以使用绝对路径。
+
 ```bash
 python -m dagrunner.migrate_workflows \
   --source dolphinscheduler \
   data/ds_workflow.json \
-  --setup-file templates/production_setup.sh \
-  --output-dir data/converted
+  --setup-file templates/production_setup.sh
 ```
 
 转换参数：
@@ -162,7 +168,7 @@ python -m dagrunner.migrate_workflows \
 | 参数 | 是否必填 | 说明 |
 | --- | --- | --- |
 | `--source` | 是 | 导出文件来源；DolphinScheduler 使用 `dolphinscheduler` |
-| `EXPORT` | 是 | 一个或多个导出的 JSON 文件路径 |
+| `EXPORT` | 是 | 一个或多个导出文件路径；DolphinScheduler 为 JSON，Windows 任务计划程序为 XML；这是位置参数，不要输入字面量 `EXPORT` |
 | `--output-dir` | 否 | YAML 输出目录；默认写入源文件所在目录 |
 | `--setup-file` | 否 | 注入工作流级准备脚本；`.ps1`/`.psm1` 按 PowerShell 处理，其余按 Bash 处理 |
 | `--exclude-disabled` | 否 | 不转换已禁用节点及与其相连的依赖边 |
@@ -182,11 +188,10 @@ python -m dagrunner.migrate_workflows \
 python -m dagrunner.migrate_workflows `
   --source windows-task-scheduler `
   C:\exports\daily-report.xml `
-  --output-dir C:\exports\converted `
-  --timezone Asia/Shanghai
+  --setup-file templates\production_setup.ps1
 ```
 
-转换完成后，在 Web 控制台中导入 `C:\exports\converted\dagr_daily-report.yaml`。
+转换完成后，在 Web 控制台中导入 `C:\exports\dagr_daily-report.yaml`。
 
 ## CLI
 
@@ -221,12 +226,6 @@ docs/images/      README 首页图片
 服务默认只监听 `127.0.0.1`。开放到局域网或互联网前，请通过反向代理增加身份认证和 HTTPS。工作流 YAML 可以执行系统命令，应当按可信代码管理，并使用低权限服务账户运行。
 
 操作系统只需负责常驻 `python -m dagrunner.server` 进程；具体工作流定时由服务内部管理。
-
-## 开发
-
-```bash
-python -m pip install -r requirements.txt
-```
 
 ## License
 

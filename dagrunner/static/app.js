@@ -224,15 +224,28 @@ function scheduleRunSearch(value) {
 async function runWorkflow(name) { try { const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:"{}"}); toast(`已提交 ${r.run_id}`); setTimeout(loadRuns, 250); } catch(e) { toast(e.message, true); } }
 async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
 let pendingImportFilename = "workflow.yaml";
+let pendingImportSuccessVerb = "导入";
+function openWorkflowImportEditor(title, definition, nextId, submitLabel) {
+  openModal(title, `<div class="form-stack"><label>拟分配 ID<input value="${esc(nextId)}" readonly></label><label>工作流 YAML${yamlEditor("importDefinition",definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">高亮字段</i>会在导入或运行时使用；中文名称取自 description。顶层 name 和 migration 仅作来源信息，导入后的定时由数据库单独管理。</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+}
+async function openNewWorkflow() {
+  pendingImportFilename = "dagr_example_pipeline.yaml";
+  pendingImportSuccessVerb = "新增";
+  try {
+    const [definition,nextId]=await Promise.all([api("/api/workflows/example-definition"),api("/api/workflows/next-id")]);
+    openWorkflowImportEditor("新增工作流",definition,nextId.id,"新增");
+  } catch(e) { toast(`加载示例工作流失败：${e.message}`,true); }
+}
 function openImportWorkflow() {
   const input=document.createElement("input");
   input.type="file"; input.accept=".yaml,.yml,text/yaml";
   input.onchange=async () => {
     const file=input.files[0]; if (!file) return;
     pendingImportFilename=file.name;
+    pendingImportSuccessVerb="导入";
     try {
       const [definition,nextId]=await Promise.all([file.text(),api("/api/workflows/next-id")]);
-      openModal("导入并编辑工作流", `<div class="form-stack"><label>拟分配 ID<input value="${esc(nextId.id)}" readonly></label><label>工作流 YAML${yamlEditor("importDefinition",definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">高亮字段</i>会在导入或运行时使用；中文名称取自 description。顶层 name 和 migration 仅作来源信息，导入后的定时由数据库单独管理。</span><button class="button" onclick="submitImportWorkflow()">导入</button></div>`, false);
+      openWorkflowImportEditor("导入并编辑工作流",definition,nextId.id,"导入");
     } catch(e) { toast(`读取文件失败：${e.message}`,true); }
   };
   input.click();
@@ -241,7 +254,7 @@ async function submitImportWorkflow() {
   const definition=document.getElementById("importDefinition").value;
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
   const form=new FormData(); form.append("file",file);
-  try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); toast(`已导入 ${result.name}（${result.id}）`); await loadWorkflows(); } catch(e) { toast(e.message,true); }
+  try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); toast(`已${pendingImportSuccessVerb} ${result.name}（${result.id}）`); await loadWorkflows(); } catch(e) { toast(e.message,true); }
 }
 async function editWorkflow(name) {
   const workflow=state.workflows.get(name); if (!workflow || workflow.schedule.enabled) return toast("请先下线定时",true);

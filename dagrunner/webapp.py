@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
@@ -248,6 +249,20 @@ def create_app(
     @app.get("/api/workflows/next-id")
     def next_workflow_id():
         return jsonify({"id": database.next_workflow_key()})
+
+    @app.get("/api/workflows/example-definition")
+    def example_workflow_definition():
+        example_path = (
+            Path(__file__).resolve().parent.parent
+            / "demo"
+            / "examples"
+            / "dagr_example_pipeline.yaml"
+        )
+        try:
+            definition = example_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ServiceError("示例工作流文件不可用") from exc
+        return Response(definition, mimetype="application/yaml")
 
     @app.get("/api/workflows/<workflow_name>/yaml")
     def export_workflow_yaml(workflow_name: str):
