@@ -4,8 +4,38 @@
 
 用 YAML 定义任务和依赖，启动一个服务，就可以在浏览器里配置定时、查看 DAG、运行任务、停止任务、失败续跑和查看日志。不需要为每个工作流维护系统 cron，也不需要部署分布式调度集群。
 
+## 首次登录
+
+DAG Runner 不提供默认密码。首次启动服务前，在项目目录执行：
+
+```bash
+python -m dagrunner.auth --generate
+```
+
+命令会创建管理员账号 `admin`，并在终端中显示一次随机强密码。启动服务后访问
+<http://127.0.0.1:7119>，使用该账号和密码登录。请立即妥善保存密码；如果密码遗失，
+再次执行上述命令即可重置，重置后该账号已有的登录会话会立即失效。
+
+如果启动服务时通过 `--db` 指定了其他数据库文件，生成密码时必须使用相同路径，例如：
+
+```bash
+python -m dagrunner.auth --db /path/to/scheduler.db --generate
+```
+
 ![DAG Runner Web Console](docs/images/dashboard.png)
 ![DAG Runner DAG View](docs/images/dag.png)
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    user["Web 控制台 / CLI"] --> service["DAG Runner 服务<br/>工作流管理与定时调度"]
+    yaml["YAML 工作流"] --> service
+    service --> engine["DAG 执行引擎<br/>解析依赖与并行调度"]
+    engine --> tasks["任务进程<br/>Bash / PowerShell / Python"]
+    service <--> db[("SQLite<br/>配置与运行状态")]
+    engine --> logs[("文件日志")]
+```
 
 ## 特性
 
