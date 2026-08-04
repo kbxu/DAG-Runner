@@ -1,6 +1,8 @@
 :root { color-scheme: light; --teal: #087f78; --teal-dark: #075e59; --ink: #17202a; --muted: #677281; --line: #d9e4e5; }
 * { box-sizing: border-box; }
 body { min-height: 100vh; margin: 0; color: var(--ink); background: radial-gradient(circle at 20% 15%, #148b8333, transparent 34%), linear-gradient(135deg, #10283d, #0b4c4b); font: 14px/1.5 Inter, "Segoe UI", Arial, sans-serif; }
+.login-language { position: fixed; z-index: 2; top: 20px; right: 24px; width: auto; margin: 0; padding: 7px 12px; color: white; border: 1px solid #ffffff55; background: #ffffff18; font-size: 12px; }
+.login-language:hover:not(:disabled) { background: #ffffff2b; }
 .login-shell { min-height: 100vh; display: grid; place-items: center; padding: 28px; }
 .login-card { width: min(420px, 100%); padding: 34px; border: 1px solid #ffffff66; border-radius: 18px; background: #fffffffa; box-shadow: 0 28px 80px #061a2659; }
 .login-brand { display: flex; align-items: center; gap: 16px; }

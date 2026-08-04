@@ -147,9 +147,14 @@ class Task:
 
 @dataclass(frozen=True)
 class ScheduleDefinition:
-    cron: str
+    crons: tuple[str, ...]
     timezone: str = "Asia/Shanghai"
     enabled: bool = False
+
+    @property
+    def cron(self) -> str:
+        """Keep the former single-cron attribute available to callers."""
+        return self.crons[0]
 
 
 @dataclass(frozen=True)
@@ -450,14 +455,27 @@ def _schedule_value(value: Any) -> ScheduleDefinition | None:
         return None
     if not isinstance(value, dict):
         raise WorkflowError("workflow 'schedule' must be a mapping")
-    cron = value.get("cron")
-    if not isinstance(cron, str) or len(cron.split()) != 5:
-        raise WorkflowError("workflow schedule.cron must be a five-field cron string")
+    raw_crons = value.get("crons", value.get("cron"))
+    if isinstance(raw_crons, str):
+        raw_crons = [raw_crons]
+    if not isinstance(raw_crons, list) or not raw_crons:
+        raise WorkflowError(
+            "workflow schedule.crons must contain at least one five-field cron string"
+        )
+    crons: list[str] = []
+    for cron in raw_crons:
+        if not isinstance(cron, str) or len(cron.split()) != 5:
+            raise WorkflowError(
+                "workflow schedule.crons must contain only five-field cron strings"
+            )
+        normalized = " ".join(cron.split())
+        if normalized not in crons:
+            crons.append(normalized)
     timezone_name = value.get("timezone", "Asia/Shanghai")
     if not isinstance(timezone_name, str) or not timezone_name:
         raise WorkflowError("workflow schedule.timezone must be a non-empty string")
     return ScheduleDefinition(
-        cron=cron,
+        crons=tuple(crons),
         timezone=timezone_name,
         enabled=bool(value.get("enabled", False)),
     )

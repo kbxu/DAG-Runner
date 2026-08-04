@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Event, Lock
@@ -20,6 +22,25 @@ DEFAULT_SCHEDULE_TIMEZONE = "Asia/Shanghai"
 
 class ServiceError(RuntimeError):
     pass
+
+
+def decode_cron_expressions(value: str) -> tuple[str, ...]:
+    """Read both legacy plain cron values and the new JSON-array storage format."""
+    text = str(value or "").strip()
+    if not text:
+        return ()
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, list) and all(isinstance(item, str) for item in decoded):
+            return tuple(decoded)
+    return (text,)
+
+
+def encode_cron_expressions(crons: Sequence[str]) -> str:
+    return json.dumps(list(crons), ensure_ascii=False, separators=(",", ":"))
 
 
 class WorkflowRegistry:
@@ -232,9 +253,9 @@ class ScheduleService:
         for schedule in self.database.list_schedules():
             if schedule["enabled"] and schedule["workflow_name"] in self.registry.workflows:
                 try:
-                    self._install_job(
+                    self._install_jobs(
                         schedule["workflow_name"],
-                        schedule["cron_expression"],
+                        decode_cron_expressions(schedule["cron_expression"]),
                         schedule["timezone"],
                     )
                 except (ValueError, TypeError, KeyError) as exc:
@@ -245,43 +266,63 @@ class ScheduleService:
         self.scheduler.start()
 
     def update(
-        self, workflow_name: str, cron_expression: str, timezone_name: str, enabled: bool
+        self,
+        workflow_name: str,
+        cron_expressions: Sequence[str] | str,
+        timezone_name: str,
+        enabled: bool,
     ) -> None:
         workflow = self.registry.get(workflow_name)
-        try:
-            CronTrigger.from_crontab(cron_expression, timezone=timezone_name)
-        except (ValueError, TypeError, KeyError) as exc:
-            raise ServiceError(f"invalid cron/timezone: {exc}") from exc
+        if isinstance(cron_expressions, str):
+            cron_expressions = [cron_expressions]
+        crons: list[str] = []
+        for expression in cron_expressions:
+            normalized = " ".join(str(expression).split())
+            if not normalized or normalized in crons:
+                continue
+            try:
+                CronTrigger.from_crontab(normalized, timezone=timezone_name)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise ServiceError(f"invalid cron/timezone: {exc}") from exc
+            crons.append(normalized)
+        if not crons:
+            raise ServiceError("at least one cron is required")
         self.database.upsert_schedule(
             workflow_name,
             workflow.description,
-            cron_expression,
+            encode_cron_expressions(crons),
             timezone_name,
             enabled,
         )
-        if self.scheduler.get_job(self._job_id(workflow_name)):
-            self.scheduler.remove_job(self._job_id(workflow_name))
+        self._remove_jobs(workflow_name)
         if enabled:
-            self._install_job(workflow_name, cron_expression, timezone_name)
+            self._install_jobs(workflow_name, crons, timezone_name)
 
     def delete(self, workflow_name: str) -> None:
-        job_id = self._job_id(workflow_name)
-        if self.scheduler.get_job(job_id):
-            self.scheduler.remove_job(job_id)
+        self._remove_jobs(workflow_name)
         self.database.delete_schedule(workflow_name)
 
-    def _install_job(self, workflow_name: str, cron_expression: str, timezone_name: str) -> None:
-        trigger = CronTrigger.from_crontab(cron_expression, timezone=timezone_name)
-        self.scheduler.add_job(
-            self._scheduled_run,
-            trigger=trigger,
-            args=[workflow_name],
-            id=self._job_id(workflow_name),
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-            misfire_grace_time=300,
-        )
+    def _install_jobs(
+        self, workflow_name: str, cron_expressions: Sequence[str], timezone_name: str
+    ) -> None:
+        for index, cron_expression in enumerate(cron_expressions):
+            trigger = CronTrigger.from_crontab(cron_expression, timezone=timezone_name)
+            self.scheduler.add_job(
+                self._scheduled_run,
+                trigger=trigger,
+                args=[workflow_name],
+                id=self._job_id(workflow_name, index),
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=300,
+            )
+
+    def _remove_jobs(self, workflow_name: str) -> None:
+        prefix = self._job_id(workflow_name)
+        for job in self.scheduler.get_jobs():
+            if job.id == prefix or job.id.startswith(f"{prefix}:"):
+                self.scheduler.remove_job(job.id)
 
     def _scheduled_run(self, workflow_name: str) -> None:
         try:
@@ -290,13 +331,40 @@ class ScheduleService:
             print(f"scheduled workflow {workflow_name} skipped: {exc}", file=sys.stderr)
 
     def next_run_time(self, workflow_name: str) -> str | None:
-        job = self.scheduler.get_job(self._job_id(workflow_name))
-        next_time = getattr(job, "next_run_time", None) if job else None
+        next_times = [
+            next_time
+            for item in self.schedule_entries(workflow_name)
+            if (next_time := item["next_run_time"]) is not None
+        ]
+        next_time = min(next_times) if next_times else None
         return next_time.isoformat() if next_time else None
 
+    def schedule_entries(
+        self,
+        workflow_name: str,
+        cron_expressions: Sequence[str] | None = None,
+    ) -> list[dict[str, object]]:
+        if cron_expressions is None:
+            schedule = self.database.get_schedule(workflow_name)
+            if not schedule:
+                return []
+            cron_expressions = decode_cron_expressions(schedule["cron_expression"])
+        return [
+            {
+                "cron": cron,
+                "next_run_time": getattr(
+                    self.scheduler.get_job(self._job_id(workflow_name, index)),
+                    "next_run_time",
+                    None,
+                ),
+            }
+            for index, cron in enumerate(cron_expressions)
+        ]
+
     @staticmethod
-    def _job_id(workflow_name: str) -> str:
-        return f"workflow:{workflow_name}"
+    def _job_id(workflow_name: str, index: int | None = None) -> str:
+        base = f"workflow:{workflow_name}"
+        return base if index is None else f"{base}:{index}"
 
     def shutdown(self) -> None:
         if self.scheduler.running:

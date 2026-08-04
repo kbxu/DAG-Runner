@@ -1,3 +1,5 @@
+[中文](README.md) | [English](README.en.md)
+
 # DAG Runner
 
 一个简单、轻量、跨平台的 Python DAG 工作流运行器。
@@ -5,10 +7,10 @@
 用 YAML 定义任务和依赖，启动一个服务，就可以在浏览器里配置定时、查看 DAG、运行任务、停止任务、失败续跑和查看日志。不需要为每个工作流维护系统 cron，也不需要部署分布式调度集群。
 
 ![DAG Runner Web Console](docs/images/dashboard.png)
+![DAG Runner DAG View](docs/images/import-from-ds.png)
 ![DAG Runner DAG View](docs/images/dag.png)
 
 ## 系统架构
-
 ```mermaid
 flowchart LR
     user["Web 控制台 / CLI"] --> service["DAG Runner 服务<br/>工作流管理与定时调度"]
@@ -57,7 +59,7 @@ DAG Runner 不提供默认密码。该命令会创建或重置管理员账号 `a
 如果启动服务时通过 `--db` 指定其他数据库文件，创建账号时必须使用相同路径，例如：
 
 ```bash
-python -m dagrunner.auth --db /path/to/scheduler.db --generate
+python -m dagrunner.auth --db ./var/scheduler.db --generate
 ```
 
 ### 3. 启动并登录
@@ -78,6 +80,7 @@ python -m dagrunner.server
 | `--db` | `var/scheduler.db` | SQLite 数据库文件路径 |
 | `--logs` | `var/logs` | 工作流和任务日志目录 |
 | `--threads` | `8` | 任务执行线程池大小 |
+| `--language` | `zh-CN` | Web 默认语言；可选 `zh-CN` 或 `en`，页面右上角也可随时切换 |
 | `--allow-insecure-remote-login` | 关闭 | 允许非本机客户端通过 HTTP 保持登录，仅建议在可信局域网临时使用 |
 
 例如，允许局域网访问并使用自定义数据目录：
@@ -100,61 +103,29 @@ PBKDF2-HMAC-SHA256（600,000 次迭代）生成数据库校验值。前端摘要
 HTTP 会话 Cookie，并在浏览器 Web Crypto 不可用时启用页面内置的 SHA-256 实现。即使
 设置了 `DAGRUNNER_COOKIE_SECURE=1`，该模式也允许 HTTP 登录，因此不应在公网环境中使用。
 
-## 定义工作流
+### 4. 定义或导入工作流
 
-```yaml
-name: example_pipeline
-description: 示例数据处理流程
+工作流使用 YAML 描述任务、依赖、准备脚本和定时配置，完整格式可参考
+[示例工作流](demo/examples/dagr_example_pipeline.yaml)。登录 Web 控制台后，可以点击“新增工作流”
+基于示例编辑，也可以点击“导入工作流”选择已有文件。导入后的调度默认关闭，请检查命令、
+依赖关系、工作目录和调度时间后再手动启用。
 
-setup:
-  linux: |
-    cd /srv/my_project
-    export APP_ENV='production'
-    source /opt/miniconda3/etc/profile.d/conda.sh
-    conda activate analytics
-  windows: |
-    Set-Location "C:\Projects\my_project"
-    $env:APP_ENV = 'production'
-    conda activate analytics
+“导入工作流”可以直接识别以下格式：
 
-schedule:
-  cron: "0 9 * * mon-fri"
-  timezone: Asia/Shanghai
-  enabled: false
+- DAG Runner YAML
+- DolphinScheduler 导出的 JSON，例如 [示例文件](demo/examples/ds_9000001001.json)
+- Windows 任务计划程序导出的 XML，例如 [示例文件](demo/examples/ts_market_report.xml)
 
-tasks:
-  extract_data:
-    description: 提取数据
-    command: [python, jobs/extract.py]
-    depends: []
+DolphinScheduler 和 Windows 文件会使用默认参数在内存中转换，编辑框顶部会标记识别到的
+来源，不会生成中间文件。一个 Windows 任务中的多个可转换日历触发器会保留在同一个工作流
+中，并共享一个时区。
 
-  transform_data:
-    description: 清洗数据
-    command: [python, jobs/transform.py]
-    depends: [extract_data]
+目前 DolphinScheduler 转换仅支持 `SHELL`（Bash）和 `CONDITIONS` 两类节点；其他类型会被
+省略，并在导入预览中提示人工检查。
 
-  publish_report:
-    description: 发布报告
-    command: [python, jobs/publish.py]
-    depends: [transform_data]
-    timeout: 1800
-```
+#### 需要附加环境参数时手动转换
 
-登录 Web 控制台后点击“导入工作流”，选择 YAML 文件并确认即可。导入后调度默认关闭，检查配置无误后再手动启用。
-
-## 从外部调度器迁移
-
-以 DolphinScheduler 为例：
-
-### 1. 从 DolphinScheduler 导出工作流
-
-在 DolphinScheduler 的工作流定义页面选择需要迁移的工作流并导出，得到 JSON 文件。
-
-### 2. 使用命令行转换
-
-命令格式中的 `EXPORT` 是位置参数占位符，不需要原样输入。它表示从外部调度器导出的
-源文件路径：DolphinScheduler 使用 JSON 文件，Windows 任务计划程序使用 XML 文件。
-可以传入一个或多个文件路径；相对路径以当前命令行目录为基准，也可以使用绝对路径。
+如果迁移时需要注入工作目录、Conda 环境或环境变量，可以先使用命令行手动转换。例如：
 
 ```bash
 python -m dagrunner.migrate_workflows \
@@ -163,35 +134,22 @@ python -m dagrunner.migrate_workflows \
   --setup-file templates/production_setup.sh
 ```
 
-转换参数：
+Windows 任务计划程序使用 `--source windows-task-scheduler`，并传入导出的 XML 文件；
+PowerShell 环境准备脚本可以使用 `--setup-file templates/production_setup.ps1`。转换完成后，
+再从 Web 控制台导入生成的 `dagr_<源文件名>.yaml`。
+
+手动转换可用参数：
 
 | 参数 | 是否必填 | 说明 |
 | --- | --- | --- |
-| `--source` | 是 | 导出文件来源；DolphinScheduler 使用 `dolphinscheduler` |
-| `EXPORT` | 是 | 一个或多个导出文件路径；DolphinScheduler 为 JSON，Windows 任务计划程序为 XML；这是位置参数，不要输入字面量 `EXPORT` |
+| `--source` | 是 | `dolphinscheduler` 或 `windows-task-scheduler` |
+| `EXPORT` | 是 | 一个或多个 JSON/XML 导出文件路径；这是位置参数，不要输入字面量 `EXPORT` |
 | `--output-dir` | 否 | YAML 输出目录；默认写入源文件所在目录 |
 | `--setup-file` | 否 | 注入工作流级准备脚本；`.ps1`/`.psm1` 按 PowerShell 处理，其余按 Bash 处理 |
 | `--exclude-disabled` | 否 | 不转换已禁用节点及与其相连的依赖边 |
 | `--timezone` | 否 | 时区，默认 `Asia/Shanghai`；主要用于转换 Windows 触发器 |
 
-输出文件默认命名为 `dagr_<源文件名>.yaml`。转换过程只读写配置，不会执行导出文件中的命令。
-
-### 3. 导入转换后的文件
-
-登录 DAG Runner，在 Web 控制台点击“导入工作流”，选择生成的 YAML 文件。导入后检查命令、依赖关系、工作目录和调度时间，再手动启用调度。
-
-### Windows 任务计划程序示例
-
-先在 Windows 任务计划程序中将任务导出为 XML，然后在 PowerShell 中执行：
-
-```powershell
-python -m dagrunner.migrate_workflows `
-  --source windows-task-scheduler `
-  C:\exports\daily-report.xml `
-  --setup-file templates\production_setup.ps1
-```
-
-转换完成后，在 Web 控制台中导入 `C:\exports\dagr_daily-report.yaml`。
+转换过程只读写配置，不会执行导出文件中的命令。
 
 ## CLI
 

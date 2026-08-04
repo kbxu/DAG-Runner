@@ -5,12 +5,21 @@ import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
 from .database import StateDatabase
 from .logger import TaskLogManager
+from .migrate_workflows import (
+    SOURCE_DOLPHINSCHEDULER,
+    SOURCE_WINDOWS_TASK_SCHEDULER,
+    WINDOWS_TASK_NAMESPACE,
+    convert_dolphinscheduler_definition,
+    convert_windows_task_scheduler_definition,
+    dump_workflow_yaml,
+)
 from .service import (
     DEFAULT_SCHEDULE_CRON,
     DEFAULT_SCHEDULE_TIMEZONE,
@@ -18,6 +27,7 @@ from .service import (
     ScheduleService,
     ServiceError,
     WorkflowRegistry,
+    decode_cron_expressions,
 )
 from .workflow import Workflow, WorkflowError, migrate_legacy_env
 
@@ -28,8 +38,12 @@ def create_app(
     logs_path="var/logs",
     start_scheduler: bool = True,
     allow_insecure_remote_login: bool = False,
+    language: str = "zh-CN",
 ) -> Flask:
+    if language not in {"zh-CN", "en"}:
+        raise ValueError("language must be 'zh-CN' or 'en'")
     app = Flask(__name__, template_folder="templates", static_folder="static")
+    app.config["DEFAULT_LANGUAGE"] = language
     database = StateDatabase(database_path)
     for stored in database.list_workflows():
         migrated, changed = migrate_legacy_env(stored["definition"])
@@ -56,6 +70,12 @@ def create_app(
 
     @app.before_request
     def require_login():
+        requested_language = request.headers.get("X-DAGRunner-Language", "")
+        g.language = (
+            requested_language
+            if requested_language in {"zh-CN", "en"}
+            else language
+        )
         if request.endpoint in public_endpoints:
             return None
         token = request.cookies.get(SESSION_COOKIE)
@@ -76,7 +96,11 @@ def create_app(
             "Sec-Fetch-Mode"
         ) != "navigate":
             return jsonify(
-                {"ok": False, "error": "登录已失效，请重新登录", "login_url": login_url}
+                {
+                    "ok": False,
+                    "error": _localized_error("登录已失效，请重新登录", g.language),
+                    "login_url": login_url,
+                }
             ), 401
         return redirect(login_url)
 
@@ -105,6 +129,7 @@ def create_app(
             "login.html",
             next_url=_safe_next(request.args.get("next")),
             allow_insecure_remote_login=allow_insecure_remote_login,
+            default_language=language,
         )
 
     @app.post("/api/auth/login")
@@ -118,7 +143,9 @@ def create_app(
             response = jsonify(
                 {
                     "ok": False,
-                    "error": "登录失败次数过多，请在 10 分钟后重试",
+                    "error": _localized_error(
+                        "登录失败次数过多，请在 10 分钟后重试", g.language
+                    ),
                     "retry_after": result.retry_after,
                 }
             )
@@ -129,7 +156,7 @@ def create_app(
             return jsonify(
                 {
                     "ok": False,
-                    "error": "账号或密码错误",
+                    "error": _localized_error("账号或密码错误", g.language),
                     "remaining_attempts": result.remaining_attempts,
                 }
             ), 401
@@ -169,7 +196,11 @@ def create_app(
 
     @app.get("/")
     def index():
-        return render_template("index.html", username=g.current_user)
+        return render_template(
+            "index.html",
+            username=g.current_user,
+            default_language=language,
+        )
 
     @app.get("/health")
     def health():
@@ -185,6 +216,31 @@ def create_app(
         result = []
         for name, workflow in sorted(registry.workflows.items()):
             schedule = schedule_rows.get(name)
+            stored_crons = (
+                decode_cron_expressions(schedule["cron_expression"])
+                if schedule
+                else ()
+            )
+            schedule_entries = schedules.schedule_entries(name, stored_crons)
+            serialized_entries = [
+                {
+                    "cron": entry["cron"],
+                    "next_run_time": (
+                        entry["next_run_time"].isoformat()
+                        if entry["next_run_time"]
+                        else None
+                    ),
+                }
+                for entry in schedule_entries
+            ]
+            next_entry = min(
+                (entry for entry in serialized_entries if entry["next_run_time"]),
+                key=lambda entry: entry["next_run_time"],
+                default=None,
+            )
+            displayed_entry = next_entry or (
+                serialized_entries[0] if serialized_entries else None
+            )
             result.append(
                 {
                     "name": name,
@@ -206,10 +262,14 @@ def create_app(
                         for task in workflow.tasks.values()
                     ],
                     "schedule": {
-                        "cron": schedule["cron_expression"] if schedule else "",
+                        "cron": displayed_entry["cron"] if displayed_entry else "",
+                        "crons": list(stored_crons),
+                        "entries": serialized_entries,
                         "timezone": schedule["timezone"] if schedule else "Asia/Shanghai",
                         "enabled": bool(schedule["enabled"]) if schedule else False,
-                        "next_run_time": schedules.next_run_time(name),
+                        "next_run_time": (
+                            next_entry["next_run_time"] if next_entry else None
+                        ),
                     },
                 }
             )
@@ -236,7 +296,7 @@ def create_app(
         try:
             schedules.update(
                 workflow_name,
-                schedule.cron if schedule else DEFAULT_SCHEDULE_CRON,
+                schedule.crons if schedule else [DEFAULT_SCHEDULE_CRON],
                 schedule.timezone if schedule else DEFAULT_SCHEDULE_TIMEZONE,
                 False,
             )
@@ -245,6 +305,17 @@ def create_app(
             registry.refresh()
             raise
         return jsonify({"ok": True, "id": workflow_name, "name": display_name}), 201
+
+    @app.post("/api/workflows/import-preview")
+    def import_workflow_preview():
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            raise ServiceError("请选择工作流文件")
+        try:
+            content = uploaded.read().decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ServiceError("工作流文件必须使用 UTF-8 编码") from exc
+        return jsonify(_prepare_import_preview(uploaded.filename, content))
 
     @app.get("/api/workflows/next-id")
     def next_workflow_id():
@@ -300,12 +371,14 @@ def create_app(
     @app.put("/api/workflows/<workflow_name>/schedule")
     def update_schedule(workflow_name: str):
         payload = request.get_json(silent=True) or {}
-        cron_expression = str(payload.get("cron", "")).strip()
+        cron_expressions = payload.get("crons", payload.get("cron", []))
+        if isinstance(cron_expressions, str):
+            cron_expressions = [cron_expressions]
+        if not isinstance(cron_expressions, list):
+            raise ServiceError("crons must be a list")
         timezone_name = str(payload.get("timezone", "Asia/Shanghai")).strip()
         enabled = bool(payload.get("enabled", False))
-        if not cron_expression:
-            raise ServiceError("cron is required")
-        schedules.update(workflow_name, cron_expression, timezone_name, enabled)
+        schedules.update(workflow_name, cron_expressions, timezone_name, enabled)
         return jsonify({"ok": True, "next_run_time": schedules.next_run_time(workflow_name)})
 
     @app.post("/api/workflows/<workflow_name>/run")
@@ -460,7 +533,9 @@ def create_app(
     @app.errorhandler(ServiceError)
     @app.errorhandler(WorkflowError)
     def expected_error(exc):
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify(
+            {"ok": False, "error": _localized_error(str(exc), g.language)}
+        ), 400
 
     if start_scheduler:
         atexit.register(_shutdown, schedules, executions)
@@ -470,6 +545,75 @@ def create_app(
 def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
     schedules.shutdown()
     executions.shutdown()
+
+
+def _prepare_import_preview(filename: str, content: str) -> dict[str, object]:
+    """Detect an import source and convert external exports entirely in memory."""
+    stripped = content.strip()
+    if not stripped:
+        raise ServiceError("工作流文件不能为空")
+
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        root = None
+    if root is not None:
+        if root.tag != f"{{{WINDOWS_TASK_NAMESPACE}}}Task":
+            raise ServiceError("无法识别的 XML 工作流格式")
+        try:
+            configs, warnings = convert_windows_task_scheduler_definition(
+                root,
+                Path(filename).stem,
+            )
+        except ValueError as exc:
+            raise ServiceError(f"Windows Task Scheduler 转换失败：{exc}") from exc
+        return {
+            "source": SOURCE_WINDOWS_TASK_SCHEDULER,
+            "source_label": "Windows Task Scheduler",
+            "definition": dump_workflow_yaml(configs[0]),
+            "warnings": warnings,
+            "filename": f"dagr_{Path(filename).stem}.yaml",
+        }
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = None
+    definitions = payload if isinstance(payload, list) else [payload]
+    is_dolphinscheduler = bool(definitions) and all(
+        isinstance(item, dict)
+        and "processDefinition" in item
+        and "taskDefinitionList" in item
+        for item in definitions
+    )
+    if is_dolphinscheduler:
+        if len(definitions) != 1:
+            raise ServiceError(
+                "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入"
+            )
+        try:
+            config, warnings = convert_dolphinscheduler_definition(definitions[0])
+        except ValueError as exc:
+            raise ServiceError(f"DolphinScheduler 转换失败：{exc}") from exc
+        return {
+            "source": SOURCE_DOLPHINSCHEDULER,
+            "source_label": "DolphinScheduler",
+            "definition": dump_workflow_yaml(config),
+            "warnings": warnings,
+            "filename": f"dagr_{Path(filename).stem}.yaml",
+        }
+
+    try:
+        Workflow.from_yaml(content, fallback_name=Path(filename).stem)
+    except WorkflowError as exc:
+        raise ServiceError(f"无法识别工作流来源：{exc}") from exc
+    return {
+        "source": "dag-runner",
+        "source_label": "DAG Runner YAML",
+        "definition": content,
+        "warnings": [],
+        "filename": filename,
+    }
 
 
 def _row_dict(row) -> dict:
@@ -498,6 +642,40 @@ def _safe_next(value) -> str:
     ):
         return "/"
     return candidate
+
+
+_ENGLISH_ERRORS = {
+    "登录已失效，请重新登录": "Your session has expired. Please sign in again",
+    "登录失败次数过多，请在 10 分钟后重试": "Too many failed sign-in attempts. Try again in 10 minutes",
+    "账号或密码错误": "Incorrect username or password",
+    "请选择 YAML 文件": "Select a YAML file",
+    "YAML 文件必须使用 UTF-8 编码": "The YAML file must use UTF-8 encoding",
+    "请选择工作流文件": "Select a workflow file",
+    "工作流文件必须使用 UTF-8 编码": "The workflow file must use UTF-8 encoding",
+    "示例工作流文件不可用": "The example workflow is unavailable",
+    "工作流运行中，不能编辑": "A running workflow cannot be edited",
+    "请先下线定时，再编辑工作流": "Disable the schedule before editing the workflow",
+    "工作流文件不能为空": "The workflow file cannot be empty",
+    "无法识别的 XML 工作流格式": "Unrecognized XML workflow format",
+    "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入": "The DolphinScheduler export contains multiple workflows; split it and import each workflow separately",
+}
+
+_ENGLISH_ERROR_PREFIXES = {
+    "Windows Task Scheduler 转换失败：": "Windows Task Scheduler conversion failed: ",
+    "DolphinScheduler 转换失败：": "DolphinScheduler conversion failed: ",
+    "无法识别工作流来源：": "Could not detect the workflow source: ",
+}
+
+
+def _localized_error(message: str, language: str) -> str:
+    if language != "en":
+        return message
+    if message in _ENGLISH_ERRORS:
+        return _ENGLISH_ERRORS[message]
+    for prefix, translation in _ENGLISH_ERROR_PREFIXES.items():
+        if message.startswith(prefix):
+            return translation + message[len(prefix):]
+    return message
 
 
 def _secure_cookie_enabled(allow_insecure_remote_login: bool = False) -> bool:

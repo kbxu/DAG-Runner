@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="{{ default_language }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,33 +7,34 @@
   <link rel="icon" href="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body data-default-language="{{ default_language }}">
   <header class="topbar">
     <div class="brand">
       <img class="brand-logo" src="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" alt="DAG Runner">
       <div>
         <p class="eyebrow">MINI WORKFLOW SERVICE</p>
         <h1>Dag Runner Console</h1>
-        <p class="subtitle">工作流、定时计划和运行状态集中管理</p>
+        <p class="subtitle" data-i18n>工作流、定时计划和运行状态集中管理</p>
       </div>
     </div>
     <div class="header-actions">
-      <div id="serviceStatus" class="live checking"><span></span><b>正在连接</b></div>
+      <div id="serviceStatus" class="live checking"><span></span><b data-i18n>正在连接</b></div>
       <span class="signed-in-user">{{ username }}</span>
-      <button class="logout-button" type="button" onclick="logout()">退出</button>
+      <button id="languageToggle" class="logout-button" type="button">EN</button>
+      <button class="logout-button" type="button" onclick="logout()" data-i18n>退出</button>
     </div>
   </header>
 
   <main>
     <section class="panel">
       <div class="panel-head">
-        <div><h2>工作流与定时</h2><p>查看任务 DAG，配置 cron，或立即发起运行</p></div>
-        <div class="panel-actions"><button class="button" onclick="openNewWorkflow()">新增工作流</button><button class="button" onclick="openImportWorkflow()">导入工作流</button><button class="button ghost" onclick="loadWorkflows()">刷新</button></div>
+        <div><h2 data-i18n>工作流与定时</h2><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p></div>
+        <div class="panel-actions"><button class="button" onclick="openNewWorkflow()" data-i18n>新增工作流</button><button class="button" onclick="openImportWorkflow()" data-i18n>导入工作流</button><button class="button ghost" onclick="loadWorkflows()" data-i18n>刷新</button></div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>工作流</th><th>任务</th><th>定时状态</th><th>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')">上次运行 <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')">下次运行 <span id="nextRunSort"></span></button></th><th>操作</th></tr></thead>
-          <tbody id="workflowRows"><tr><td colspan="7" class="empty">正在加载…</td></tr></tbody>
+          <thead><tr><th data-i18n>工作流</th><th data-i18n>任务</th><th data-i18n>定时状态</th><th data-i18n>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')"><span data-i18n>上次运行</span> <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')"><span data-i18n>下次运行</span> <span id="nextRunSort"></span></button></th><th data-i18n>操作</th></tr></thead>
+          <tbody id="workflowRows"><tr><td colspan="7" class="empty" data-i18n>正在加载…</td></tr></tbody>
         </table>
       </div>
       <div id="workflowPagination" class="pagination"></div>
@@ -42,22 +43,22 @@
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>运行记录</h2><p>按开始时间倒序；运行中的记录每 3 秒刷新</p></div>
-        <button class="button ghost" onclick="loadRuns()">立即刷新</button>
+        <div><h2 data-i18n>运行记录</h2><p data-i18n>按开始时间倒序；运行中的记录每 3 秒刷新</p></div>
+        <button class="button ghost" onclick="loadRuns()" data-i18n>立即刷新</button>
       </div>
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>开始时间 / Run ID</th><th>工作流</th><th>触发方式</th><th>状态</th><th>任务进度</th><th>耗时</th><th>操作</th></tr>
+            <tr><th data-i18n>开始时间 / Run ID</th><th data-i18n>工作流</th><th data-i18n>触发方式</th><th data-i18n>状态</th><th data-i18n>任务进度</th><th data-i18n>耗时</th><th data-i18n>操作</th></tr>
             <tr class="filter-row">
               <th></th>
-              <th><input id="runWorkflowFilter" type="search" placeholder="搜索名称或 ID" aria-label="搜索工作流" oninput="scheduleRunSearch(this.value)"></th>
-              <th><select id="runTriggerFilter" aria-label="筛选触发方式" onchange="setRunFilter('trigger',this.value)"><option value="">全部</option><option value="manual">手动</option><option value="schedule">定时</option><option value="rerun">重跑</option><option value="resume">失败续跑</option></select></th>
-              <th><select id="runStatusFilter" aria-label="筛选状态" onchange="setRunFilter('status',this.value)"><option value="">全部</option><option value="RUNNING">运行中</option><option value="SUCCESS">成功</option><option value="FAILED">失败</option></select></th>
+              <th><input id="runWorkflowFilter" type="search" placeholder="搜索名称或 ID" data-i18n-placeholder="搜索名称或 ID" aria-label="搜索工作流" data-i18n-aria-label="搜索工作流" oninput="scheduleRunSearch(this.value)"></th>
+              <th><select id="runTriggerFilter" aria-label="筛选触发方式" data-i18n-aria-label="筛选触发方式" onchange="setRunFilter('trigger',this.value)"><option value="" data-i18n>全部</option><option value="manual" data-i18n>手动</option><option value="schedule" data-i18n>定时</option><option value="rerun" data-i18n>重跑</option><option value="resume" data-i18n>失败续跑</option></select></th>
+              <th><select id="runStatusFilter" aria-label="筛选状态" data-i18n-aria-label="筛选状态" onchange="setRunFilter('status',this.value)"><option value="" data-i18n>全部</option><option value="RUNNING" data-i18n>运行中</option><option value="SUCCESS" data-i18n>成功</option><option value="FAILED" data-i18n>失败</option></select></th>
               <th></th><th></th><th></th>
             </tr>
           </thead>
-          <tbody id="runRows"><tr><td colspan="7" class="empty">正在加载…</td></tr></tbody>
+          <tbody id="runRows"><tr><td colspan="7" class="empty" data-i18n>正在加载…</td></tr></tbody>
         </table>
       </div>
       <div id="runPagination" class="pagination"></div>
@@ -75,7 +76,7 @@
       <div class="modal-head">
         <h3 id="logModalTitle"></h3>
         <div class="modal-head-actions">
-          <button class="button ghost" onclick="copyLog()">复制日志</button>
+          <button class="button ghost" onclick="copyLog()" data-i18n>复制日志</button>
           <button class="icon-button" onclick="closeLogModal()">×</button>
         </div>
       </div>
@@ -87,12 +88,13 @@
       <h3 id="deleteConfirmTitle"></h3>
       <p id="deleteConfirmMessage"></p>
       <div class="confirm-actions">
-        <button class="button ghost" onclick="resolveDeleteConfirm(false)">取消</button>
-        <button class="button danger" onclick="resolveDeleteConfirm(true)">确认删除</button>
+        <button class="button ghost" onclick="resolveDeleteConfirm(false)" data-i18n>取消</button>
+        <button class="button danger" onclick="resolveDeleteConfirm(true)" data-i18n>确认删除</button>
       </div>
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
+  <script src="{{ url_for('static', filename='i18n.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

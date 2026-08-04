@@ -17,6 +17,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
+        "--language",
+        choices=("zh-CN", "en"),
+        default="zh-CN",
+        help="default web interface language (default: zh-CN)",
+    )
+    parser.add_argument(
         "--allow-insecure-remote-login",
         action="store_true",
         help=(
@@ -29,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         database_path=args.db,
         logs_path=args.logs,
         allow_insecure_remote_login=args.allow_insecure_remote_login,
+        language=args.language,
     )
     print(f"dag-runner service listening on http://{args.host}:{args.port}")
     if args.allow_insecure_remote_login:

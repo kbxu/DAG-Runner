@@ -61,6 +61,11 @@ def _lf_newlines(value: str) -> str:
 
 
 def _write_yaml(destination: Path, config: dict[str, Any]) -> None:
+    destination.write_bytes(dump_workflow_yaml(config).encode("utf-8"))
+
+
+def dump_workflow_yaml(config: dict[str, Any]) -> str:
+    """Serialize a converted workflow without writing an intermediate file."""
     content = yaml.dump(
         config,
         Dumper=LiteralDumper,
@@ -68,8 +73,7 @@ def _write_yaml(destination: Path, config: dict[str, Any]) -> None:
         sort_keys=False,
         width=1000,
     )
-    # Write bytes so Windows text-mode newline translation cannot restore CRLF.
-    destination.write_bytes(_lf_newlines(content).encode("utf-8"))
+    return _lf_newlines(content)
 
 
 def convert_dolphinscheduler_crontab(crontab: str) -> str:
@@ -275,43 +279,36 @@ def convert_windows_task_scheduler_definition(
             "generic schedule default"
         )
         trigger_crons = [(None, "unconverted")]
-    elif len(trigger_crons) > 1:
-        warnings.append(
-            "multiple triggers were split into separate workflows; unlike the source "
-            "task's MultipleInstancesPolicy, these workflows can overlap"
-        )
 
-    configs: list[dict[str, Any]] = []
-    total = len(trigger_crons)
-    for index, (cron, trigger_type) in enumerate(trigger_crons, start=1):
-        workflow_name = base_name if total == 1 else f"{base_name}_{index}"
-        workflow_description = (
-            description if total == 1 else f"{description}（触发器 {index}/{total}）"
-        )
-        migration: dict[str, Any] = {
-            "source": SOURCE_WINDOWS_TASK_SCHEDULER,
-            "source_uri": uri,
-            "source_author": author,
-            "source_enabled": source_enabled,
-            "source_trigger_type": trigger_type,
-            "requires_manual_review": bool(warnings),
+    converted_crons = [cron for cron, _ in trigger_crons if cron]
+    migration: dict[str, Any] = {
+        "source": SOURCE_WINDOWS_TASK_SCHEDULER,
+        "source_uri": uri,
+        "source_author": author,
+        "source_enabled": source_enabled,
+        **(
+            {"source_trigger_type": trigger_crons[0][1]}
+            if len(trigger_crons) == 1
+            else {}
+        ),
+        "source_trigger_types": [trigger_type for _, trigger_type in trigger_crons],
+        "requires_manual_review": bool(warnings),
+    }
+    config: dict[str, Any] = {
+        "name": base_name,
+        "description": description,
+    }
+    if setup.strip():
+        config["setup"] = setup.strip()
+    config["tasks"] = dict(actions)
+    if converted_crons:
+        config["schedule"] = {
+            "crons": converted_crons,
+            "timezone": timezone_name,
+            "enabled": False,
         }
-        config: dict[str, Any] = {
-            "name": workflow_name,
-            "description": workflow_description,
-        }
-        if setup.strip():
-            config["setup"] = setup.strip()
-        config["tasks"] = dict(actions)
-        if cron:
-            config["schedule"] = {
-                "cron": cron,
-                "timezone": timezone_name,
-                "enabled": False,
-            }
-        config["migration"] = migration
-        configs.append(config)
-    return configs, warnings
+    config["migration"] = migration
+    return [config], warnings
 
 
 def _windows_trigger_cron(
@@ -339,7 +336,7 @@ def _windows_trigger_cron(
         days_node = weekly.find("task:DaysOfWeek", ns)
         days = [
             WINDOWS_WEEKDAYS[child.tag.rsplit("}", 1)[-1]]
-            for child in list(days_node or [])
+            for child in (list(days_node) if days_node is not None else [])
             if child.tag.rsplit("}", 1)[-1] in WINDOWS_WEEKDAYS
         ]
         if not days:
@@ -359,7 +356,7 @@ def _windows_trigger_cron(
         months_node = monthly.find("task:Months", ns)
         days = [
             child.text.strip()
-            for child in list(days_node or [])
+            for child in (list(days_node) if days_node is not None else [])
             if child.tag.rsplit("}", 1)[-1] == "Day"
             and child.text
             and child.text.strip().isdigit()
@@ -376,7 +373,7 @@ def _windows_trigger_cron(
         }
         months = [
             month_names[child.tag.rsplit("}", 1)[-1]]
-            for child in list(months_node or [])
+            for child in (list(months_node) if months_node is not None else [])
             if child.tag.rsplit("}", 1)[-1] in month_names
         ]
         if not days:
@@ -646,7 +643,7 @@ def convert_dolphinscheduler_definition(
     if isinstance(crontab, str) and crontab.strip():
         try:
             converted_schedule = {
-                "cron": convert_dolphinscheduler_crontab(crontab),
+                "crons": [convert_dolphinscheduler_crontab(crontab)],
                 "timezone": schedule.get("timezoneId") or "Asia/Shanghai",
                 # Imported schedules must be enabled manually after server deployment.
                 "enabled": False,
