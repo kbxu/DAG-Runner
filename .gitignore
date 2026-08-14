@@ -18,6 +18,7 @@ data/
 # Runtime state is local and may contain sensitive paths or logs.
 var/*
 !var/.gitkeep
+!var/notifier.example.yaml
 
 # Demo execution output.
 .demo_data/

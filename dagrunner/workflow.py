@@ -213,6 +213,21 @@ class ScheduleDefinition:
 
 
 @dataclass(frozen=True)
+class EmailNotification:
+    send_on: str = "disabled"
+    recipients: tuple[str, ...] = ()
+
+    @property
+    def enabled(self) -> bool:
+        return self.send_on != "disabled"
+
+    def should_send(self, status: str) -> bool:
+        return self.send_on == "always" or (
+            self.send_on == "success" and status == "SUCCESS"
+        ) or (self.send_on == "failure" and status == "FAILED")
+
+
+@dataclass(frozen=True)
 class Workflow:
     name: str
     tasks: dict[str, Task]
@@ -221,6 +236,7 @@ class Workflow:
     schedule: ScheduleDefinition | None = None
     description: str = ""
     timeout: int | None = None
+    email_notification: EmailNotification = field(default_factory=EmailNotification)
 
     @classmethod
     def load(cls, path: str | Path) -> "Workflow":
@@ -348,6 +364,7 @@ class Workflow:
                 else str(data.get("description", ""))
             ),
             timeout=workflow_timeout,
+            email_notification=_email_notification_value(data.get("notification")),
         )
         workflow.topological_order()  # Validate references and cycles now.
         return workflow
@@ -547,3 +564,46 @@ def _schedule_value(value: Any) -> ScheduleDefinition | None:
         timezone=timezone_name,
         enabled=bool(value.get("enabled", False)),
     )
+
+
+def _email_notification_value(value: Any) -> EmailNotification:
+    if value is None:
+        return EmailNotification()
+    if not isinstance(value, dict):
+        raise WorkflowError("workflow 'notification' must be a mapping")
+    email = value.get("email")
+    if email is None:
+        return EmailNotification()
+    if not isinstance(email, dict):
+        raise WorkflowError("workflow notification.email must be a mapping")
+    send_on = email.get("send_on")
+    if send_on is None:
+        # Read the briefly supported enabled flag without emitting it in new configs.
+        legacy_enabled = email.get("enabled", False)
+        if not isinstance(legacy_enabled, bool):
+            raise WorkflowError("workflow notification.email.enabled must be true or false")
+        send_on = "always" if legacy_enabled else "disabled"
+    if not isinstance(send_on, str) or send_on not in {
+        "disabled",
+        "success",
+        "failure",
+        "always",
+    }:
+        raise WorkflowError(
+            "workflow notification.email.send_on must be disabled, success, failure, or always"
+        )
+    raw_recipients = email.get("to", [])
+    if isinstance(raw_recipients, str):
+        raw_recipients = [raw_recipients]
+    if not isinstance(raw_recipients, list) or not all(
+        isinstance(item, str) and item.strip() for item in raw_recipients
+    ):
+        raise WorkflowError(
+            "workflow notification.email.to must be a string or a list of non-empty strings"
+        )
+    recipients = tuple(item.strip() for item in raw_recipients)
+    if send_on != "disabled" and not recipients:
+        raise WorkflowError(
+            "workflow notification.email.to needs at least one address when enabled"
+        )
+    return EmailNotification(send_on=send_on, recipients=recipients)

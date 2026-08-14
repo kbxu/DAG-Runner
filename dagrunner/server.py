@@ -15,6 +15,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=7119)
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
+    parser.add_argument(
+        "--notifier-config",
+        type=Path,
+        help="email notifier YAML/JSON (default: discover beside --db)",
+    )
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
         "--language",
@@ -36,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         logs_path=args.logs,
         allow_insecure_remote_login=args.allow_insecure_remote_login,
         language=args.language,
+        notifier_config_path=args.notifier_config,
     )
     print(f"dag-runner service listening on http://{args.host}:{args.port}")
     if args.allow_insecure_remote_login:

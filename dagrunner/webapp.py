@@ -8,11 +8,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
+import yaml
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
 from .database import StateDatabase
 from .logger import TaskLogManager
+from .notifier import load_email_config, load_notifier, save_email_config
 from .migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
     SOURCE_WINDOWS_TASK_SCHEDULER,
@@ -43,6 +45,7 @@ def create_app(
     start_scheduler: bool = True,
     allow_insecure_remote_login: bool = False,
     language: str = "zh-CN",
+    notifier_config_path=None,
 ) -> Flask:
     if language not in {"zh-CN", "en"}:
         raise ValueError("language must be 'zh-CN' or 'en'")
@@ -58,7 +61,9 @@ def create_app(
     registry = WorkflowRegistry(database)
     auth = AuthService(database)
     logs = TaskLogManager(logs_path)
-    executions = ExecutionService(database, registry, logs)
+    notifier_var_dir = Path(database_path).resolve().parent
+    notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
+    executions = ExecutionService(database, registry, logs, notifier=notifier)
     schedules = ScheduleService(database, registry, executions)
     if start_scheduler:
         executions.recover_orphaned_runs()
@@ -210,6 +215,86 @@ def create_app(
     def health():
         return jsonify({"ok": True, "scheduler_running": schedules.scheduler.running})
 
+    @app.get("/api/notifier")
+    def notifier_settings():
+        try:
+            email = load_email_config(
+                notifier_config_path, var_dir=notifier_var_dir
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        if email is None:
+            return jsonify(
+                {
+                    "email": {
+                        "configured": False,
+                        "host": "",
+                        "port": 465,
+                        "username": "",
+                        "has_password": False,
+                        "from": "",
+                        "security": "ssl",
+                        "timeout": 10,
+                        "subject_prefix": "[DAG Runner]",
+                    }
+                }
+            )
+        security = "ssl" if email.use_ssl else "starttls" if email.starttls else "plain"
+        return jsonify(
+            {
+                "email": {
+                    "configured": True,
+                    "host": email.host,
+                    "port": email.port,
+                    "username": email.username or "",
+                    "has_password": bool(email.password),
+                    "from": email.sender,
+                    "security": security,
+                    "timeout": email.timeout,
+                    "subject_prefix": email.subject_prefix,
+                }
+            }
+        )
+
+    @app.put("/api/notifier")
+    def update_notifier_settings():
+        payload = request.get_json(silent=True) or {}
+        email = payload.get("email")
+        if not isinstance(email, dict):
+            raise ServiceError("email notifier settings must be a mapping")
+        security = email.get("security", "ssl")
+        if security not in {"ssl", "starttls", "plain"}:
+            raise ServiceError("email security must be ssl, starttls, or plain")
+        try:
+            current = load_email_config(
+                notifier_config_path, var_dir=notifier_var_dir
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        password = email.get("password", "")
+        if password == "" and current is not None:
+            password = current.password or ""
+        try:
+            saved = save_email_config(
+                {
+                    "host": email.get("host"),
+                    "port": email.get("port"),
+                    "username": email.get("username", ""),
+                    "password": password,
+                    "from": email.get("from"),
+                    "use_ssl": security == "ssl",
+                    "starttls": security == "starttls",
+                    "timeout": email.get("timeout", 10),
+                    "subject_prefix": email.get("subject_prefix", "[DAG Runner]"),
+                },
+                notifier_config_path,
+                var_dir=notifier_var_dir,
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        executions.notifier = saved
+        return jsonify({"ok": True})
+
     @app.get("/api/workflows")
     def workflows():
         registry.refresh()
@@ -252,6 +337,12 @@ def create_app(
                     "description": workflow.description,
                     "last_run_time": last_run_times.get(name),
                     "task_count": len(workflow.tasks),
+                    "notification": {
+                        "email": {
+                            "send_on": workflow.email_notification.send_on,
+                            "to": list(workflow.email_notification.recipients),
+                        }
+                    },
                     "tasks": [
                         {
                             "name": task.name,
@@ -400,6 +491,33 @@ def create_app(
         enabled = bool(payload.get("enabled", False))
         schedules.update(workflow_name, cron_expressions, timezone_name, enabled)
         return jsonify({"ok": True, "next_run_time": schedules.next_run_time(workflow_name)})
+
+    @app.put("/api/workflows/<workflow_name>/notification")
+    def update_notification(workflow_name: str):
+        payload = request.get_json(silent=True) or {}
+        send_on = payload.get("send_on", "disabled")
+        recipients = payload.get("to", [])
+        current = database.get_workflow(workflow_name)
+        if current is None:
+            raise ServiceError(f"workflow not found: {workflow_name}")
+        try:
+            config = yaml.safe_load(current["definition"])
+        except yaml.YAMLError as exc:
+            raise ServiceError(f"invalid workflow YAML: {exc}") from exc
+        if not isinstance(config, dict):
+            raise ServiceError("workflow YAML must be a mapping")
+        notification = config.get("notification")
+        if notification is None:
+            notification = {}
+            config["notification"] = notification
+        if not isinstance(notification, dict):
+            raise ServiceError("workflow 'notification' must be a mapping")
+        notification["email"] = {"send_on": send_on, "to": recipients}
+        definition = dump_workflow_yaml(config)
+        Workflow.from_yaml(definition, name_override=workflow_name)
+        database.update_workflow(workflow_name, current["name"], definition)
+        registry.refresh()
+        return jsonify({"ok": True})
 
     @app.post("/api/workflows/<workflow_name>/run")
     def run_workflow(workflow_name: str):

@@ -15,7 +15,7 @@ from threading import Event, Timer
 from .database import StateDatabase
 from .executor import TaskExecutor
 from .logger import TaskLogManager
-from .notifier import Notifier, NullNotifier, TaskEvent
+from .notifier import Notifier, NullNotifier, TaskFailure, WorkflowEvent, load_notifier
 from .workflow import Workflow, WorkflowError
 
 
@@ -158,6 +158,7 @@ class WorkflowRunner:
             else:
                 run_error = "stopped by user" if task_cancel_event.is_set() else None
             self.database.finish_run(run_id, final_status, run_error)
+            self._notify_workflow(workflow, run_id, final_status, run_error)
             return run_id, final_status
         except BaseException as exc:
             task_cancel_event.set()
@@ -172,6 +173,7 @@ class WorkflowRunner:
                         run_id, name, "SKIPPED", error_message="runner stopped before task started"
                     )
             self.database.finish_run(run_id, "FAILED", str(exc))
+            self._notify_workflow(workflow, run_id, "FAILED", str(exc))
             raise
         finally:
             if workflow_timeout_timer is not None:
@@ -314,17 +316,6 @@ class WorkflowRunner:
                         error_message=error_message,
                     )
                     states[task_name] = status
-                    self._notify(
-                        TaskEvent(
-                            workflow_name=workflow.name,
-                            run_id=run_id,
-                            task_name=task_name,
-                            status=status,
-                            log_file=str(log_file),
-                            exit_code=exit_code,
-                            error_message=error_message,
-                        )
-                    )
         except BaseException:
             cancel_event.set()
             for future in running:
@@ -498,14 +489,44 @@ class WorkflowRunner:
         if skip_kind in CONDITION_SKIP_KINDS and benign_skips is not None:
             benign_skips.add(task_name)
 
-    def _notify(self, event: TaskEvent) -> None:
+    def _notify_workflow(
+        self,
+        workflow: Workflow,
+        run_id: str,
+        status: str,
+        error_message: str | None,
+    ) -> None:
+        notification = workflow.email_notification
+        if not notification.should_send(status):
+            return
         try:
-            if event.status == "SUCCESS":
-                self.notifier.on_task_success(event)
+            failures = tuple(
+                TaskFailure(
+                    task_name=row["task_name"],
+                    exit_code=row["exit_code"],
+                    error_message=row["error_message"],
+                    log_file=row["log_file"],
+                )
+                for row in self.database.task_states(run_id).values()
+                if row["status"] == "FAILED"
+            )
+            event = WorkflowEvent(
+                workflow_name=workflow.name,
+                run_id=run_id,
+                status=status,
+                recipients=notification.recipients,
+                error_message=error_message,
+                failed_tasks=failures,
+            )
+            if status == "SUCCESS":
+                self.notifier.on_workflow_success(event)
             else:
-                self.notifier.on_task_failed(event)
+                self.notifier.on_workflow_failed(event)
         except Exception as exc:
-            print(f"warning: notifier failed for {event.task_name}: {exc}", file=sys.stderr)
+            print(
+                f"warning: notifier failed for workflow {workflow.name}: {exc}",
+                file=sys.stderr,
+            )
 
 
 def _is_reusable_previous_state(row) -> bool:
@@ -527,6 +548,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from", dest="from_task", help="rerun this task and its descendants")
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
+    parser.add_argument(
+        "--notifier-config",
+        type=Path,
+        help="email notifier YAML/JSON (default: discover beside --db)",
+    )
     parser.add_argument("--list-runs", action="store_true", help="show persisted workflow runs")
     parser.add_argument("--status", action="store_true", help="show tasks for --run-id")
     parser.add_argument("--show-log", action="store_true", help="print log for --run-id and --task")
@@ -565,9 +591,12 @@ def main(argv: list[str] | None = None) -> int:
             recovered = database.mark_orphaned(workflow.name)
             if recovered:
                 print(f"recovered {recovered} interrupted run(s)", file=sys.stderr)
-            run_id, status = WorkflowRunner(database, TaskLogManager(args.logs)).run(
-                workflow, args.from_task
+            notifier = load_notifier(
+                args.notifier_config, var_dir=args.db.resolve().parent
             )
+            run_id, status = WorkflowRunner(
+                database, TaskLogManager(args.logs), notifier=notifier
+            ).run(workflow, args.from_task)
         print(f"workflow={workflow.name} run_id={run_id} status={status}")
         return 0 if status == "SUCCESS" else 1
     except (WorkflowError, AlreadyRunningError, OSError, ValueError, KeyError) as exc:

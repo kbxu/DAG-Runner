@@ -15,6 +15,13 @@ schedule:
   timezone: Asia/Shanghai
   enabled: false
 
+notification:
+  email:
+    # disabled / success / failure / always
+    send_on: disabled
+    to:
+      - operator@example.com
+
 tasks:
   extract_data:
     description: 提取示例数据

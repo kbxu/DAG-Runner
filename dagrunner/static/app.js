@@ -55,7 +55,7 @@ function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":
 function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"); }
 function namedId(name, id) { return name && name !== id ? (currentLanguage === "en" ? `${name} (${id})` : `${name}（${id}）`) : id; }
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
-const usefulTopKeys = new Set(["description", "setup", "timeout", "tasks"]);
+const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
 const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
   return `<div class="yaml-editor"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div>`;
@@ -143,6 +143,8 @@ function renderWorkflows() {
   document.getElementById("nextRunSort").textContent = key === "next_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
   document.getElementById("workflowRows").innerHTML = visibleWorkflows.map(w => {
       const s = w.schedule;
+      const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
+      const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
       return `<tr>
         <td><button class="workflow-link" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
         <td><span class="primary">${w.task_count}</span> ${t("个节点")}</td>
@@ -150,7 +152,7 @@ function renderWorkflows() {
         <td>${scheduleSummary(s)}</td>
         <td>${fmt(w.last_run_time)}</td>
         <td>${fmt(s.next_run_time)}</td>
-        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">${t("任务")}</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">${t("定时")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出 YAML")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
+        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">${t("任务")}</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">${t("定时")}</button><button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>✉ ${t("通知")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出 YAML")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("还没有导入工作流")}</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>${t("共 {total} 条 · 第 {page} / {pages} 页", {total:workflows.length,page:state.workflowPage,pages:totalPages})}</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">${t("上一页")}</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">${t("下一页")}</button></div>`;
@@ -260,6 +262,34 @@ function scheduleRunSearch(value) {
 
 async function runWorkflow(name) { try { const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:"{}"}); toast(t("已提交 {id}",{id:r.run_id})); setTimeout(loadRuns, 250); } catch(e) { toast(e.message, true); } }
 async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
+
+async function openNotifierSettings() {
+  try {
+    const data=await api("/api/notifier"), email=data.email;
+    const securityOption=(value,label)=>`<option value="${value}" ${email.security===value?"selected":""}>${t(label)}</option>`;
+    const passwordHint=email.has_password?t("已保存密码；留空不会修改"):t("请输入 SMTP 密码或授权码");
+    openModal(t("通知渠道配置"), `<div class="channel-editor"><div class="channel-card"><div class="notification-icon">✉</div><div><strong>${t("邮件 SMTP")}</strong><p>${t("配置所有工作流共用的发件账号。收件人与发送时机仍在各工作流的通知面板中配置。")}</p></div><span class="channel-status ${email.configured?"configured":""}">${email.configured?t("已配置"):t("未配置")}</span></div><div class="channel-form-grid"><label>${t("SMTP 主机")}<input id="smtpHost" required value="${esc(email.host)}" placeholder="smtp.example.com"></label><label>${t("端口")}<input id="smtpPort" required type="number" min="1" max="65535" value="${esc(email.port)}"></label><label>${t("用户名")}<input id="smtpUsername" value="${esc(email.username)}" autocomplete="username"></label><label>${t("密码 / 授权码")}<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="${esc(passwordHint)}"></label><label class="channel-wide">${t("发件邮箱")}<input id="smtpFrom" required type="email" value="${esc(email.from)}" placeholder="sender@example.com"></label><label>${t("连接安全")}<select id="smtpSecurity">${securityOption("ssl","SSL/TLS")}${securityOption("starttls","STARTTLS")}${securityOption("plain","无加密")}</select></label><label>${t("超时（秒）")}<input id="smtpTimeout" required type="number" min="1" step="0.1" value="${esc(email.timeout)}"></label><label class="channel-wide">${t("邮件主题前缀")}<input id="smtpSubjectPrefix" value="${esc(email.subject_prefix)}" placeholder="[DAG Runner]"></label></div><span class="form-hint">${t("当前仅支持邮件渠道；此页面后续可继续增加飞书等通知渠道。")}</span><button class="button" onclick="saveNotifierSettings()">${t("保存发件配置")}</button></div>`, false, "compact");
+  } catch(e) { toast(e.message,true); }
+}
+
+async function saveNotifierSettings() {
+  const ids=["smtpHost","smtpPort","smtpFrom","smtpTimeout"];
+  for (const id of ids) { const input=document.getElementById(id); if (!input.checkValidity()) { input.reportValidity(); input.focus(); return; } }
+  const email={
+    host:document.getElementById("smtpHost").value.trim(),
+    port:Number(document.getElementById("smtpPort").value),
+    username:document.getElementById("smtpUsername").value.trim(),
+    password:document.getElementById("smtpPassword").value,
+    from:document.getElementById("smtpFrom").value.trim(),
+    security:document.getElementById("smtpSecurity").value,
+    timeout:Number(document.getElementById("smtpTimeout").value),
+    subject_prefix:document.getElementById("smtpSubjectPrefix").value.trim() || "[DAG Runner]",
+  };
+  try {
+    await api("/api/notifier",{method:"PUT",body:JSON.stringify({email})});
+    closeModal(); toast(t("发件配置已保存"));
+  } catch(e) { toast(e.message,true); }
+}
 let pendingImportFilename = "workflow.yaml";
 let pendingImportSuccessVerb = "导入";
 let pendingWorkflowId = "";
@@ -410,7 +440,31 @@ function editSchedule(name) {
   const workflow = state.workflows.get(name), s = workflow.schedule;
   const crons = s.crons?.length ? s.crons : [s.cron || "0 18 * * mon-fri"];
   const rows = crons.map(cron => scheduleInputRow(cron)).join("");
-  openModal(`${namedId(workflow.description, workflow.name)} · ${t("定时配置")}`, `<div class="schedule-editor-head"><label>${t("统一时区")}<input id="timezoneInput" value="${esc(s.timezone || "Asia/Shanghai")}" oninput="this.setCustomValidity('')"></label><button class="button ghost" type="button" onclick="addScheduleRow()">＋ ${t("增加定时")}</button></div><div id="scheduleInputs" class="schedule-inputs">${rows}</div><span class="form-hint">${t("Cron 使用 5 个字段。每小时第 10 分钟：10 * * * *　每天 10:00：0 10 * * *")}</span><label class="check"><input id="enabledInput" type="checkbox" ${s.enabled ? "checked" : ""}>${t("启用全部自动调度")}</label><button class="button" onclick='saveSchedule(${jsArg(name)})'>${t("保存配置")}</button>`, false);
+  openModal(`${namedId(workflow.description, workflow.name)} · ${t("定时配置")}`, `<div class="schedule-editor"><div class="schedule-editor-head"><label>${t("统一时区")}<input id="timezoneInput" value="${esc(s.timezone || "Asia/Shanghai")}" oninput="this.setCustomValidity('')"></label><button class="button ghost" type="button" onclick="addScheduleRow()">＋ ${t("增加定时")}</button></div><div id="scheduleInputs" class="schedule-inputs">${rows}</div><span class="form-hint">${t("Cron 使用 5 个字段。每小时第 10 分钟：10 * * * *　每天 10:00：0 10 * * *")}</span><label class="check"><input id="enabledInput" type="checkbox" ${s.enabled ? "checked" : ""}>${t("启用全部自动调度")}</label><button class="button" onclick='saveSchedule(${jsArg(name)})'>${t("保存配置")}</button></div>`, false, "compact");
+}
+
+function editNotification(name) {
+  const workflow = state.workflows.get(name);
+  if (!workflow) return;
+  const email = workflow.notification?.email || {send_on:"disabled", to:[]};
+  const option = (value, label) => `<option value="${value}" ${email.send_on === value ? "selected" : ""}>${t(label)}</option>`;
+  openModal(`${namedId(workflow.description, workflow.name)} · ${t("邮件通知")}`, `<div class="notification-editor"><div class="notification-card"><div class="notification-icon">✉</div><div><strong>${t("工作流结果邮件")}</strong><p>${t("每次工作流结束后最多发送一封邮件，发件账号取自 var 通知配置。")}</p></div></div><label>${t("发送时机")}<select id="notificationSendOn">${option("disabled","不发送")}${option("success","仅成功时发送")}${option("failure","仅失败时发送")}${option("always","成功或失败都发送")}</select></label><label>${t("收件邮箱")}<textarea id="notificationRecipients" class="notification-recipients" placeholder="ops@example.com&#10;owner@example.com">${esc((email.to || []).join("\n"))}</textarea></label><span class="form-hint">${t("每行填写一个邮箱，也可以使用逗号或分号分隔。保存后会更新完整的工作流 YAML 配置。")}</span><button class="button" onclick='saveNotification(${jsArg(name)})'>${t("保存通知配置")}</button></div>`, false, "compact");
+}
+
+async function saveNotification(name) {
+  const sendOn = document.getElementById("notificationSendOn").value;
+  const input = document.getElementById("notificationRecipients");
+  const recipients = [...new Set(input.value.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean))];
+  input.setCustomValidity("");
+  if (sendOn !== "disabled" && !recipients.length) input.setCustomValidity(t("启用邮件通知时至少填写一个收件邮箱"));
+  else if (recipients.some(value => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) input.setCustomValidity(t("收件邮箱格式不正确"));
+  if (!input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+  try {
+    await api(`/api/workflows/${encodeURIComponent(name)}/notification`, {method:"PUT", body:JSON.stringify({send_on:sendOn, to:recipients})});
+    closeModal();
+    toast(t("通知配置已保存"));
+    await loadWorkflows();
+  } catch(e) { toast(e.message, true); }
 }
 function scheduleInputRow(cron="") {
   return `<div class="schedule-input-row"><label>${t("Cron（5 字段）")}<input class="cron-input" value="${esc(cron)}" oninput="this.setCustomValidity('')"></label><button class="button danger schedule-remove" type="button" onclick="removeScheduleRow(this)" aria-label="${t("删除此定时")}">${t("删除")}</button></div>`;
@@ -507,7 +561,14 @@ async function copyLog() {
 }
 
 let modalBackdropClosable = true;
-function openModal(title, body, closeOnBackdrop=true) { modalBackdropClosable=closeOnBackdrop; document.getElementById("modalTitle").textContent = title; document.getElementById("modalBody").innerHTML = body; document.getElementById("modal").classList.remove("hidden"); }
+function openModal(title, body, closeOnBackdrop=true, size="default") {
+  modalBackdropClosable=closeOnBackdrop;
+  const modal=document.getElementById("modal");
+  modal.querySelector(".modal-card").classList.toggle("compact-modal-card", size === "compact");
+  document.getElementById("modalTitle").textContent=title;
+  document.getElementById("modalBody").innerHTML=body;
+  modal.classList.remove("hidden");
+}
 function closeModal() { closeLogModal(); document.getElementById("modal").classList.add("hidden"); }
 function closeModalFromBackdrop(event) { if (event.target.id === "modal" && modalBackdropClosable) closeModal(); }
 function closeLogModal() { document.getElementById("logModal").classList.add("hidden"); }

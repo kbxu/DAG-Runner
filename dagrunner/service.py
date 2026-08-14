@@ -12,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .database import StateDatabase
 from .logger import TaskLogManager
+from .notifier import Notifier, NullNotifier
 from .runner import AlreadyRunningError, WorkflowRunner, new_run_id, workflow_lock
 from .workflow import Workflow, WorkflowError
 
@@ -99,10 +100,12 @@ class ExecutionService:
         registry: WorkflowRegistry,
         logs: TaskLogManager,
         max_workers: int = 4,
+        notifier: Notifier | None = None,
     ):
         self.database = database
         self.registry = registry
         self.logs = logs
+        self.notifier = notifier or NullNotifier()
         self.pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dag-run")
         self._active: dict[str, ActiveRun] = {}
         self._lock = Lock()
@@ -153,7 +156,7 @@ class ExecutionService:
     ) -> tuple[str, str]:
         lock_path = self.database.path.parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
-            return WorkflowRunner(self.database, self.logs).run(
+            return WorkflowRunner(self.database, self.logs, notifier=self.notifier).run(
                 workflow,
                 from_task,
                 run_id=run_id,

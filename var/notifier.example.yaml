@@ -1,0 +1,12 @@
+# Copy this file to notifier.yaml. It contains only the SMTP sending account;
+# enable notifications and configure recipients in each workflow YAML.
+email:
+  host: smtp.example.com
+  port: 465
+  username: sender@example.com
+  password: replace-with-an-app-password
+  from: sender@example.com
+  use_ssl: true
+  starttls: false
+  timeout: 10
+  subject_prefix: "[DAG Runner]"
