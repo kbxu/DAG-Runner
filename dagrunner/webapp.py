@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
@@ -29,7 +30,10 @@ from .service import (
     WorkflowRegistry,
     decode_cron_expressions,
 )
-from .workflow import Workflow, WorkflowError, migrate_legacy_env
+from .workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
+
+
+_HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
 
 
 def create_app(
@@ -284,12 +288,19 @@ def create_app(
             definition = uploaded.read().decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise ServiceError("YAML 文件必须使用 UTF-8 编码") from exc
-        parsed = Workflow.from_yaml(
-            definition,
-            fallback_name=uploaded.filename.rsplit(".", 1)[0],
+        fallback_name = uploaded.filename.rsplit(".", 1)[0]
+        definition, _ = _unique_import_definition(
+            definition, fallback_name, registry
         )
+        parsed = Workflow.from_yaml(definition, fallback_name=fallback_name)
         display_name = parsed.description.strip() or parsed.name
-        row = database.create_workflow(display_name, definition)
+        requested_id = str(request.form.get("workflow_id", "")).strip() or None
+        if requested_id is not None and not _HASH_WORKFLOW_ID.fullmatch(requested_id):
+            raise ServiceError("invalid proposed workflow ID")
+        try:
+            row = database.create_workflow(display_name, definition, requested_id)
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
         workflow_name = row["workflow_key"]
         registry.refresh()
         schedule = parsed.schedule
@@ -315,7 +326,13 @@ def create_app(
             content = uploaded.read().decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise ServiceError("工作流文件必须使用 UTF-8 编码") from exc
-        return jsonify(_prepare_import_preview(uploaded.filename, content))
+        preview = _prepare_import_preview(uploaded.filename, content)
+        definition, replacements = _unique_import_definition(
+            str(preview["definition"]), Path(str(preview["filename"])).stem, registry
+        )
+        preview["definition"] = definition
+        preview["task_id_replacements"] = replacements
+        return jsonify(preview)
 
     @app.get("/api/workflows/next-id")
     def next_workflow_id():
@@ -333,6 +350,9 @@ def create_app(
             definition = example_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise ServiceError("示例工作流文件不可用") from exc
+        definition, _ = _unique_import_definition(
+            definition, example_path.stem, registry
+        )
         return Response(definition, mimetype="application/yaml")
 
     @app.get("/api/workflows/<workflow_name>/yaml")
@@ -545,6 +565,23 @@ def create_app(
 def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
     schedules.shutdown()
     executions.shutdown()
+
+
+def _unique_import_definition(
+    definition: str, fallback_name: str, registry: WorkflowRegistry
+) -> tuple[str, dict[str, str]]:
+    """Validate an import and namespace colliding task IDs with hash IDs."""
+    Workflow.from_yaml(definition, fallback_name=fallback_name)
+    registry.refresh()
+    unavailable = {
+        task_id
+        for workflow in registry.workflows.values()
+        for task_id in workflow.tasks
+    }
+    rewritten, replacements = uniquify_task_ids(definition, unavailable)
+    if replacements:
+        Workflow.from_yaml(rewritten, fallback_name=fallback_name)
+    return rewritten, replacements
 
 
 def _prepare_import_preview(filename: str, content: str) -> dict[str, object]:

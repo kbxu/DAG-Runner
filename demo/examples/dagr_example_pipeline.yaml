@@ -1,5 +1,6 @@
 name: example_pipeline
 description: 示例数据处理流程
+timeout: 3600
 setup:
   linux: |
     cd demo
@@ -19,18 +20,22 @@ tasks:
     description: 提取示例数据
     command: [python, tasks/extract.py]
     depends: []
+    timeout: 600
 
   transform_data:
     description: 清洗转换数据
     command: [python, tasks/transform.py]
     depends: [extract_data]
+    timeout: 600
 
   summarize_data:
     description: 汇总统计结果
     command: [python, tasks/summarize.py]
     depends: [transform_data]
+    timeout: 600
 
   publish_report:
     description: 生成示例报告
     command: [python, tasks/publish.py]
     depends: [summarize_data]
+    timeout: 600

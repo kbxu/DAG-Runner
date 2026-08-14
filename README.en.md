@@ -102,6 +102,18 @@ For temporary HTTP use on a trusted LAN, pass both `--host 0.0.0.0` and `--allow
 
 Workflows use YAML to describe tasks, dependencies, setup scripts, and schedules. See the complete [example workflow](demo/examples/dagr_example_pipeline.yaml). In the web console, select **New workflow** to edit the example or **Import workflow** to choose an existing file. Imported schedules are disabled by default; review commands, dependencies, working directories, and schedule times before enabling them.
 
+New workflows use random hash-style IDs. If an imported task ID is already used by another workflow, the preview assigns a new hash-style ID to that task and updates dependency and condition-branch references with it.
+
+The optional `timeout` value is measured in seconds. A top-level `timeout` limits the entire workflow, while a task-level `timeout` limits only that task. On timeout, active task process trees are terminated. Omitting the field means there is no timeout:
+
+```yaml
+timeout: 3600
+tasks:
+  generate_report:
+    command: python report.py
+    timeout: 600
+```
+
 The import dialog automatically recognizes:
 
 - DAG Runner YAML
@@ -142,13 +154,13 @@ Conversion reads and writes configuration only; it never executes commands from 
 
 ```bash
 # Run a workflow
-python -m dagrunner --workflow workflow_000001
+python -m dagrunner --workflow workflow_a1b2c3d4e5f6
 
 # List run history
-python -m dagrunner --workflow workflow_000001 --list-runs
+python -m dagrunner --workflow workflow_a1b2c3d4e5f6 --list-runs
 
 # Resume from a specific failed task
-python -m dagrunner --workflow workflow_000001 --from transform_data
+python -m dagrunner --workflow workflow_a1b2c3d4e5f6 --from transform_data
 
 # Read a task log
 python -m dagrunner --show-log --run-id <run_id> --task transform_data

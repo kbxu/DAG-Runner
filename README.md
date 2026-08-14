@@ -109,6 +109,19 @@ HTTP 会话 Cookie，并在浏览器 Web Crypto 不可用时启用页面内置�
 [示例工作流](demo/examples/dagr_example_pipeline.yaml)。登录 Web 控制台后，可以点击“新增工作流”
 基于示例编辑，也可以点击“导入工作流”选择已有文件。导入后的调度默认关闭，请检查命令、
 依赖关系、工作目录和调度时间后再手动启用。
+新工作流使用随机 hash 型 ID；如果导入任务的 ID 已被其他工作流使用，预览会为冲突任务
+生成新的 hash 型 ID，并同步更新依赖和条件分支引用。
+
+可选的 `timeout` 使用秒数。顶层 `timeout` 限制整个工作流，任务内的 `timeout` 只限制该任务；
+超时后会终止正在运行的任务进程树。字段不写时不设置超时：
+
+```yaml
+timeout: 3600
+tasks:
+  generate_report:
+    command: python report.py
+    timeout: 600
+```
 
 “导入工作流”可以直接识别以下格式：
 
@@ -155,13 +168,13 @@ PowerShell 环境准备脚本可以使用 `--setup-file templates/production_set
 
 ```bash
 # 运行工作流
-python -m dagrunner --workflow workflow_000001
+python -m dagrunner --workflow workflow_a1b2c3d4e5f6
 
 # 查看历史
-python -m dagrunner --workflow workflow_000001 --list-runs
+python -m dagrunner --workflow workflow_a1b2c3d4e5f6 --list-runs
 
 # 从指定失败任务继续
-python -m dagrunner --workflow workflow_000001 --from transform_data
+python -m dagrunner --workflow workflow_a1b2c3d4e5f6 --from transform_data
 
 # 查看任务日志
 python -m dagrunner --show-log --run-id <run_id> --task transform_data

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -251,37 +252,42 @@ class StateDatabase:
                 "DELETE FROM login_attempts WHERE ip_address = ?", (ip_address,)
             )
 
-    def create_workflow(self, name: str, definition: str) -> sqlite3.Row:
+    def create_workflow(
+        self, name: str, definition: str, workflow_key: str | None = None
+    ) -> sqlite3.Row:
         now = local_now()
         with self.connect() as connection:
-            cursor = connection.execute(
-                """INSERT INTO workflows
-                   (workflow_key, name, definition, created_time, updated_time)
-                   VALUES (NULL, ?, ?, ?, ?)""",
-                (name, definition, now, now),
-            )
-            workflow_key = f"workflow_{cursor.lastrowid:06d}"
-            connection.execute(
-                "UPDATE workflows SET workflow_key = ? WHERE id = ?",
-                (workflow_key, cursor.lastrowid),
-            )
+            key = workflow_key or self._unused_workflow_key(connection)
+            try:
+                cursor = connection.execute(
+                    """INSERT INTO workflows
+                       (workflow_key, name, definition, created_time, updated_time)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (key, name, definition, now, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                if workflow_key:
+                    raise ValueError(
+                        f"workflow ID is already in use: {workflow_key}"
+                    ) from exc
+                raise
             return connection.execute(
                 "SELECT * FROM workflows WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
 
     def next_workflow_key(self) -> str:
         with self.connect() as connection:
-            sequence = connection.execute(
-                "SELECT seq FROM sqlite_sequence WHERE name = 'workflows'"
+            return self._unused_workflow_key(connection)
+
+    @staticmethod
+    def _unused_workflow_key(connection: sqlite3.Connection) -> str:
+        while True:
+            candidate = f"workflow_{secrets.token_hex(6)}"
+            exists = connection.execute(
+                "SELECT 1 FROM workflows WHERE workflow_key = ?", (candidate,)
             ).fetchone()
-            next_id = (
-                sequence[0] + 1
-                if sequence
-                else connection.execute(
-                    "SELECT COALESCE(MAX(id), 0) + 1 FROM workflows"
-                ).fetchone()[0]
-            )
-        return f"workflow_{next_id:06d}"
+            if exists is None:
+                return candidate
 
     def list_workflows(self) -> list[sqlite3.Row]:
         with self.connect() as connection:

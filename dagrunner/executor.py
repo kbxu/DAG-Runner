@@ -27,6 +27,8 @@ class TaskExecutor:
         workflow_setup: str,
         log_file: Path,
         cancel_event: Event | None = None,
+        workflow_timeout_event: Event | None = None,
+        workflow_timeout: int | None = None,
     ) -> ExecutionResult:
         environment = os.environ.copy()
         if isinstance(task.command, str):
@@ -68,9 +70,17 @@ class TaskExecutor:
                         break
                     if cancelled:
                         _terminate_process(process)
-                        message = "task stopped by user"
+                        workflow_timed_out = bool(
+                            workflow_timeout_event
+                            and workflow_timeout_event.is_set()
+                        )
+                        message = (
+                            f"workflow timed out after {workflow_timeout} seconds"
+                            if workflow_timed_out
+                            else "task stopped by user"
+                        )
                         _append_error(log_file, message)
-                        return ExecutionResult(130, message)
+                        return ExecutionResult(124 if workflow_timed_out else 130, message)
                     if task.timeout and time.monotonic() - started >= task.timeout:
                         _terminate_process(process)
                         message = f"task timed out after {task.timeout} seconds"

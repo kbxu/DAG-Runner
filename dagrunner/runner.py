@@ -10,7 +10,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from threading import Event
+from threading import Event, Timer
 
 from .database import StateDatabase
 from .executor import TaskExecutor
@@ -100,6 +100,16 @@ class WorkflowRunner:
         handled_failures: set[str] = set()
         benign_skips: set[str] = set()
         task_cancel_event = cancel_event or Event()
+        workflow_timeout_event = Event()
+        workflow_timeout_timer: Timer | None = None
+        if workflow.timeout is not None:
+            def timeout_workflow() -> None:
+                workflow_timeout_event.set()
+                task_cancel_event.set()
+
+            workflow_timeout_timer = Timer(workflow.timeout, timeout_workflow)
+            workflow_timeout_timer.daemon = True
+            workflow_timeout_timer.start()
 
         try:
             if previous:
@@ -120,6 +130,7 @@ class WorkflowRunner:
                 order,
                 states,
                 task_cancel_event,
+                workflow_timeout_event,
                 handled_failures,
                 benign_skips,
             )
@@ -135,8 +146,17 @@ class WorkflowRunner:
                 state == "FAILED" and name not in handled_failures
                 for name, state in states.items()
             )
-            final_status = "FAILED" if unhandled_failure or selected_incomplete else "SUCCESS"
-            run_error = "stopped by user" if task_cancel_event.is_set() else None
+            final_status = (
+                "FAILED"
+                if workflow_timeout_event.is_set()
+                or unhandled_failure
+                or selected_incomplete
+                else "SUCCESS"
+            )
+            if workflow_timeout_event.is_set():
+                run_error = f"workflow timed out after {workflow.timeout} seconds"
+            else:
+                run_error = "stopped by user" if task_cancel_event.is_set() else None
             self.database.finish_run(run_id, final_status, run_error)
             return run_id, final_status
         except BaseException as exc:
@@ -153,6 +173,9 @@ class WorkflowRunner:
                     )
             self.database.finish_run(run_id, "FAILED", str(exc))
             raise
+        finally:
+            if workflow_timeout_timer is not None:
+                workflow_timeout_timer.cancel()
 
     def _run_tasks(
         self,
@@ -161,6 +184,7 @@ class WorkflowRunner:
         order: list[str],
         states: dict[str, str],
         cancel_event: Event,
+        workflow_timeout_event: Event,
         handled_failures: set[str],
         benign_skips: set[str],
     ) -> None:
@@ -173,7 +197,13 @@ class WorkflowRunner:
         try:
             while any(state in {"PENDING", "RUNNING"} for state in states.values()):
                 self._resolve_unrunnable_tasks(
-                    workflow, run_id, order, states, cancel_event, benign_skips
+                    workflow,
+                    run_id,
+                    order,
+                    states,
+                    cancel_event,
+                    workflow_timeout_event,
+                    benign_skips,
                 )
                 condition_evaluated = False
                 if not cancel_event.is_set():
@@ -246,6 +276,8 @@ class WorkflowRunner:
                             workflow_setup=workflow.setup_for_current_platform(),
                             log_file=log_file,
                             cancel_event=cancel_event,
+                            workflow_timeout_event=workflow_timeout_event,
+                            workflow_timeout=workflow.timeout,
                         )
                         running[future] = (task_name, log_file)
 
@@ -308,6 +340,7 @@ class WorkflowRunner:
         order: list[str],
         states: dict[str, str],
         cancel_event: Event,
+        workflow_timeout_event: Event,
         benign_skips: set[str],
     ) -> None:
         changed = True
@@ -317,7 +350,12 @@ class WorkflowRunner:
                 if states[task_name] != "PENDING":
                     continue
                 if cancel_event.is_set():
-                    self._skip(run_id, task_name, "run stopped by user", states)
+                    reason = (
+                        f"workflow timed out after {workflow.timeout} seconds"
+                        if workflow_timeout_event.is_set()
+                        else "run stopped by user"
+                    )
+                    self._skip(run_id, task_name, reason, states)
                     changed = True
                     continue
                 task = workflow.tasks[task_name]
@@ -483,7 +521,9 @@ def _is_reusable_previous_state(row) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a database-backed DAG workflow")
-    parser.add_argument("--workflow", help="imported workflow ID, for example workflow_000001")
+    parser.add_argument(
+        "--workflow", help="imported workflow ID, for example workflow_a1b2c3d4e5f6"
+    )
     parser.add_argument("--from", dest="from_task", help="rerun this task and its descendants")
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")

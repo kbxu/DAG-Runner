@@ -55,7 +55,7 @@ function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":
 function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"); }
 function namedId(name, id) { return name && name !== id ? (currentLanguage === "en" ? `${name} (${id})` : `${name}（${id}）`) : id; }
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
-const usefulTopKeys = new Set(["description", "setup", "tasks"]);
+const usefulTopKeys = new Set(["description", "setup", "timeout", "tasks"]);
 const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
   return `<div class="yaml-editor"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div>`;
@@ -262,7 +262,9 @@ async function runWorkflow(name) { try { const r = await api(`/api/workflows/${e
 async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
 let pendingImportFilename = "workflow.yaml";
 let pendingImportSuccessVerb = "导入";
+let pendingWorkflowId = "";
 function openWorkflowImportEditor(title, definition, nextId, submitLabel, sourceInfo=null) {
+  pendingWorkflowId = nextId;
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
   openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label><label>${t("工作流 YAML")}${yamlEditor("importDefinition",definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；中文名称取自 description。顶层 name 和 migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
@@ -293,7 +295,7 @@ function openImportWorkflow() {
 async function submitImportWorkflow() {
   const definition=document.getElementById("importDefinition").value;
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
-  const form=new FormData(); form.append("file",file);
+  const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId);
   try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { toast(e.message,true); }
 }
 async function editWorkflow(name) {

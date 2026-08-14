@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
+import secrets
 from typing import Any
 
 import yaml
@@ -14,6 +15,60 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 class WorkflowError(ValueError):
     """Raised when a workflow definition is invalid."""
+
+
+def uniquify_task_ids(
+    content: str, unavailable_ids: set[str]
+) -> tuple[str, dict[str, str]]:
+    """Replace imported task IDs that are already used by another workflow."""
+    data = yaml.safe_load(content)
+    raw_tasks = data.get("tasks") if isinstance(data, dict) else None
+    if not isinstance(raw_tasks, dict):
+        return content, {}
+
+    occupied = set(unavailable_ids) | set(raw_tasks)
+    replacements: dict[str, str] = {}
+    for task_id in raw_tasks:
+        if task_id not in unavailable_ids:
+            continue
+        while True:
+            candidate = f"task_{secrets.token_hex(6)}"
+            if candidate not in occupied:
+                break
+        replacements[task_id] = candidate
+        occupied.add(candidate)
+
+    if not replacements:
+        return content, {}
+
+    def replace_list(value: Any) -> None:
+        if not isinstance(value, list):
+            return
+        for index, task_id in enumerate(value):
+            if isinstance(task_id, str):
+                value[index] = replacements.get(task_id, task_id)
+
+    rewritten_tasks: dict[str, Any] = {}
+    for task_id, task in raw_tasks.items():
+        rewritten_id = replacements.get(task_id, task_id)
+        if isinstance(task, dict):
+            replace_list(task.get("depends"))
+            replace_list(task.get("success"))
+            replace_list(task.get("failure"))
+            condition = task.get("condition")
+            if isinstance(condition, dict):
+                for group in condition.get("groups", []):
+                    if not isinstance(group, dict):
+                        continue
+                    for item in group.get("items", []):
+                        if isinstance(item, dict) and isinstance(item.get("task"), str):
+                            item["task"] = replacements.get(item["task"], item["task"])
+        rewritten_tasks[rewritten_id] = task
+    data["tasks"] = rewritten_tasks
+    return (
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000),
+        replacements,
+    )
 
 
 def migrate_legacy_env(content: str) -> tuple[str, bool]:
@@ -165,6 +220,7 @@ class Workflow:
     setup: str | dict[str, str] = ""
     schedule: ScheduleDefinition | None = None
     description: str = ""
+    timeout: int | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "Workflow":
@@ -203,6 +259,13 @@ class Workflow:
             raise WorkflowError("workflow 'name' must be a non-empty string")
         if not _IDENTIFIER.fullmatch(name):
             raise WorkflowError("workflow 'name' may contain only letters, digits, _, . and -")
+        workflow_timeout = data.get("timeout")
+        if workflow_timeout is not None and (
+            isinstance(workflow_timeout, bool)
+            or not isinstance(workflow_timeout, int)
+            or workflow_timeout <= 0
+        ):
+            raise WorkflowError("workflow timeout must be a positive integer")
         raw_tasks = data.get("tasks")
         if not isinstance(raw_tasks, dict) or not raw_tasks:
             raise WorkflowError("workflow 'tasks' must be a non-empty mapping")
@@ -252,7 +315,11 @@ class Workflow:
             depends = _string_tuple(raw.get("depends", []), task_name, "depends")
             args = _string_tuple(raw.get("args", []), task_name, "args")
             timeout = raw.get("timeout")
-            if timeout is not None and (not isinstance(timeout, int) or timeout <= 0):
+            if timeout is not None and (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, int)
+                or timeout <= 0
+            ):
                 raise WorkflowError(f"task {task_name!r} timeout must be a positive integer")
             tasks[task_name] = Task(
                 name=task_name,
@@ -280,6 +347,7 @@ class Workflow:
                 if description_override is not None
                 else str(data.get("description", ""))
             ),
+            timeout=workflow_timeout,
         )
         workflow.topological_order()  # Validate references and cycles now.
         return workflow
