@@ -48,12 +48,13 @@
         <button class="button ghost" onclick="loadRuns()" data-i18n>立即刷新</button>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="run-list-table">
+          <colgroup><col class="workflow-col-name"><col class="run-col-time"><col class="run-col-trigger"><col class="run-col-status"><col class="run-col-progress"><col class="run-col-duration"><col class="run-col-actions"></colgroup>
           <thead>
-            <tr><th data-i18n>开始时间 / Run ID</th><th data-i18n>工作流</th><th data-i18n>触发方式</th><th data-i18n>状态</th><th data-i18n>任务进度</th><th data-i18n>耗时</th><th data-i18n>操作</th></tr>
+            <tr><th data-i18n>工作流</th><th data-i18n>开始时间 / Run ID</th><th data-i18n>触发方式</th><th data-i18n>状态</th><th data-i18n>任务进度</th><th data-i18n>耗时</th><th data-i18n>操作</th></tr>
             <tr class="filter-row">
-              <th></th>
               <th><input id="runWorkflowFilter" type="search" placeholder="搜索名称或 ID" data-i18n-placeholder="搜索名称或 ID" aria-label="搜索工作流" data-i18n-aria-label="搜索工作流" oninput="scheduleRunSearch(this.value)"></th>
+              <th></th>
               <th><select id="runTriggerFilter" aria-label="筛选触发方式" data-i18n-aria-label="筛选触发方式" onchange="setRunFilter('trigger',this.value)"><option value="" data-i18n>全部</option><option value="manual" data-i18n>手动</option><option value="schedule" data-i18n>定时</option><option value="rerun" data-i18n>重跑</option><option value="resume" data-i18n>失败续跑</option></select></th>
               <th><select id="runStatusFilter" aria-label="筛选状态" data-i18n-aria-label="筛选状态" onchange="setRunFilter('status',this.value)"><option value="" data-i18n>全部</option><option value="RUNNING" data-i18n>运行中</option><option value="SUCCESS" data-i18n>成功</option><option value="FAILED" data-i18n>失败</option></select></th>
               <th></th><th></th><th></th>

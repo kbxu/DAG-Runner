@@ -35,16 +35,25 @@ main { max-width: 1500px; margin: 24px auto 60px; padding: 0 24px; }
 h2 { margin: 0; font-size: 17px; }
 .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .table-wrap { overflow-x: auto; }
-.workflow-list-table { width: 1200px; min-width: 1200px; max-width: 1200px; table-layout: fixed; }
+.workflow-list-table, .run-list-table { width: 1140px; min-width: 1140px; max-width: 1140px; table-layout: fixed; }
 .workflow-col-name { width: 220px; }
 .workflow-col-schedule { width: 180px; }
 .workflow-col-time { width: 170px; }
-.workflow-col-actions { width: 460px; }
-.workflow-list-table th, .workflow-list-table td { padding: 10px; white-space: nowrap; }
-.workflow-list-table .workflow-link { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.workflow-col-actions { width: 400px; }
+.run-col-time { width: 210px; }
+.run-col-trigger { width: 90px; }
+.run-col-status { width: 100px; }
+.run-col-progress { width: 180px; }
+.run-col-duration { width: 100px; }
+.run-col-actions { width: 240px; }
+.workflow-list-table th, .workflow-list-table td, .run-list-table th, .run-list-table td { padding: 10px; white-space: nowrap; }
+.workflow-list-table .workflow-link, .run-list-table .workflow-link { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .workflow-list-table .schedule-summary { width: 100%; }
-.workflow-list-table .actions { flex-wrap: nowrap; min-width: 0; }
-.workflow-list-table .actions .button { flex-shrink: 0; }
+.workflow-list-table .actions, .run-list-table .actions { flex-wrap: nowrap; min-width: 0; }
+.workflow-list-table .actions .button, .run-list-table .actions .button { flex-shrink: 0; padding: 6px 8px; font-size: 11px; }
+.run-list-table .filter-row input, .run-list-table .filter-row select { min-width: 0; }
+.run-list-table .secondary, .run-list-table .workflow-id { max-width: 100%; }
+.run-list-table .progress-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table { width: 100%; border-collapse: collapse; }
 th { padding: 10px 14px; color: #6c7784; background: #f8fafb; font-size: 11px; letter-spacing: .04em; text-align: left; text-transform: uppercase; white-space: nowrap; }
 td { padding: 13px 14px; border-top: 1px solid #edf0f2; vertical-align: middle; }
