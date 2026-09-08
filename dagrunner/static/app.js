@@ -93,6 +93,7 @@ function highlightUsefulYaml(value, includeSchedule=false) {
 function syncYamlHighlight(id) {
   const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
   if (input && highlight) { highlight.innerHTML=`${highlightUsefulYaml(input.value,input.dataset.includeSchedule==="true")}\n`; syncYamlScroll(id); }
+  queueWorkflowPreview(id);
 }
 function syncYamlScroll(id) {
   const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
@@ -146,15 +147,13 @@ function renderWorkflows() {
       const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
       const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
       return `<tr>
-        <td><button class="workflow-link" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
-        <td><span class="primary">${w.task_count}</span> ${t("个节点")}</td>
-        <td><span class="badge ${s.enabled ? "enabled" : "disabled"}">${s.enabled ? t("已启用") : t("未启用")}</span></td>
+        <td><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
         <td>${scheduleSummary(s)}</td>
         <td>${fmt(w.last_run_time)}</td>
         <td>${fmt(s.next_run_time)}</td>
-        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost" onclick="showDag('${esc(w.name)}')">DAG</button><button class="button ghost" onclick="showTasks('${esc(w.name)}')">${t("任务")}</button><button class="button ghost" onclick="editSchedule('${esc(w.name)}')">${t("定时")}</button><button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>✉ ${t("通知")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出 YAML")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
+        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost${s.enabled ? ' schedule-active' : ''}" title="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" aria-label="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" onclick="editSchedule('${esc(w.name)}')">${s.enabled ? '● ' : ''}${t("定时")}</button><button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>✉ ${t("通知")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出 YAML")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
       </tr>`;
-    }).join("") || `<tr><td colspan="7" class="empty">${t("还没有导入工作流")}</td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="empty">${t("还没有导入工作流")}</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>${t("共 {total} 条 · 第 {page} / {pages} 页", {total:workflows.length,page:state.workflowPage,pages:totalPages})}</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">${t("上一页")}</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">${t("下一页")}</button></div>`;
 }
 
@@ -223,7 +222,7 @@ async function loadRuns(resetPage=false) {
     document.getElementById("runRows").innerHTML = data.runs.map(r => {
       const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.handled_count || 0) + (r.skipped_count || 0);
       const percent = r.task_count ? Math.round(complete * 100 / r.task_count) : 0;
-      const actions = [`<button class="button ghost" onclick="showRun('${r.run_id}')">${t("详情")}</button>`];
+      const actions = [];
       if (r.status === "RUNNING") actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">${t("停止")}</button>`);
       else {
         actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">${t("重跑")}</button>`);
@@ -232,7 +231,7 @@ async function loadRuns(resetPage=false) {
       }
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
-      return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td><div class="primary">${esc(r.workflow_description || r.workflow_name)}</div><div class="workflow-id mono">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td><div>${fmt(r.start_time)}</div><div class="secondary mono">${esc(r.run_id)}</div></td><td><button class="workflow-link" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button><div class="workflow-id mono">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
   } catch (error) { if (!error.offline) toast(error.message, true); }
@@ -323,6 +322,7 @@ function openImportWorkflow() {
   input.click();
 }
 async function submitImportWorkflow() {
+  if (!workflowEditorCanSave()) return;
   const definition=document.getElementById("importDefinition").value;
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
   const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId);
@@ -336,6 +336,7 @@ async function editWorkflow(name) {
   } catch(e) { toast(e.message,true); }
 }
 async function saveWorkflow(name) {
+  if (!workflowEditorCanSave()) return;
   try {
     await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:document.getElementById("workflowDefinition").value})});
     closeModal(); toast(t("工作流已更新")); await loadWorkflows();
@@ -384,17 +385,16 @@ function showTasks(name) {
 }
 
 function showDag(name) {
-  const workflow = state.workflows.get(name); if (!workflow) return;
-  const svg = buildDagSvg(workflow.tasks, name);
-  openModal(`${namedId(workflow.description, workflow.name)} · ${t("DAG 结构")}`, `<div class="dag-legend"><span><i class="legend-node active-node"></i>${t("启用节点")}</span><span><i class="legend-node inactive-node"></i>${t("禁用节点")}</span><span>${t("从左向右表示依赖方向")}</span></div><div class="dag-scroll">${svg}</div><div id="dagTaskDetail" class="dag-detail"><span class="secondary">${t("点击节点查看任务命令和依赖")}</span></div>`);
+  openWorkflowViewer('workflow', name);
 }
 
-function buildDagSvg(tasks, workflowName, showStatuses=false) {
+function buildDagSvg(tasks, workflowName, showStatuses=false, preview=false, direction='LR', viewer=false) {
   const byName = new Map(tasks.map(task => [task.name, task]));
   const levels = new Map();
   function getLevel(task) {
     if (levels.has(task.name)) return levels.get(task.name);
-    const level = task.depends.length ? 1 + Math.max(...task.depends.map(name => getLevel(byName.get(name)))) : 0;
+    const parents = task.depends.filter(name => byName.has(name));
+    const level = parents.length ? 1 + Math.max(...parents.map(name => getLevel(byName.get(name)))) : 0;
     levels.set(task.name, level); return level;
   }
   tasks.forEach(getLevel);
@@ -403,24 +403,34 @@ function buildDagSvg(tasks, workflowName, showStatuses=false) {
   const nodeWidth=190, nodeHeight=68, columnGap=85, rowGap=42, margin=45;
   const maxLevel=Math.max(0, ...levels.values());
   const maxRows=Math.max(1, ...[...columns.values()].map(items => items.length));
-  const width=margin*2+(maxLevel+1)*nodeWidth+maxLevel*columnGap;
-  const height=margin*2+maxRows*nodeHeight+(maxRows-1)*rowGap;
+  const vertical = direction === 'TB';
+  const width=vertical ? margin*2+maxRows*nodeWidth+(maxRows-1)*rowGap : margin*2+(maxLevel+1)*nodeWidth+maxLevel*columnGap;
+  const height=vertical ? margin*2+(maxLevel+1)*nodeHeight+maxLevel*columnGap : margin*2+maxRows*nodeHeight+(maxRows-1)*rowGap;
   const positions=new Map();
   for (const [level, items] of columns) {
     const contentHeight=items.length*nodeHeight+(items.length-1)*rowGap;
     const startY=(height-contentHeight)/2;
-    items.forEach((task,index) => positions.set(task.name,{x:margin+level*(nodeWidth+columnGap),y:startY+index*(nodeHeight+rowGap)}));
+    const startX=(width-(items.length*nodeWidth+(items.length-1)*rowGap))/2;
+    items.forEach((task,index) => positions.set(task.name,vertical
+      ? {x:startX+index*(nodeWidth+rowGap),y:margin+level*(nodeHeight+columnGap)}
+      : {x:margin+level*(nodeWidth+columnGap),y:startY+index*(nodeHeight+rowGap)}));
   }
   const edges=[];
   tasks.forEach(task => task.depends.forEach(parentName => {
     const from=positions.get(parentName), to=positions.get(task.name);
-    const x1=from.x+nodeWidth, y1=from.y+nodeHeight/2, x2=to.x, y2=to.y+nodeHeight/2, mid=(x1+x2)/2;
-    edges.push(`<path class="dag-edge" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" marker-end="url(#dagArrow)"/>`);
+    if (!from || !to) return;
+    const x1=from.x+(vertical ? nodeWidth/2 : nodeWidth), y1=from.y+(vertical ? nodeHeight : nodeHeight/2);
+    const x2=to.x+(vertical ? nodeWidth/2 : 0), y2=to.y+(vertical ? 0 : nodeHeight/2), mid=(x1+x2)/2, midY=(y1+y2)/2;
+    const curve=vertical ? `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}` : `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
+    edges.push(`<path class="dag-edge" d="${curve}" marker-end="url(#dagArrow)"/>`);
+    const parent = byName.get(parentName);
+    const branch = parent.success?.includes(task.name) ? '成立' : parent.failure?.includes(task.name) ? '不成立' : '';
+    if (branch) edges.push(`<text class="dag-branch-label" x="${mid}" y="${(y1+y2)/2-8}" text-anchor="middle">${branch}</text>`);
   }));
   const nodes=tasks.map(task => {
     const p=positions.get(task.name), title=(task.description || task.name).slice(0,22), taskId=task.name.slice(0,27);
     const status=showStatuses ? (task.status || "PENDING") : "";
-    const click=showStatuses ? "" : `onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"`;
+    const click=viewer ? `data-task="${esc(task.name)}" onclick='selectViewerTask(${jsArg(task.name)})'` : preview ? `data-task="${esc(task.name)}" onclick='selectPreviewTask(${jsArg(task.name)})'` : showStatuses ? "" : `onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"`;
     const statusText=task.type === "condition" && task.condition_result ? `→ ${task.condition_result.toUpperCase()}` : status;
     return `<g class="dag-node ${task.type === "condition" ? "dag-condition" : ""} ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${statusText ? `<text class="dag-node-status" x="176" y="23" text-anchor="end">${esc(statusText)}</text>` : ""}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${statusText ? ` · ${esc(statusText)}` : ""}</title></g>`;
   }).join("");
@@ -519,17 +529,7 @@ function validateScheduleForm() {
 async function saveSchedule(name) { const values=validateScheduleForm(); if (!values) return; try { await api(`/api/workflows/${encodeURIComponent(name)}/schedule`, {method:"PUT", body:JSON.stringify({...values, enabled:document.getElementById("enabledInput").checked})}); closeModal(); toast(t("定时配置已保存")); loadWorkflows(); } catch(e) { toast(e.message, true); } }
 
 async function showRun(id) {
-  try {
-    const data = await api(`/api/runs/${encodeURIComponent(id)}`);
-    const rows = data.tasks.map(taskRun => {
-      const label = taskRun.task_description || taskRun.task_name;
-      const logButton = taskRun.log_file ? `<button class="button ghost" onclick='showLog(${jsArg(id)}, ${jsArg(taskRun.task_name)}, ${jsArg(label)})'>${t("日志")}</button>` : "—";
-      const handled = taskRun.handled_by ? `<div class="handled-note">${t("已由 {name} 处理",{name:esc(taskRun.handled_by)})}</div>` : "";
-      return `<tr><td><div class="primary">${esc(label)}</div></td><td class="mono">${esc(taskRun.task_name)}</td><td>${statusBadge(taskRun.status)}${handled}</td><td>${fmt(taskRun.start_time)}</td><td>${fmt(taskRun.end_time)}</td><td>${taskRun.exit_code ?? "—"}</td><td><div class="secondary" title="${esc(taskRun.error_message)}">${esc(taskRun.error_message || "")}</div></td><td>${logButton}</td></tr>`;
-    }).join("");
-    const dag=data.graph_tasks?.length ? `<div class="run-dag"><div class="dag-legend"><span><i class="legend-node status-running"></i>RUNNING</span><span><i class="legend-node status-success"></i>SUCCESS</span><span><i class="legend-node status-failed"></i>FAILED</span><span><i class="legend-node status-skipped"></i>SKIPPED</span><span><i class="legend-node status-pending"></i>PENDING</span></div><div class="dag-scroll">${buildDagSvg(data.graph_tasks,data.run.workflow_name,true)}</div></div>` : "";
-    openModal(`${namedId(data.run.workflow_description, data.run.workflow_name)} · ${id}`, `<div class="detail-toolbar"><button class="button ghost" onclick='showRun(${jsArg(id)})'>${t("刷新状态")}</button></div>${dag}<div class="table-wrap"><table><thead><tr><th>${t("任务")}</th><th>ID</th><th>${t("状态")}</th><th>${t("开始")}</th><th>${t("结束")}</th><th>Exit</th><th>${t("错误")}</th><th>${t("日志")}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
-  } catch(e) { toast(e.message, true); }
+  openWorkflowViewer('run', id);
 }
 async function showLog(runId, task, label) {
   try {
@@ -562,14 +562,17 @@ async function copyLog() {
 
 let modalBackdropClosable = true;
 function openModal(title, body, closeOnBackdrop=true, size="default") {
+  disposeWorkflowViewer();
+  disposeWorkflowEditor();
   modalBackdropClosable=closeOnBackdrop;
   const modal=document.getElementById("modal");
   modal.querySelector(".modal-card").classList.toggle("compact-modal-card", size === "compact");
   document.getElementById("modalTitle").textContent=title;
   document.getElementById("modalBody").innerHTML=body;
   modal.classList.remove("hidden");
+  initWorkflowEditor();
 }
-function closeModal() { closeLogModal(); document.getElementById("modal").classList.add("hidden"); }
+function closeModal() { disposeWorkflowViewer(); disposeWorkflowEditor(); closeLogModal(); document.getElementById("modal").classList.add("hidden"); }
 function closeModalFromBackdrop(event) { if (event.target.id === "modal" && modalBackdropClosable) closeModal(); }
 function closeLogModal() { document.getElementById("logModal").classList.add("hidden"); }
 function closeLogModalFromBackdrop(event) { if (event.target.id === "logModal") closeLogModal(); }

@@ -32,9 +32,10 @@
         <div class="panel-actions"><button class="button ghost channel-settings-button" onclick="openNotifierSettings()">⚙ <span data-i18n>通知渠道</span></button><button class="button" onclick="openNewWorkflow()" data-i18n>新增工作流</button><button class="button" onclick="openImportWorkflow()" data-i18n>导入工作流</button><button class="button ghost" onclick="loadWorkflows()" data-i18n>刷新</button></div>
       </div>
       <div class="table-wrap">
-        <table>
-          <thead><tr><th data-i18n>工作流</th><th data-i18n>任务</th><th data-i18n>定时状态</th><th data-i18n>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')"><span data-i18n>上次运行</span> <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')"><span data-i18n>下次运行</span> <span id="nextRunSort"></span></button></th><th data-i18n>操作</th></tr></thead>
-          <tbody id="workflowRows"><tr><td colspan="7" class="empty" data-i18n>正在加载…</td></tr></tbody>
+        <table class="workflow-list-table">
+          <colgroup><col class="workflow-col-name"><col class="workflow-col-schedule"><col class="workflow-col-time"><col class="workflow-col-time"><col class="workflow-col-actions"></colgroup>
+          <thead><tr><th data-i18n>工作流</th><th data-i18n>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')"><span data-i18n>上次运行</span> <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')"><span data-i18n>下次运行</span> <span id="nextRunSort"></span></button></th><th data-i18n>操作</th></tr></thead>
+          <tbody id="workflowRows"><tr><td colspan="5" class="empty" data-i18n>正在加载…</td></tr></tbody>
         </table>
       </div>
       <div id="workflowPagination" class="pagination"></div>
@@ -96,5 +97,7 @@
   <div id="toast" class="toast hidden"></div>
   <script src="{{ url_for('static', filename='i18n.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='workflow-editor.js') }}"></script>
+  <script src="{{ url_for('static', filename='workflow-viewer.js') }}"></script>
 </body>
 </html>

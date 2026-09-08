@@ -33,6 +33,7 @@ from .service import (
     decode_cron_expressions,
 )
 from .workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
+from .workflow_editor import preview_definition, extend_definition
 
 
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
@@ -457,6 +458,26 @@ def create_app(
             },
         )
 
+    @app.get("/api/workflows/<workflow_name>/view")
+    def workflow_view(workflow_name: str):
+        definition = registry.definition(workflow_name)
+        workflow = Workflow.from_yaml(definition, name_override=workflow_name)
+        raw = yaml.safe_load(definition)
+        return jsonify({
+            "name": workflow_name,
+            "description": workflow.description,
+            "tasks": [
+                {
+                    "name": task.name, "description": task.description,
+                    "depends": list(task.depends), "enabled": task.enabled,
+                    "type": task.task_type, "success": list(task.success),
+                    "failure": list(task.failure),
+                    "code": dump_workflow_yaml({task.name: raw["tasks"][task.name]}),
+                }
+                for task in workflow.tasks.values()
+            ],
+        })
+
     @app.put("/api/workflows/<workflow_name>")
     def edit_workflow(workflow_name: str):
         if executions.is_workflow_active(workflow_name):
@@ -587,6 +608,8 @@ def create_app(
             raise ServiceError(f"run not found: {run_id}")
         registry.refresh()
         workflow = registry.workflows.get(run["workflow_name"])
+        stored = database.get_workflow(run["workflow_name"])
+        raw_tasks = yaml.safe_load(stored["definition"]).get("tasks", {}) if stored and workflow else {}
         run_data = _row_dict(run)
         run_data["workflow_description"] = (
             workflow.description
@@ -624,6 +647,8 @@ def create_app(
                     "condition_result": row["condition_result"],
                     "handled_by": row["handled_by"],
                     "skip_kind": row["skip_kind"],
+                    "code": dump_workflow_yaml({row["task_name"]: raw_tasks[row["task_name"]]}) if row["task_name"] in raw_tasks else None,
+                    "code_source": "current",
                     "success": list(definition.success) if definition else [],
                     "failure": list(definition.failure) if definition else [],
                 }
@@ -667,6 +692,28 @@ def create_app(
         if not task["log_file"]:
             raise ServiceError("task has no log file")
         return Response(TaskLogManager.read(task["log_file"]), mimetype="text/plain")
+
+    @app.post("/api/workflows/editor-preview")
+    def editor_preview():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise ServiceError("请求必须是 JSON 对象")
+        name = payload.get("workflow_name")
+        if name is not None and not isinstance(name, str):
+            raise ServiceError("工作流 ID 必须是文本")
+        definition = payload.get("definition")
+        try:
+            if "add" in payload:
+                addition = payload["add"]
+                if not isinstance(addition, dict):
+                    raise ServiceError("新增节点参数必须是对象")
+                return jsonify(extend_definition(
+                    definition, addition.get("parent"), addition.get("kind"),
+                    addition.get("branch"), name,
+                ))
+            return jsonify(preview_definition(definition, name))
+        except (TypeError, RecursionError) as exc:
+            raise ServiceError("工作流字段类型错误或 YAML 嵌套过深") from exc
 
     @app.errorhandler(ServiceError)
     @app.errorhandler(WorkflowError)
