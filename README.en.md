@@ -24,6 +24,7 @@ flowchart LR
 
 ## Features
 
+- **Cron weekdays:** Linux numbering uses `0`/`7` for Sunday and `1-6` for Monday through Saturday; names such as `mon-sat` are also supported. `40 8,23 * * 1-6` and `40 8,23 * * mon-sat` are equivalent. Existing numeric weekday schedules follow this rule after upgrading.
 - **Lightweight and single-node:** Flask, SQLite, and APScheduler; no Redis, message queue, or external database
 - **Easy migration:** import DolphinScheduler JSON and Windows Task Scheduler XML as DAG Runner workflows
 - **DAG execution:** dependency and cycle validation, parallel execution of ready tasks, stop, rerun, and resume support

@@ -488,7 +488,7 @@ function removeScheduleRow(button) {
   button.closest(".schedule-input-row").remove();
 }
 function cronFieldIsValid(field, index) {
-  const bounds = [[0,59], [0,23], [1,31], [1,12], [0,6]], [minimum, maximum] = bounds[index];
+  const bounds = [[0,59], [0,23], [1,31], [1,12], [0,7]], [minimum, maximum] = bounds[index];
   const component = "(?:\\*|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)(?:/\\d+)?";
   if (!(new RegExp(`^${component}(?:,${component})*$`)).test(field)) return false;
   let namesRemoved = field.toLowerCase();

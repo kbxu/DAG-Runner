@@ -23,6 +23,7 @@ flowchart LR
 
 ## 特性
 
+- **Cron 星期规则**：采用 Linux 编号，`0`/`7` 为周日，`1-6` 为周一至周六，也支持 `mon-sat`。例如 `40 8,23 * * 1-6` 与 `40 8,23 * * mon-sat` 等价。升级后已有数字星期配置也按此规则解释。
 - **单机轻量**：Flask、SQLite 和 APScheduler 即可运行，不依赖 Redis、消息队列或外部数据库
 - **方便迁移**：可把 DolphinScheduler JSON 和 Windows Task Scheduler XML 转换为 DAG Runner YAML
 - **DAG 执行**：自动校验依赖和环路，并行执行就绪任务，支持停止、重跑和失败续跑
