@@ -1,4 +1,5 @@
 :root {
+  --list-table-width: 1140px;
   --ink: #17202a;
   --muted: #677281;
   --line: #e4e9ee;
@@ -31,11 +32,12 @@ h1 { margin: 0; font-size: 27px; letter-spacing: -.02em; }
 .live.checking span { background: #fdb022; box-shadow: 0 0 0 4px #fdb0222d; }
 main { max-width: 1500px; margin: 24px auto 60px; padding: 0 24px; }
 .panel { margin-bottom: 22px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: 0 3px 12px #17324d0b; }
+main > .panel { max-width: calc(var(--list-table-width) + 2px); margin-inline: auto; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 h2 { margin: 0; font-size: 17px; }
 .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .table-wrap { overflow-x: auto; }
-.workflow-list-table, .run-list-table { width: 1140px; min-width: 1140px; max-width: 1140px; table-layout: fixed; }
+.workflow-list-table, .run-list-table { width: var(--list-table-width); min-width: var(--list-table-width); max-width: var(--list-table-width); table-layout: fixed; }
 .workflow-col-name { width: 220px; }
 .workflow-col-schedule { width: 180px; }
 .workflow-col-time { width: 170px; }
