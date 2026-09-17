@@ -35,6 +35,20 @@ main { max-width: 1500px; margin: 24px auto 60px; padding: 0 24px; }
 main > .panel { max-width: calc(var(--list-table-width) + 2px); margin-inline: auto; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 h2 { margin: 0; font-size: 17px; }
+.workflow-panel-head { gap: 18px; flex-wrap: wrap; }
+.resource-bar { display: flex; align-items: center; gap: 14px; margin-inline: auto; padding: 10px 14px; border: 1px solid #e2ecea; border-radius: 9px; background: #f6faf9; }
+.resource-metric { width: 68px; --resource-color: var(--teal); }
+.resource-label { display: flex; justify-content: space-between; gap: 6px; margin-bottom: 6px; font-size: 11px; color: var(--muted); }
+.resource-label b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+.resource-track { height: 4px; overflow: hidden; border-radius: 4px; background: #e1eae7; }
+.resource-track i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--resource-color); transition: width .4s ease; }
+.resource-metric[data-level="warning"] { --resource-color: #d98b17; }
+.resource-metric[data-level="danger"] { --resource-color: #d94b42; }
+.resource-refresh { display: flex; align-items: center; gap: 5px; padding-left: 12px; border-left: 1px solid #dde7e4; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.resource-refresh > i { width: 5px; height: 5px; border-radius: 50%; background: var(--teal); }
+.resource-bar.unavailable .resource-refresh > i { background: var(--warning); }
+@media (max-width: 1100px) { .workflow-panel-head .resource-bar { order: 3; margin: 0; } }
+@media (max-width: 480px) { .resource-bar { width: 100%; gap: 10px; padding-inline: 10px; } .resource-metric { flex: 1; } }
 .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .table-wrap { overflow-x: auto; }
 .workflow-list-table, .run-list-table { width: var(--list-table-width); min-width: var(--list-table-width); max-width: var(--list-table-width); table-layout: fixed; }

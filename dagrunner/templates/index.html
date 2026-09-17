@@ -27,8 +27,17 @@
 
   <main>
     <section class="panel">
-      <div class="panel-head">
+      <div class="panel-head workflow-panel-head">
         <div><h2 data-i18n>工作流与定时</h2><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p></div>
+        <div id="resourceBar" class="resource-bar" role="group" aria-label="服务器资源" data-i18n-aria-label="服务器资源">
+          {% for key, label in [('cpu', 'CPU'), ('memory', '内存'), ('disk', '硬盘')] %}
+          <div class="resource-metric" data-resource="{{ key }}">
+            <div class="resource-label"><span data-i18n>{{ label }}</span><b>—</b></div>
+            <div class="resource-track" role="meter" aria-label="{{ label }}" data-i18n-aria-label="{{ label }}" aria-valuemin="0" aria-valuemax="100"><i></i></div>
+          </div>
+          {% endfor %}
+          <span id="resourceRefresh" class="resource-refresh" role="status"><i></i><span data-i18n>10s 刷新</span></span>
+        </div>
         <div class="panel-actions"><button class="button ghost channel-settings-button" onclick="openNotifierSettings()">⚙ <span data-i18n>通知渠道</span></button><button class="button" onclick="openNewWorkflow()" data-i18n>新增工作流</button><button class="button" onclick="openImportWorkflow()" data-i18n>导入工作流</button><button class="button ghost" onclick="loadWorkflows()" data-i18n>刷新</button></div>
       </div>
       <div class="table-wrap">

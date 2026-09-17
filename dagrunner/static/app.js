@@ -586,4 +586,42 @@ window.addEventListener("dagrunner-language-change", () => {
   loadRuns();
 });
 
+let resourceLoading = false;
+let resourceSnapshot = null;
+function renderResources(data) {
+  const bar = document.getElementById("resourceBar");
+  bar.classList.toggle("unavailable", !data);
+  bar.querySelector(".resource-refresh span").textContent = t(data ? "10s 刷新" : "暂不可用");
+  bar.querySelector(".resource-refresh span").dataset.i18nKey = data ? "10s 刷新" : "暂不可用";
+  for (const metric of bar.querySelectorAll("[data-resource]")) {
+    const key = metric.dataset.resource, value = data?.[key];
+    const percent = value && Number.isFinite(value.percent) ? Math.max(0, Math.min(100, value.percent)) : null;
+    metric.querySelector("b").textContent = percent === null ? "—" : `${Math.round(percent)}%`;
+    metric.dataset.level = percent >= 90 ? "danger" : percent >= 75 ? "warning" : "normal";
+    const track = metric.querySelector(".resource-track");
+    track.querySelector("i").style.width = `${percent ?? 0}%`;
+    if (percent === null) track.removeAttribute("aria-valuenow");
+    else track.setAttribute("aria-valuenow", percent);
+    const capacity = value?.total ? `${(value.used / 1073741824).toFixed(1)} / ${(value.total / 1073741824).toFixed(1)} GiB` : "";
+    metric.title = percent === null ? t("暂不可用") : `${t(key === "disk" ? "数据库所在磁盘" : "服务器资源")} · ${percent.toFixed(1)}%${capacity ? ` · ${capacity}` : ""}`;
+  }
+}
+async function loadResources() {
+  if (resourceLoading) return;
+  resourceLoading = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    resourceSnapshot = await api("/api/system/resources", {signal: controller.signal});
+    renderResources(resourceSnapshot);
+  } catch (_) {
+    resourceSnapshot = null;
+    renderResources(null);
+  } finally {
+    clearTimeout(timeout);
+    resourceLoading = false;
+  }
+}
+window.addEventListener("dagrunner-language-change", () => renderResources(resourceSnapshot));
+loadResources(); setInterval(loadResources, 10000);
 loadWorkflows(); loadRuns(); setInterval(loadRuns, 3000); setInterval(loadWorkflows, 15000);

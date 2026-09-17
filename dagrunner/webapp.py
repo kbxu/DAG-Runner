@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 import yaml
+import psutil
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
@@ -295,6 +296,18 @@ def create_app(
             raise ServiceError(str(exc)) from exc
         executions.notifier = saved
         return jsonify({"ok": True})
+
+    @app.get("/api/system/resources")
+    def api_system_resources():
+        # A short explicit sample works reliably across request worker threads.
+        cpu = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(str(Path(database_path).resolve().parent))
+        return jsonify(
+            cpu={"percent": cpu},
+            memory={"percent": memory.percent, "used": memory.total - memory.available, "total": memory.total},
+            disk={"percent": disk.percent, "used": disk.used, "total": disk.total},
+        )
 
     @app.get("/api/workflows")
     def workflows():
