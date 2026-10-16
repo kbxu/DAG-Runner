@@ -1,6 +1,7 @@
 const state = {
   workflows: new Map(),
   workflowSort: { key: "next_run_time", direction: "asc" },
+  workflowTag: "all",
   workflowPage: 1,
   workflowPageSize: 15,
   runs: [],
@@ -119,9 +120,56 @@ async function loadWorkflows() {
   } catch (error) { if (!error.offline) toast(error.message, true); }
 }
 
+let workflowTagOptions = [];
+function workflowTitle(workflow) { return workflow.description || workflow.name; }
+function extractWorkflowTags(workflow) {
+  const tags = [];
+  for (const match of String(workflowTitle(workflow)).matchAll(/【([^】]*)】/g)) {
+    const tag = match[1].trim();
+    if (tag && !tags.includes(tag)) tags.push(tag);
+  }
+  return tags;
+}
+function workflowMatchesTag(workflow) {
+  if (state.workflowTag === "all") return true;
+  const tags = extractWorkflowTags(workflow);
+  if (state.workflowTag === "other") return tags.length === 0;
+  return state.workflowTag.startsWith("tag:") && tags.includes(state.workflowTag.slice(4));
+}
+function renderWorkflowTags() {
+  const workflows = [...state.workflows.values()];
+  const counts = new Map();
+  let otherCount = 0;
+  for (const workflow of workflows) {
+    const tags = extractWorkflowTags(workflow);
+    if (!tags.length) { otherCount += 1; continue; }
+    for (const tag of tags) counts.set(tag, (counts.get(tag) || 0) + 1);
+  }
+  const extracted = [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh"))
+    .map(([label, count]) => ({ key: `tag:${label}`, label, count }));
+  workflowTagOptions = [
+    { key: "all", label: t("全部"), count: workflows.length },
+    ...extracted,
+    { key: "other", label: t("其他"), count: otherCount },
+  ];
+  if (!workflowTagOptions.some(option => option.key === state.workflowTag)) state.workflowTag = "all";
+  const box = document.getElementById("workflowTags");
+  if (!box) return;
+  box.innerHTML = workflowTagOptions.map((option, index) => `<button type="button" class="workflow-tag${option.key === state.workflowTag ? " active" : ""}" onclick="setWorkflowTag(${index})"><span class="workflow-tag-label">${esc(option.label)}</span><span class="workflow-tag-count">${option.count}</span></button>`).join("");
+}
+function setWorkflowTag(index) {
+  const option = workflowTagOptions[index];
+  if (!option || option.key === state.workflowTag) return;
+  state.workflowTag = option.key;
+  state.workflowPage = 1;
+  renderWorkflows();
+}
+
 function renderWorkflows() {
   hideSchedulePopover();
-  const workflows = [...state.workflows.values()];
+  renderWorkflowTags();
+  const workflows = [...state.workflows.values()].filter(workflowMatchesTag);
   const { key, direction } = state.workflowSort;
   if (key) {
     const multiplier = direction === "asc" ? 1 : -1;
@@ -155,6 +203,24 @@ function renderWorkflows() {
       </tr>`;
     }).join("") || `<tr><td colspan="5" class="empty">${t("还没有导入工作流")}</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>${t("共 {total} 条 · 第 {page} / {pages} 页", {total:workflows.length,page:state.workflowPage,pages:totalPages})}</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">${t("上一页")}</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">${t("下一页")}</button></div>`;
+  positionWorkflowTags();
+}
+
+function positionWorkflowTags() {
+  const rail = document.getElementById("workflowTags");
+  const wrap = document.querySelector(".workflow-panel-wrap");
+  if (!rail || !wrap) return;
+  if (getComputedStyle(rail).position !== "absolute") {
+    rail.style.top = "";
+    rail.style.maxHeight = "";
+    return;
+  }
+  const anchor = wrap.querySelector(".workflow-list-table thead") || wrap.querySelector(".panel-head");
+  if (!anchor) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const top = Math.max(0, anchor.getBoundingClientRect().bottom - wrapRect.top);
+  rail.style.top = `${top}px`;
+  rail.style.maxHeight = `${Math.max(120, wrapRect.height - top - 8)}px`;
 }
 
 function scheduleSummary(schedule) {
@@ -292,11 +358,23 @@ async function saveNotifierSettings() {
 let pendingImportFilename = "workflow.yaml";
 let pendingImportSuccessVerb = "导入";
 let pendingWorkflowId = "";
+function splitWorkflowName(definition) {
+  const source = String(definition ?? "");
+  const match = source.match(/^name:[ \t]*(.*?)[ \t]*$/m);
+  if (!match) return {name: "", definition: source};
+  let value = match[1];
+  if (value.length > 1 && ((value[0] === '"' && value.endsWith('"')) || (value[0] === "'" && value.endsWith("'")))) value = value.slice(1, -1);
+  return {name: value, definition: source.replace(/^name:[^\n]*\n?/m, "")};
+}
+function workflowNameInput(id, value) {
+  return `<label>${t("工作流名称")}<input id="${id}" value="${esc(value)}" placeholder="${t("用于列表和通知显示")}"></label>`;
+}
 function openWorkflowImportEditor(title, definition, nextId, submitLabel, sourceInfo=null) {
   pendingWorkflowId = nextId;
+  const split = splitWorkflowName(definition);
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
-  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label><label>${t("工作流 YAML")}${yamlEditor("importDefinition",definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；中文名称取自 description。顶层 name 和 migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
 }
 async function openNewWorkflow() {
   pendingImportFilename = "dagr_example_pipeline.yaml";
@@ -325,20 +403,21 @@ async function submitImportWorkflow() {
   if (!workflowEditorCanSave()) return;
   const definition=document.getElementById("importDefinition").value;
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
-  const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId);
+  const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId); form.append("name",document.getElementById("importWorkflowName").value.trim());
   try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { toast(e.message,true); }
 }
 async function editWorkflow(name) {
   const workflow=state.workflows.get(name); if (!workflow || workflow.schedule.enabled) return toast(t("请先下线定时"),true);
   try {
     const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
-    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label><label>${t("工作流 YAML")}${yamlEditor("workflowDefinition",definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；顶层 name、migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
+    const split=splitWorkflowName(definition);
+    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
   } catch(e) { toast(e.message,true); }
 }
 async function saveWorkflow(name) {
   if (!workflowEditorCanSave()) return;
   try {
-    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:document.getElementById("workflowDefinition").value})});
+    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:document.getElementById("workflowDefinition").value,name:document.getElementById("workflowDisplayName").value.trim()})});
     closeModal(); toast(t("工作流已更新")); await loadWorkflows();
   } catch(e) { toast(e.message,true); }
 }
@@ -625,3 +704,4 @@ async function loadResources() {
 window.addEventListener("dagrunner-language-change", () => renderResources(resourceSnapshot));
 loadResources(); setInterval(loadResources, 10000);
 loadWorkflows(); loadRuns(); setInterval(loadRuns, 3000); setInterval(loadWorkflows, 15000);
+window.addEventListener("resize", positionWorkflowTags);

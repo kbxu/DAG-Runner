@@ -284,6 +284,7 @@ def convert_windows_task_scheduler_definition(
     migration: dict[str, Any] = {
         "source": SOURCE_WINDOWS_TASK_SCHEDULER,
         "source_uri": uri,
+        "source_task_name": base_name,
         "source_author": author,
         "source_enabled": source_enabled,
         **(
@@ -295,8 +296,7 @@ def convert_windows_task_scheduler_definition(
         "requires_manual_review": bool(warnings),
     }
     config: dict[str, Any] = {
-        "name": base_name,
-        "description": description,
+        "name": description,
     }
     if setup.strip():
         config["setup"] = setup.strip()
@@ -485,7 +485,6 @@ def convert_dolphinscheduler_definition(
     process_code = process.get("code")
     if not process_code:
         raise ValueError("export item has no processDefinition.code")
-    workflow_name = f"ds_{process_code}"
     definitions = {task["code"]: task for task in item.get("taskDefinitionList", [])}
     relations = item.get("processTaskRelationList", [])
     warnings: list[str] = []
@@ -654,8 +653,7 @@ def convert_dolphinscheduler_definition(
         [*_environment_lines(setup_env, setup_shell), _lf_newlines(setup).strip()]
     ).strip()
     config: dict[str, Any] = {
-        "name": workflow_name,
-        "description": process.get("name") or "",
+        "name": process.get("name") or "",
         "tasks": tasks,
         "migration": {
             "source_process_code": process_code,
@@ -671,7 +669,6 @@ def convert_dolphinscheduler_definition(
     if combined_setup:
         config = {
             "name": config["name"],
-            "description": config["description"],
             "setup": combined_setup,
             "tasks": config["tasks"],
             **({"schedule": config["schedule"]} if "schedule" in config else {}),

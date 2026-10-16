@@ -1,5 +1,4 @@
-name: ds_9000001001
-description: 示例数据处理流程
+name: 示例数据处理流程
 setup:
   linux: |-
     cd demo

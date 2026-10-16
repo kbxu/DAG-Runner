@@ -1,11 +1,39 @@
 """Validate and extend unsaved workflows without executing or persisting them."""
 
+import os
 import secrets
 
 import yaml
 
 from .workflow import Workflow, WorkflowError
 from .migrate_workflows import LiteralDumper
+
+
+def demo_setup() -> str:
+    """Two-line example setup: change directory and define a global variable."""
+    if os.name == "nt":
+        return 'cd demo\n$env:DEMO_ENV = "local"'
+    return "cd demo\nexport DEMO_ENV=local"
+
+
+def demo_command(description: str, python_command: str) -> str:
+    """Three-line example command: platform echo, variable definition, python step."""
+    label = description.strip() or "task"
+    if os.name == "nt":
+        return "\n".join(
+            (
+                f'echo "windows - {label}"',
+                '$env:DEMO_STEP = "1"',
+                python_command,
+            )
+        )
+    return "\n".join(
+        (
+            f'echo "linux - {label}"',
+            "export DEMO_STEP=1",
+            python_command,
+        )
+    )
 
 
 class EditorLoader(yaml.SafeLoader):
@@ -76,7 +104,9 @@ def extend_definition(definition, parent, kind, branch, workflow_name=None):
     def command_task(description, dependency):
         return {
             "description": description,
-            "command": ["python", "-c", "print('TODO: implement task')"],
+            "command": demo_command(
+                description, 'python -c "print(\'TODO implement task\')"'
+            ),
             "depends": [dependency],
         }
 

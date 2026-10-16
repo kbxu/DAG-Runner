@@ -33,6 +33,16 @@ h1 { margin: 0; font-size: 27px; letter-spacing: -.02em; }
 main { max-width: 1500px; margin: 24px auto 60px; padding: 0 24px; }
 .panel { margin-bottom: 22px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: 0 3px 12px #17324d0b; }
 main > .panel { max-width: calc(var(--list-table-width) + 2px); margin-inline: auto; }
+main .panel { min-height: 500px; }
+.workflow-panel-wrap { position: relative; max-width: calc(var(--list-table-width) + 2px); margin-inline: auto; }
+.workflow-tags { position: absolute; top: 0; right: calc(100% + 8px); display: flex; flex-direction: column; gap: 6px; width: 140px; max-height: 100%; overflow-y: auto; }
+.workflow-tag { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; color: #344054; border: 1px solid #d0d5dd; border-radius: 999px; background: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; text-align: left; }
+.workflow-tag:hover { color: var(--teal-dark); border-color: var(--teal); }
+.workflow-tag.active { color: white; border-color: var(--teal); background: var(--teal); }
+.workflow-tag-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-tag-count { flex-shrink: 0; padding: 1px 6px; color: var(--muted); border-radius: 999px; background: #f2f4f7; font-size: 11px; font-variant-numeric: tabular-nums; }
+.workflow-tag.active .workflow-tag-count { color: white; background: #ffffff33; }
+@media (max-width: 1450px) { .workflow-tags { position: static; right: auto; flex-direction: row; flex-wrap: wrap; width: auto; max-height: none; margin-bottom: 10px; } }
 .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 h2 { margin: 0; font-size: 17px; }
 .workflow-panel-head { gap: 18px; flex-wrap: wrap; }

@@ -34,7 +34,7 @@ from .service import (
     decode_cron_expressions,
 )
 from .workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
-from .workflow_editor import preview_definition, extend_definition
+from .workflow_editor import demo_command, demo_setup, preview_definition, extend_definition
 
 
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
@@ -398,7 +398,11 @@ def create_app(
             definition, fallback_name, registry
         )
         parsed = Workflow.from_yaml(definition, fallback_name=fallback_name)
-        display_name = parsed.description.strip() or parsed.name
+        display_name = (
+            str(request.form.get("name", "")).strip()
+            or parsed.description.strip()
+            or parsed.name
+        )
         requested_id = str(request.form.get("workflow_id", "")).strip() or None
         if requested_id is not None and not _HASH_WORKFLOW_ID.fullmatch(requested_id):
             raise ServiceError("invalid proposed workflow ID")
@@ -455,6 +459,7 @@ def create_app(
             definition = example_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise ServiceError("示例工作流文件不可用") from exc
+        definition = _platform_example_definition(definition)
         definition, _ = _unique_import_definition(
             definition, example_path.stem, registry
         )
@@ -474,7 +479,7 @@ def create_app(
     @app.get("/api/workflows/<workflow_name>/view")
     def workflow_view(workflow_name: str):
         definition = registry.definition(workflow_name)
-        workflow = Workflow.from_yaml(definition, name_override=workflow_name)
+        workflow = registry.get(workflow_name)
         raw = yaml.safe_load(definition)
         return jsonify({
             "name": workflow_name,
@@ -507,7 +512,11 @@ def create_app(
             definition,
             name_override=workflow_name,
         )
-        display_name = parsed.description.strip() or current["name"]
+        display_name = (
+            str(payload.get("name", "")).strip()
+            or parsed.description.strip()
+            or current["name"]
+        )
         database.update_workflow(workflow_name, display_name, definition)
         database.update_schedule_description(workflow_name, display_name)
         registry.refresh()
@@ -743,6 +752,37 @@ def create_app(
 def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
     schedules.shutdown()
     executions.shutdown()
+
+
+def _platform_example_definition(definition: str) -> str:
+    """Trim the bundled example to this platform and expand the demo commands."""
+    try:
+        data = yaml.safe_load(definition)
+    except yaml.YAMLError:
+        return definition
+    if not isinstance(data, dict):
+        return definition
+    data["setup"] = demo_setup()
+    tasks = data.get("tasks")
+    if isinstance(tasks, dict):
+        for task in tasks.values():
+            if not isinstance(task, dict) or "command" not in task:
+                continue
+            task["command"] = demo_command(
+                str(task.get("description") or ""),
+                _example_python_command(task["command"]),
+            )
+    return dump_workflow_yaml(data)
+
+
+def _example_python_command(command: object) -> str:
+    """Keep the python step of an example command; other lines are regenerated."""
+    if isinstance(command, str):
+        lines = [line.strip() for line in command.splitlines() if line.strip()]
+        return lines[-1] if lines else command.strip()
+    if isinstance(command, (list, tuple)):
+        return " ".join(str(item) for item in command)
+    return str(command)
 
 
 def _unique_import_definition(

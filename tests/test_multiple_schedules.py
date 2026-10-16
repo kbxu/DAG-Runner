@@ -108,7 +108,7 @@ class MultipleScheduleTests(unittest.TestCase):
         self.assertEqual(preview["source_label"], "DolphinScheduler")
         self.assertEqual(preview["filename"], "dagr_daily-report.yaml")
         workflow = Workflow.from_yaml(preview["definition"])
-        self.assertEqual(workflow.name, "ds_12345")
+        self.assertEqual(workflow.description, "daily report")
         self.assertEqual(workflow.schedule.crons, ("0 9 * * *",))
 
     def test_import_preview_detects_and_converts_windows_task(self) -> None:
@@ -194,7 +194,7 @@ tasks:
 
         self.assertEqual(warnings, [])
         self.assertEqual(len(configs), 1)
-        self.assertEqual(configs[0]["name"], "wts_DailyReport")
+        self.assertEqual(configs[0]["name"], "DailyReport")
         self.assertEqual(
             configs[0]["schedule"],
             {

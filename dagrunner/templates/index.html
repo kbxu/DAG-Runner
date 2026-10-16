@@ -26,7 +26,9 @@
   </header>
 
   <main>
-    <section class="panel">
+    <div class="workflow-panel-wrap">
+      <aside id="workflowTags" class="workflow-tags" role="group" aria-label="按标签筛选" data-i18n-aria-label="按标签筛选"></aside>
+      <section class="panel">
       <div class="panel-head workflow-panel-head">
         <div><h2 data-i18n>工作流与定时</h2><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p></div>
         <div id="resourceBar" class="resource-bar" role="group" aria-label="服务器资源" data-i18n-aria-label="服务器资源">
@@ -49,7 +51,8 @@
       </div>
       <div id="workflowPagination" class="pagination"></div>
       <div id="configErrors" class="config-errors hidden"></div>
-    </section>
+      </section>
+    </div>
 
     <section class="panel">
       <div class="panel-head">

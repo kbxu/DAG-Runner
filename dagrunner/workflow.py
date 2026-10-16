@@ -9,8 +9,16 @@ from typing import Any
 
 import yaml
 
+from .migrate_workflows import dump_workflow_yaml
+
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _safe_identifier(value: str) -> str:
+    """Derive a valid workflow ID from a file name when no override is given."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value)).strip("._-")
+    return cleaned or "imported_workflow"
 
 
 class WorkflowError(ValueError):
@@ -65,10 +73,7 @@ def uniquify_task_ids(
                             item["task"] = replacements.get(item["task"], item["task"])
         rewritten_tasks[rewritten_id] = task
     data["tasks"] = rewritten_tasks
-    return (
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000),
-        replacements,
-    )
+    return dump_workflow_yaml(data), replacements
 
 
 def migrate_legacy_env(content: str) -> tuple[str, bool]:
@@ -270,11 +275,17 @@ class Workflow:
             )
         if "env" in data:
             raise WorkflowError("workflow 'env' is no longer supported; define variables in 'setup'")
-        name = name_override or data.get("name") or fallback_name
+        name = name_override or _safe_identifier(fallback_name)
         if not isinstance(name, str) or not name.strip():
             raise WorkflowError("workflow 'name' must be a non-empty string")
         if not _IDENTIFIER.fullmatch(name):
             raise WorkflowError("workflow 'name' may contain only letters, digits, _, . and -")
+        if description_override is not None:
+            display_name = description_override
+        elif data.get("name") is not None:
+            display_name = str(data.get("name"))
+        else:
+            display_name = str(data.get("description", ""))
         workflow_timeout = data.get("timeout")
         if workflow_timeout is not None and (
             isinstance(workflow_timeout, bool)
@@ -358,11 +369,7 @@ class Workflow:
             config_dir=Path(config_dir or Path.cwd()).resolve(),
             setup=_setup_value(data.get("setup", "")),
             schedule=_schedule_value(data.get("schedule")),
-            description=(
-                description_override
-                if description_override is not None
-                else str(data.get("description", ""))
-            ),
+            description=display_name,
             timeout=workflow_timeout,
             email_notification=_email_notification_value(data.get("notification")),
         )

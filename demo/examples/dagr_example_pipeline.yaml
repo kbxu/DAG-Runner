@@ -1,15 +1,8 @@
-name: example_pipeline
-description: 示例数据处理流程
+name: 示例数据处理流程
 timeout: 3600
-setup:
-  linux: |
-    cd demo
-    export DEMO_ENV='local'
-    export PYTHONUNBUFFERED=1
-  windows: |
-    Set-Location demo
-    $env:DEMO_ENV = 'local'
-    $env:PYTHONUNBUFFERED = "1"
+setup: |
+  cd demo
+  export DEMO_ENV=local
 schedule:
   cron: "0 9 * * mon-fri"
   timezone: Asia/Shanghai
@@ -25,24 +18,36 @@ notification:
 tasks:
   extract_data:
     description: 提取示例数据
-    command: [python, tasks/extract.py]
+    command: |
+      echo "linux - 提取示例数据"
+      export DEMO_STEP=1
+      python tasks/extract.py
     depends: []
     timeout: 600
 
   transform_data:
     description: 清洗转换数据
-    command: [python, tasks/transform.py]
+    command: |
+      echo "linux - 清洗转换数据"
+      export DEMO_STEP=1
+      python tasks/transform.py
     depends: [extract_data]
     timeout: 600
 
   summarize_data:
     description: 汇总统计结果
-    command: [python, tasks/summarize.py]
+    command: |
+      echo "linux - 汇总统计结果"
+      export DEMO_STEP=1
+      python tasks/summarize.py
     depends: [transform_data]
     timeout: 600
 
   publish_report:
     description: 生成示例报告
-    command: [python, tasks/publish.py]
+    command: |
+      echo "linux - 生成示例报告"
+      export DEMO_STEP=1
+      python tasks/publish.py
     depends: [summarize_data]
     timeout: 600

@@ -1,5 +1,4 @@
-name: wts_MarketReport
-description: 每日市场报告示例
+name: 每日市场报告示例
 tasks:
   action_1:
     description: 执行 python.exe
@@ -18,6 +17,7 @@ schedule:
 migration:
   source: windows-task-scheduler
   source_uri: \Examples\MarketReport
+  source_task_name: wts_MarketReport
   source_author: EXAMPLE\demo-user
   source_enabled: true
   source_trigger_type: CalendarTrigger
