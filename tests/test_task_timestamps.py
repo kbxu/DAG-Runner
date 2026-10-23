@@ -60,7 +60,13 @@ class TaskTimestampTests(unittest.TestCase):
             ).run(workflow, resume_run_id=first_run)
             self.assertEqual(status, "SUCCESS")
             states = database.task_states(second_run)
-            self.assertEqual(states["first"]["start_time"], first_start)
-            ordered = [states[name]["start_time"] for name in ("first", "second", "third")]
+            # "first" already succeeded, so the resume records it as skipped in this
+            # run instead of copying the previous run's row.
+            self.assertEqual(states["first"]["status"], "SKIPPED")
+            self.assertEqual(states["first"]["skip_kind"], "REUSED")
+            self.assertIsNone(states["first"]["reused_from_run_id"])
+            self.assertEqual(states["second"]["status"], "SUCCESS")
+            self.assertEqual(states["third"]["status"], "SUCCESS")
+            ordered = [states[name]["start_time"] for name in ("second", "third")]
             self.assertEqual(ordered, sorted(ordered))
-            self.assertLess(states["first"]["start_time"], states["second"]["start_time"])
+            self.assertLess(states["second"]["start_time"], states["third"]["start_time"])

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import uuid
@@ -53,32 +54,33 @@ class WorkflowRunner:
         trigger_type: str = "manual",
         cancel_event: Event | None = None,
         resume_run_id: str | None = None,
+        only_task: bool = False,
     ) -> tuple[str, str]:
         if from_task and resume_run_id:
             raise WorkflowError("from_task and resume_run_id cannot be used together")
+        if only_task and not from_task:
+            raise WorkflowError("only_task needs a from_task")
         order = workflow.topological_order()
-        previous = (
-            self.database.get_run(resume_run_id)
-            if resume_run_id
-            else self.database.latest_run(workflow.name) if from_task else None
-        )
-        if (from_task or resume_run_id) and previous is None:
+        previous = self.database.get_run(resume_run_id) if resume_run_id else None
+        if resume_run_id and previous is None:
             raise WorkflowError(f"cannot resume {workflow.name!r}: no previous run exists")
         if previous and previous["workflow_name"] != workflow.name:
             raise WorkflowError(
                 f"run {previous['run_id']!r} belongs to workflow "
                 f"{previous['workflow_name']!r}, not {workflow.name!r}"
             )
-        previous_states = self.database.task_states(previous["run_id"]) if previous else {}
         if resume_run_id:
-            selected = {
-                name
-                for name in order
-                if name not in previous_states
-                or not _is_reusable_previous_state(previous_states[name])
-            }
+            # A resume repeats the scope recorded by the run it resumes, so resuming a
+            # single-node run runs that node again, and resuming a subtree runs it again.
+            scope = _decode_scope(previous["scope"], order)
+        elif from_task and only_task:
+            scope = [from_task]
+        elif from_task:
+            scope = [name for name in order if name in workflow.descendants(from_task)]
         else:
-            selected = workflow.descendants(from_task) if from_task else set(order)
+            scope = list(order)
+        selected = {name for name in scope if name in workflow.tasks}
+        previous_states = self.database.task_states(previous["run_id"]) if previous else {}
         run_id = run_id or new_run_id()
         self.database.create_run(
             run_id,
@@ -87,6 +89,7 @@ class WorkflowRunner:
             resumed_from_run_id=previous["run_id"] if previous else None,
             from_task=from_task,
             trigger_type=trigger_type,
+            scope=scope,
             task_metadata={
                 name: {
                     "description": workflow.tasks[name].description,
@@ -99,6 +102,7 @@ class WorkflowRunner:
         states = {name: "PENDING" for name in order}
         handled_failures: set[str] = set()
         benign_skips: set[str] = set()
+        reused: set[str] = set()
         task_cancel_event = cancel_event or Event()
         workflow_timeout_event = Event()
         workflow_timeout_timer: Timer | None = None
@@ -113,17 +117,18 @@ class WorkflowRunner:
 
         try:
             if previous:
-                self._seed_resume(
-                    run_id,
-                    workflow.name,
-                    order,
-                    selected,
-                    previous,
-                    previous_states,
-                    states,
-                    handled_failures,
-                    benign_skips,
+                reused = self._seed_resume(
+                    run_id, order, selected, previous_states, states
                 )
+            for name in order:
+                if name not in selected and states[name] == "PENDING":
+                    self._skip(
+                        run_id,
+                        name,
+                        "不在本次运行范围内",
+                        states,
+                        skip_kind="OUTSIDE_SCOPE",
+                    )
             self._run_tasks(
                 workflow,
                 run_id,
@@ -133,10 +138,13 @@ class WorkflowRunner:
                 workflow_timeout_event,
                 handled_failures,
                 benign_skips,
+                selected,
+                reused,
             )
 
             selected_incomplete = any(
                 states[name] != "SUCCESS"
+                and name not in reused
                 and name not in handled_failures
                 and name not in benign_skips
                 and workflow.tasks[name].enabled
@@ -189,7 +197,10 @@ class WorkflowRunner:
         workflow_timeout_event: Event,
         handled_failures: set[str],
         benign_skips: set[str],
+        selected: set[str],
+        reused: set[str] | None = None,
     ) -> None:
+        reused = reused or set()
         order_index = {name: index for index, name in enumerate(order)}
         running: dict[Future, tuple[str, Path]] = {}
         pool = ThreadPoolExecutor(
@@ -206,6 +217,8 @@ class WorkflowRunner:
                     cancel_event,
                     workflow_timeout_event,
                     benign_skips,
+                    selected,
+                    reused,
                 )
                 condition_evaluated = False
                 if not cancel_event.is_set():
@@ -217,7 +230,7 @@ class WorkflowRunner:
                         task = workflow.tasks[task_name]
                         if not all(
                             states[dependency] in TERMINAL_TASK_STATES
-                            for dependency in task.depends
+                            for dependency in self._scope_dependencies(task, selected)
                         ):
                             continue
                         if task.is_condition:
@@ -252,9 +265,10 @@ class WorkflowRunner:
                                     )
                             condition_evaluated = True
                             continue
-                        if task.depends and not any(
-                            states[dependency] == "SUCCESS"
-                            for dependency in task.depends
+                        dependencies = self._scope_dependencies(task, selected)
+                        if dependencies and not any(
+                            self._is_satisfied(states, reused, dependency)
+                            for dependency in dependencies
                         ):
                             continue
                         if task.command is None:
@@ -333,7 +347,10 @@ class WorkflowRunner:
         cancel_event: Event,
         workflow_timeout_event: Event,
         benign_skips: set[str],
+        selected: set[str],
+        reused: set[str] | None = None,
     ) -> None:
+        reused = reused or set()
         changed = True
         while changed:
             changed = False
@@ -354,14 +371,15 @@ class WorkflowRunner:
                     self._skip(run_id, task_name, "task is disabled", states)
                     changed = True
                     continue
+                dependencies = self._scope_dependencies(task, selected)
                 if task.is_condition:
                     if not all(
                         states[dependency] in TERMINAL_TASK_STATES
-                        for dependency in task.depends
+                        for dependency in dependencies
                     ):
                         continue
-                    if task.depends and all(
-                        dependency in benign_skips for dependency in task.depends
+                    if dependencies and all(
+                        dependency in benign_skips for dependency in dependencies
                     ):
                         self._skip(
                             run_id,
@@ -375,11 +393,14 @@ class WorkflowRunner:
                     continue
                 bad_dependencies = [
                     dependency
-                    for dependency in task.depends
-                    if states[dependency] == "FAILED"
-                    or (
-                        states[dependency] == "SKIPPED"
-                        and dependency not in benign_skips
+                    for dependency in dependencies
+                    if not self._is_satisfied(states, reused, dependency)
+                    and (
+                        states[dependency] == "FAILED"
+                        or (
+                            states[dependency] == "SKIPPED"
+                            and dependency not in benign_skips
+                        )
                     )
                 ]
                 if bad_dependencies:
@@ -395,12 +416,12 @@ class WorkflowRunner:
                     changed = True
                     continue
                 if (
-                    task.depends
+                    dependencies
                     and all(
                         states[dependency] in TERMINAL_TASK_STATES
-                        for dependency in task.depends
+                        for dependency in dependencies
                     )
-                    and all(dependency in benign_skips for dependency in task.depends)
+                    and all(dependency in benign_skips for dependency in dependencies)
                 ):
                     self._skip(
                         run_id,
@@ -412,65 +433,36 @@ class WorkflowRunner:
                     )
                     changed = True
 
+    @staticmethod
+    def _scope_dependencies(task: Task, selected: set[str]) -> tuple[str, ...]:
+        """Dependencies that gate this run; tasks outside the scope are ignored."""
+        return tuple(dependency for dependency in task.depends if dependency in selected)
+
+    @staticmethod
+    def _is_satisfied(states: dict[str, str], reused: set[str], task_name: str) -> bool:
+        """A dependency counts when it succeeded now or succeeded in an earlier run."""
+        return states[task_name] == "SUCCESS" or task_name in reused
+
     def _seed_resume(
-        self,
-        run_id,
-        workflow_name,
-        order,
-        selected,
-        previous,
-        previous_states,
-        states,
-        handled_failures,
-        benign_skips,
-    ) -> None:
+        self, run_id, order, selected, previous_states, states
+    ) -> set[str]:
+        """Skip the in-scope tasks that already succeeded; they still satisfy dependents."""
+        reused: set[str] = set()
         for task_name in order:
-            if task_name in selected:
+            if task_name not in selected:
                 continue
             old = previous_states.get(task_name)
-            if old is not None and _is_reusable_previous_state(old):
-                log_file = old["log_file"]
-                if log_file:
-                    try:
-                        log_file = str(
-                            self.logs.copy_for_run(
-                                log_file,
-                                workflow_name,
-                                run_id,
-                                task_name,
-                            )
-                        )
-                    except (OSError, ValueError):
-                        # Reusing terminal state must not fail only because an old log is missing.
-                        pass
-                self.database.set_task_status(
-                    run_id,
-                    task_name,
-                    old["status"],
-                    exit_code=old["exit_code"],
-                    log_file=log_file,
-                    error_message=old["error_message"],
-                    reused_from_run_id=previous["run_id"],
-                    condition_result=old["condition_result"],
-                    handled_by=old["handled_by"],
-                    skip_kind=old["skip_kind"],
-                    start_time=old["start_time"],
-                    end_time=old["end_time"],
-                )
-                states[task_name] = old["status"]
-                if old["handled_by"]:
-                    handled_failures.add(task_name)
-                if old["skip_kind"] in CONDITION_SKIP_KINDS:
-                    benign_skips.add(task_name)
-            else:
-                self._skip(
-                    run_id,
-                    task_name,
-                    f"outside --from scope; previous status was {old['status'] if old else 'MISSING'}",
-                    states,
-                    start_time=old["start_time"] if old else None,
-                    end_time=old["end_time"] if old else None,
-                )
+            if old is None or old["status"] != "SUCCESS":
+                continue
+            self._skip(
+                run_id,
+                task_name,
+                "上次运行已成功，本次未重跑",
+                states,
+                skip_kind="REUSED",
+            )
+            reused.add(task_name)
+        return reused
 
     def _skip(
         self,
@@ -537,15 +529,18 @@ class WorkflowRunner:
             )
 
 
-def _is_reusable_previous_state(row) -> bool:
-    return (
-        row["status"] == "SUCCESS"
-        or (row["status"] == "FAILED" and bool(row["handled_by"]))
-        or (
-            row["status"] == "SKIPPED"
-            and row["skip_kind"] in CONDITION_SKIP_KINDS
-        )
-    )
+def _decode_scope(raw: str | None, order: list[str]) -> list[str]:
+    """Read the recorded scope of a run, keeping only tasks the workflow still has."""
+    if not raw:
+        return list(order)
+    try:
+        names = json.loads(raw)
+    except (TypeError, ValueError):
+        return list(order)
+    if not isinstance(names, list):
+        return list(order)
+    recorded = {str(name) for name in names}
+    return [name for name in order if name in recorded]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -553,7 +548,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workflow", help="imported workflow ID, for example workflow_a1b2c3d4e5f6"
     )
-    parser.add_argument("--from", dest="from_task", help="rerun this task and its descendants")
+    parser.add_argument(
+        "--from",
+        dest="from_task",
+        help="run this task and its descendants (independent of earlier runs)",
+    )
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument(

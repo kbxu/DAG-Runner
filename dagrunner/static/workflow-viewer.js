@@ -39,19 +39,13 @@ async function refreshWorkflowViewer() {
     document.getElementById('viewerMessage').classList.add('hidden');
     document.getElementById('viewerLegend').innerHTML = run
       ? ['RUNNING','SUCCESS','FAILED','SKIPPED','PENDING'].map(status => statusBadge(status)).join(' ')
-      : '<span>点击节点查看 YAML 代码</span>';
+      : `<span>${t("点击节点查看 YAML 代码 · 右键执行任务")}</span>`;
     if (run) {
+      // Scoped runs hide the tasks that were never part of the run.
+      if (view.hideOutsideScope === undefined) view.hideOutsideScope = Boolean(run.from_task);
       const tableScroll = document.querySelector('#viewerTasks .viewer-table-scroll');
       const scrollTop = tableScroll?.scrollTop || 0, scrollLeft = tableScroll?.scrollLeft || 0;
-      const startTime = task => {
-        const value = task.start_time ? Date.parse(task.start_time) : NaN;
-        return Number.isFinite(value) ? value : Infinity;
-      };
-      data.tasks = [...data.tasks].sort((left, right) => {
-        const a = startTime(left), b = startTime(right);
-        return a === b ? left.task_name.localeCompare(right.task_name) : a < b ? -1 : 1;
-      });
-      document.getElementById('viewerTasks').innerHTML = `<div class="viewer-records-heading"><h4>任务运行记录</h4><button class="button ghost" onclick="refreshWorkflowViewer()">刷新</button></div><div class="viewer-table-scroll" tabindex="0" role="region" aria-label="任务运行记录"><table class="viewer-run-table"><thead><tr><th>任务</th><th>开始</th><th>结束</th><th>Exit</th><th>错误</th><th>日志</th></tr></thead><tbody>${data.tasks.map(task => `<tr data-run-task="${esc(task.task_name)}"><td><div class="viewer-task-heading"><button class="workflow-link" onclick='selectViewerTask(${jsArg(task.task_name)})'>${esc(task.task_description || task.task_name)}</button>${statusBadge(task.status)}</div><div class="viewer-task-id mono">${esc(task.task_name)}</div></td><td>${fmt(task.start_time)}</td><td>${fmt(task.end_time)}</td><td>${esc(task.exit_code ?? '—')}</td><td class="viewer-table-error" title="${esc(task.error_message || '')}">${esc(task.error_message || '—')}</td><td>${task.log_file ? `<button class="button ghost" onclick='showLog(${jsArg(view.id)},${jsArg(task.task_name)},${jsArg(task.task_description || task.task_name)})'>日志</button>` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+      document.getElementById('viewerTasks').innerHTML = renderViewerTasks(view);
       const updatedScroll = document.querySelector('#viewerTasks .viewer-table-scroll');
       updatedScroll.scrollTop = scrollTop;
       updatedScroll.scrollLeft = scrollLeft;
@@ -80,6 +74,30 @@ async function refreshWorkflowViewer() {
   }
 }
 
+function renderViewerTasks(view) {
+  const rows = view.data.tasks;
+  const outside = rows.filter(task => task.skip_kind === 'OUTSIDE_SCOPE');
+  const visible = view.hideOutsideScope
+    ? rows.filter(task => task.skip_kind !== 'OUTSIDE_SCOPE')
+    : rows;
+  const toggle = outside.length
+    ? `<button class="button ghost" onclick="toggleOutsideScopeTasks()">${view.hideOutsideScope ? t("显示范围外任务") : t("隐藏范围外任务")}</button>`
+    : '';
+  return `<div class="viewer-records-heading"><h4>${t("任务运行记录")}</h4><div class="viewer-records-actions">${toggle}<button class="button ghost" onclick="refreshWorkflowViewer()">${t("刷新")}</button></div></div><div class="viewer-table-scroll" tabindex="0" role="region" aria-label="${t("任务运行记录")}"><table class="viewer-run-table"><thead><tr><th>${t("任务")}</th><th>${t("开始")}</th><th>${t("结束")}</th><th>Exit</th><th>${t("错误")}</th><th>${t("日志")}</th></tr></thead><tbody>${visible.map(task => `<tr data-run-task="${esc(task.task_name)}"><td><div class="viewer-task-heading"><button class="workflow-link" onclick='selectViewerTask(${jsArg(task.task_name)})'>${esc(task.task_description || task.task_name)}</button>${statusBadge(task.status)}</div><div class="viewer-task-id mono">${esc(task.task_name)}</div></td><td>${fmt(task.start_time)}</td><td>${fmt(task.end_time)}</td><td>${esc(task.exit_code ?? '—')}</td><td class="viewer-table-error" title="${esc(task.error_message || '')}">${esc(task.error_message || '—')}</td><td>${task.log_file ? `<button class="button ghost" onclick='showLog(${jsArg(view.id)},${jsArg(task.task_name)},${jsArg(task.task_description || task.task_name)})'>${t("日志")}</button>` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function toggleOutsideScopeTasks() {
+  const view = workflowViewer;
+  if (!view) return;
+  view.hideOutsideScope = !view.hideOutsideScope;
+  const tableScroll = document.querySelector('#viewerTasks .viewer-table-scroll');
+  const scrollTop = tableScroll?.scrollTop || 0, scrollLeft = tableScroll?.scrollLeft || 0;
+  document.getElementById('viewerTasks').innerHTML = renderViewerTasks(view);
+  const updatedScroll = document.querySelector('#viewerTasks .viewer-table-scroll');
+  updatedScroll.scrollTop = scrollTop;
+  updatedScroll.scrollLeft = scrollLeft;
+}
+
 function renderViewerGraph() {
   const view = workflowViewer;
   if (!view?.data) return;
@@ -95,6 +113,15 @@ function renderViewerGraph() {
     graph.scrollLeft = scrollLeft;
   }
   document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === view.selected));
+  if (view.kind === 'workflow' && !graph.dataset.runMenu) {
+    graph.dataset.runMenu = '1';
+    graph.addEventListener('contextmenu', event => {
+      const node = event.target.closest('.dag-node');
+      if (!node) return;
+      event.preventDefault();
+      openTaskRunMenu(view.id, node.dataset.task, event);
+    });
+  }
 }
 
 function selectViewerTask(name) {

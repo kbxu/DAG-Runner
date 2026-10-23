@@ -161,6 +161,7 @@ class StateDatabase:
             self._ensure_column(connection, "task_runs", "condition_result", "TEXT")
             self._ensure_column(connection, "task_runs", "handled_by", "TEXT")
             self._ensure_column(connection, "task_runs", "skip_kind", "TEXT")
+            self._ensure_column(connection, "workflow_runs", "scope", "TEXT")
             self._ensure_column(
                 connection, "task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0"
             )
@@ -384,15 +385,24 @@ class StateDatabase:
         from_task: str | None = None,
         trigger_type: str = "manual",
         task_metadata: dict[str, dict[str, object]] | None = None,
+        scope: Sequence[str] | None = None,
     ) -> None:
         now = local_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO workflow_runs
                    (run_id, workflow_name, status, start_time, resumed_from_run_id, from_task,
-                    trigger_type)
-                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?)""",
-                (run_id, workflow_name, now, resumed_from_run_id, from_task, trigger_type),
+                    trigger_type, scope)
+                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    workflow_name,
+                    now,
+                    resumed_from_run_id,
+                    from_task,
+                    trigger_type,
+                    json.dumps(list(scope), ensure_ascii=False) if scope is not None else None,
+                ),
             )
             metadata = task_metadata or {}
             connection.executemany(

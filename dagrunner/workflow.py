@@ -108,9 +108,7 @@ def migrate_legacy_env(content: str) -> tuple[str, bool]:
     if not values and not had_legacy_env:
         return content, False
     if not values:
-        return yaml.safe_dump(
-            data, allow_unicode=True, sort_keys=False, width=1000
-        ), True
+        return dump_workflow_yaml(data), True
 
     def assignments(shell: str) -> str:
         lines = []
@@ -148,9 +146,7 @@ def migrate_legacy_env(content: str) -> tuple[str, bool]:
             "linux": assignments("bash"),
             "windows": assignments("powershell"),
         }
-    return yaml.safe_dump(
-        data, allow_unicode=True, sort_keys=False, width=1000
-    ), True
+    return dump_workflow_yaml(data), True
 
 
 @dataclass(frozen=True)

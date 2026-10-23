@@ -21,11 +21,31 @@ from xml.etree import ElementTree
 import yaml
 
 
+def _lf_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class LiteralDumper(yaml.SafeDumper):
-    pass
+    """SafeDumper that keeps a requested literal block instead of quoting it."""
+
+    def choose_scalar_style(self):
+        requested = getattr(getattr(self, "event", None), "style", None)
+        if (
+            requested in ("|", ">")
+            and not self.flow_level
+            and not self.simple_key_context
+        ):
+            return requested
+        return super().choose_scalar_style()
+
+
+def _literal_text(value: str) -> str:
+    """Normalize line endings and drop trailing spaces/tabs for literal blocks."""
+    return "\n".join(line.rstrip(" \t") for line in _lf_newlines(value).split("\n"))
 
 
 def _str_presenter(dumper, value):
+    value = _literal_text(value)
     style = "|" if "\n" in value else None
     return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
 
@@ -55,10 +75,6 @@ def _converted_output_path(
     """Build a stable output name from the source export filename."""
     suffix = "" if total == 1 else f"_{index}"
     return output_dir / f"dagr_{source.stem}{suffix}.yaml"
-
-
-def _lf_newlines(value: str) -> str:
-    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _write_yaml(destination: Path, config: dict[str, Any]) -> None:
@@ -129,7 +145,7 @@ def convert_crontab_line(
         "name": name,
         "tasks": {
             "task_1": {
-                "description": command,
+                "description": "Crontab 任务",
                 "command": command,
                 "depends": [],
             }

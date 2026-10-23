@@ -119,6 +119,10 @@ tbody tr:hover { background: #fbfcfc; }
 .button.channel-settings-button:hover { color: #292da3; border-color: #a4bcfd; background: #eef4ff; }
 .button.danger { background: var(--danger); }
 .button:disabled { opacity: .45; cursor: default; }
+.task-run-menu { position: fixed; z-index: 40; min-width: 170px; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: white; box-shadow: 0 12px 32px #17324d2e; }
+.task-run-menu-title { display: block; padding: 6px 8px 7px; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.task-run-menu button { display: block; width: 100%; padding: 7px 8px; border: 0; border-radius: 6px; color: var(--ink); background: transparent; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; text-align: left; }
+.task-run-menu button:hover { background: #f2f4f7; }
 .actions { display: flex; flex-wrap: wrap; gap: 5px; min-width: 290px; }
 .detail-toolbar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .empty { padding: 32px; color: var(--muted); text-align: center; }
@@ -281,6 +285,7 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .viewer-run-table { min-width: 620px; font-size: 11px; }
 .viewer-run-table th, .viewer-run-table td { padding: 8px 6px; white-space: nowrap; }
 .viewer-records-heading { display: flex; align-items: center; justify-content: flex-start; gap: 10px; }
+.viewer-records-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .viewer-task-heading { display: flex; align-items: center; justify-content: flex-start; gap: 5px; }
 .viewer-task-heading .workflow-link { min-width: 0; text-align: left; }
 .viewer-task-heading .badge { font-size: 9px; padding: 2px 4px; flex: 0 0 auto; }

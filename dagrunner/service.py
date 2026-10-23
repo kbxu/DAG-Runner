@@ -155,13 +155,19 @@ class ExecutionService:
         workflow_name: str,
         *,
         from_task: str | None = None,
+        only_task: bool = False,
         trigger_type: str = "manual",
         resume_run_id: str | None = None,
     ) -> str:
         self.registry.refresh()
         workflow = self.registry.get(workflow_name)
         if from_task:
-            workflow.descendants(from_task)  # Fail before scheduling the background job.
+            if from_task not in workflow.tasks:
+                raise ServiceError(f"任务不存在：{from_task}")
+            if not only_task:
+                workflow.descendants(from_task)  # Fail before scheduling the background job.
+        elif only_task:
+            raise ServiceError("only_task 需要 from_task")
         run_id = new_run_id()
         active = ActiveRun(workflow_name=workflow_name, cancel_event=Event())
         with self._lock:
@@ -174,6 +180,7 @@ class ExecutionService:
                     workflow,
                     run_id,
                     from_task,
+                    only_task,
                     trigger_type,
                     active.cancel_event,
                     resume_run_id,
@@ -190,6 +197,7 @@ class ExecutionService:
         workflow: Workflow,
         run_id: str,
         from_task: str | None,
+        only_task: bool,
         trigger_type: str,
         cancel_event: Event,
         resume_run_id: str | None,
@@ -203,6 +211,7 @@ class ExecutionService:
                 trigger_type=trigger_type,
                 cancel_event=cancel_event,
                 resume_run_id=resume_run_id,
+                only_task=only_task,
             )
 
     def _completed(self, run_id: str, future: Future) -> None:
@@ -242,9 +251,7 @@ class ExecutionService:
             raise ServiceError(f"run not found: {run_id}")
         if run["status"] != "FAILED":
             raise ServiceError("only FAILED runs can be resumed")
-        latest = self.database.latest_run(run["workflow_name"])
-        if latest is None or latest["run_id"] != run_id:
-            raise ServiceError("resume is only allowed from the latest run of this workflow")
+        # Any failed run can be resumed; each resume repeats that run's own scope.
         return self.start_run(
             run["workflow_name"],
             trigger_type="resume",

@@ -607,7 +607,20 @@ def create_app(
 
     @app.post("/api/workflows/<workflow_name>/run")
     def run_workflow(workflow_name: str):
-        run_id = executions.start_run(workflow_name, trigger_type="manual")
+        payload = request.get_json(silent=True) or {}
+        from_task = payload.get("from_task")
+        if from_task is not None and not isinstance(from_task, str):
+            raise ServiceError("from_task 必须是文本")
+        from_task = from_task.strip() if from_task else None
+        only_task = bool(payload.get("only_task", False))
+        if only_task and not from_task:
+            raise ServiceError("only_task 需要 from_task")
+        run_id = executions.start_run(
+            workflow_name,
+            from_task=from_task,
+            only_task=only_task,
+            trigger_type="manual",
+        )
         return jsonify({"ok": True, "run_id": run_id}), 202
 
     @app.delete("/api/workflows/<workflow_name>")
@@ -683,7 +696,14 @@ def create_app(
         )
         tasks = []
         graph_tasks = []
-        for row in database.task_states(run_id).values():
+        # Keep the table in DAG order so out-of-scope tasks stay where they belong.
+        order = workflow.topological_order() if workflow else []
+        position = {name: index for index, name in enumerate(order)}
+        rows = sorted(
+            database.task_states(run_id).values(),
+            key=lambda row: position.get(row["task_name"], len(position)),
+        )
+        for row in rows:
             task = _row_dict(row)
             definition = workflow.tasks.get(row["task_name"]) if workflow else None
             snapshot = bool(row["snapshot_version"])
@@ -987,6 +1007,8 @@ _ENGLISH_ERRORS = {
     "无法识别的 XML 工作流格式": "Unrecognized XML workflow format",
     "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入": "The DolphinScheduler export contains multiple workflows; split it and import each workflow separately",
     "请粘贴 crontab 任务": "Paste a crontab task",
+    "from_task 必须是文本": "from_task must be a string",
+    "only_task 需要 from_task": "only_task needs from_task",
 }
 
 _ENGLISH_ERROR_PREFIXES = {
@@ -994,6 +1016,7 @@ _ENGLISH_ERROR_PREFIXES = {
     "DolphinScheduler 转换失败：": "DolphinScheduler conversion failed: ",
     "无法识别工作流来源：": "Could not detect the workflow source: ",
     "Crontab 转换失败：": "Crontab conversion failed: ",
+    "任务不存在：": "Unknown task: ",
 }
 
 

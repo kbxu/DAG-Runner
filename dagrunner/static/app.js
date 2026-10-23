@@ -54,12 +54,17 @@ function setServiceStatus(status) {
 
 function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c])); }
 function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"); }
+function normalizeYamlNewlines(value) {
+  const source = String(value ?? "");
+  return source.includes("\r") ? source.replace(/\r\n?/g, "\n") : source;
+}
 function namedId(name, id) { return name && name !== id ? (currentLanguage === "en" ? `${name} (${id})` : `${name}（${id}）`) : id; }
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
 const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
 const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
-  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(value)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div></div>`;
+  const source=normalizeYamlNewlines(value);
+  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(source)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(source,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(source)}</textarea></div></div>`;
 }
 function yamlGutter(value) {
   const source=String(value ?? "");
@@ -98,6 +103,14 @@ function highlightUsefulYaml(value, includeSchedule=false) {
 }
 function syncYamlHighlight(id) {
   const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
+  if (input) {
+    const normalized=normalizeYamlNewlines(input.value);
+    if (normalized !== input.value) {
+      const start=input.selectionStart, end=input.selectionEnd;
+      input.value=normalized;
+      input.selectionStart=start; input.selectionEnd=end;
+    }
+  }
   if (input && highlight) { highlight.innerHTML=`${highlightUsefulYaml(input.value,input.dataset.includeSchedule==="true")}\n`; syncYamlScroll(id); }
   syncYamlGutter(id);
   queueWorkflowPreview(id);
@@ -382,6 +395,41 @@ function scheduleRunSearch(value) {
 }
 
 async function runWorkflow(name) { try { const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:"{}"}); toast(t("已提交 {id}",{id:r.run_id})); setTimeout(loadRuns, 250); } catch(e) { toast(e.message, true); } }
+
+let taskRunMenu = null;
+function closeTaskRunMenu() { taskRunMenu?.remove(); taskRunMenu = null; }
+
+async function startTaskRun(name, task, scope) {
+  try {
+    const r = await api(`/api/workflows/${encodeURIComponent(name)}/run`, {method:"POST", body:JSON.stringify({from_task:task, only_task:scope === "only"})});
+    toast(t("已提交 {id}",{id:r.run_id}));
+    setTimeout(loadRuns, 250);
+  } catch(e) { toast(e.message, true); }
+}
+
+function openTaskRunMenu(name, task, event) {
+  closeTaskRunMenu();
+  const menu = document.createElement('div');
+  menu.id = 'taskRunMenu';
+  menu.className = 'task-run-menu';
+  menu.innerHTML = `<strong class="task-run-menu-title" title="${esc(task)}">${esc(task)}</strong><button type="button" data-run-scope="only">${t("执行当前任务")}</button><button type="button" data-run-scope="descendants">${t("执行当前任务及后续")}</button>`;
+  document.body.append(menu);
+  taskRunMenu = menu;
+  menu.querySelectorAll('button[data-run-scope]').forEach(button => {
+    button.addEventListener('click', () => { const scope=button.dataset.runScope; closeTaskRunMenu(); startTaskRun(name, task, scope); });
+  });
+  menu.addEventListener('contextmenu', event => event.preventDefault());
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8))}px`;
+}
+
+document.addEventListener('mousedown', event => {
+  if (taskRunMenu && !taskRunMenu.contains(event.target)) closeTaskRunMenu();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeTaskRunMenu();
+});
 async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
 
 async function openNotifierSettings() {
@@ -478,7 +526,7 @@ async function submitCrontabImport() {
 }
 async function submitImportWorkflow() {
   if (!workflowEditorCanSave()) return;
-  const definition=document.getElementById("importDefinition").value;
+  const definition=normalizeYamlNewlines(document.getElementById("importDefinition").value);
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
   const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId); form.append("name",document.getElementById("importWorkflowName").value.trim());
   try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { toast(e.message,true); }
@@ -494,7 +542,7 @@ async function editWorkflow(name) {
 async function saveWorkflow(name) {
   if (!workflowEditorCanSave()) return;
   try {
-    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:document.getElementById("workflowDefinition").value,name:document.getElementById("workflowDisplayName").value.trim()})});
+    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:normalizeYamlNewlines(document.getElementById("workflowDefinition").value),name:document.getElementById("workflowDisplayName").value.trim()})});
     closeModal(); toast(t("工作流已更新")); await loadWorkflows();
   } catch(e) { toast(e.message,true); }
 }
@@ -801,7 +849,7 @@ function openModal(title, body, closeOnBackdrop=true, size="default") {
   modal.classList.remove("hidden");
   initWorkflowEditor();
 }
-function closeModal() { disposeWorkflowViewer(); disposeWorkflowEditor(); closeLogModal(); document.getElementById("modal").classList.add("hidden"); }
+function closeModal() { disposeWorkflowViewer(); disposeWorkflowEditor(); closeLogModal(); closeTaskRunMenu(); document.getElementById("modal").classList.add("hidden"); }
 function closeModalFromBackdrop(event) { if (event.target.id === "modal" && modalBackdropClosable) closeModal(); }
 function closeLogModal() { logState = null; setLogStatus(""); document.getElementById("logModal").classList.add("hidden"); }
 function closeLogModalFromBackdrop(event) { if (event.target.id === "logModal") closeLogModal(); }
