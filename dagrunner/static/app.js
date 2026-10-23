@@ -59,7 +59,12 @@ function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item 
 const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
 const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
-  return `<div class="yaml-editor"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div>`;
+  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(value)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div></div>`;
+}
+function yamlGutter(value) {
+  const source=String(value ?? "");
+  const count=source === "" ? 1 : source.split("\n").length;
+  return Array.from({length:count}, (_,index) => index+1).join("\n");
 }
 function highlightShellVariables(text) {
   const source=String(text), pattern=/(\$env:[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\b[A-Z_][A-Z0-9_]*(?=\s*=))/g;
@@ -94,11 +99,25 @@ function highlightUsefulYaml(value, includeSchedule=false) {
 function syncYamlHighlight(id) {
   const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
   if (input && highlight) { highlight.innerHTML=`${highlightUsefulYaml(input.value,input.dataset.includeSchedule==="true")}\n`; syncYamlScroll(id); }
+  syncYamlGutter(id);
   queueWorkflowPreview(id);
 }
+function syncYamlGutter(id) {
+  const input=document.getElementById(id), gutter=document.getElementById(`${id}Gutter`);
+  if (!input || !gutter) return;
+  const count=input.value === "" ? 1 : input.value.split("\n").length;
+  if (gutter.dataset.lines !== String(count)) {
+    gutter.dataset.lines=String(count);
+    gutter.textContent=Array.from({length:count}, (_,index) => index+1).join("\n");
+  }
+}
 function syncYamlScroll(id) {
-  const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
+  const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`), gutter=document.getElementById(`${id}Gutter`);
   if (input && highlight) { highlight.scrollTop=input.scrollTop; highlight.scrollLeft=input.scrollLeft; }
+  if (input && gutter) {
+    const inputMax=input.scrollHeight-input.clientHeight, gutterMax=gutter.scrollHeight-gutter.clientHeight;
+    gutter.scrollTop = inputMax > 0 && gutterMax > 0 ? Math.round(input.scrollTop*gutterMax/inputMax) : 0;
+  }
 }
 function fmt(value) {
   if (!value) return "—";
@@ -385,6 +404,17 @@ async function openNewWorkflow() {
   } catch(e) { toast(t("加载示例工作流失败：{error}",{error:e.message}),true); }
 }
 function openImportWorkflow() {
+  openModal(t("导入工作流"), `<div class="import-choice">
+    <button type="button" class="import-choice-option" onclick="openImportWorkflowFile()"><strong>${t("Windows 计划任务文件")}</strong><span>${t("选择导出的 .xml 计划任务文件")}</span></button>
+    <div class="import-choice-option">
+      <label>${t("Crontab 任务")}<input id="crontabInput" class="crontab-input" placeholder="${t("30 16 * * mon-fri /path/to/command arg")}" spellcheck="false"></label>
+      <span class="form-hint">${t("粘贴单行 crontab：5 个时间字段 + 要执行的命令")}</span>
+      <button type="button" class="button" onclick="submitCrontabImport()">${t("确认")}</button>
+    </div>
+  </div>`, false, "compact");
+}
+function openImportWorkflowFile() {
+  closeModal();
   const input=document.createElement("input");
   input.type="file"; input.accept=".yaml,.yml,.json,.xml,text/yaml,application/json,text/xml,application/xml";
   input.onchange=async () => {
@@ -398,6 +428,16 @@ function openImportWorkflow() {
     } catch(e) { toast(t("识别或转换文件失败：{error}",{error:e.message}),true); }
   };
   input.click();
+}
+async function submitCrontabImport() {
+  const line=document.getElementById("crontabInput").value.trim();
+  if (!line) { toast(t("请粘贴 crontab 任务"),true); return; }
+  try {
+    const [preview,nextId]=await Promise.all([api("/api/workflows/crontab-preview",{method:"POST",body:JSON.stringify({line})}),api("/api/workflows/next-id")]);
+    pendingImportFilename=preview.filename || "dagr_crontab.yaml";
+    pendingImportSuccessVerb="新增";
+    openWorkflowImportEditor(t("新增工作流"),preview.definition,nextId.id,t("新增"),preview);
+  } catch(e) { toast(t("识别或转换 crontab 失败：{error}",{error:e.message}),true); }
 }
 async function submitImportWorkflow() {
   if (!workflowEditorCanSave()) return;

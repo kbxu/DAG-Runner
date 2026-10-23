@@ -35,6 +35,7 @@ LiteralDumper.add_representer(str, _str_presenter)
 
 SOURCE_DOLPHINSCHEDULER = "dolphinscheduler"
 SOURCE_WINDOWS_TASK_SCHEDULER = "windows-task-scheduler"
+SOURCE_CRONTAB = "crontab"
 SOURCE_TYPES = (SOURCE_DOLPHINSCHEDULER, SOURCE_WINDOWS_TASK_SCHEDULER)
 WINDOWS_TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 WINDOWS_WEEKDAYS = {
@@ -105,6 +106,41 @@ def convert_dolphinscheduler_crontab(crontab: str) -> str:
     day = "*" if day == "?" else day
     weekday = "*" if weekday == "?" else weekday.lower()
     return " ".join((minute, hour, day, month.lower(), weekday))
+
+
+def convert_crontab_line(
+    line: str, timezone_name: str = "Asia/Shanghai"
+) -> tuple[dict[str, Any], list[str]]:
+    """Convert one crontab line (five time fields plus a command) into a workflow."""
+    parts = line.split()
+    if len(parts) < 6:
+        raise ValueError("crontab 至少需要 5 个时间字段和 1 个命令")
+    cron = " ".join(parts[:5])
+    command = " ".join(parts[5:]).strip()
+    if not command:
+        raise ValueError("crontab 缺少要执行的命令")
+    # Imported to keep this module importable without pulling the scheduler stack.
+    from .service import linux_cron_trigger
+
+    linux_cron_trigger(cron, timezone_name)
+    first_token = command.split()[0]
+    name = _identifier(os.path.basename(first_token)) or "crontab"
+    config: dict[str, Any] = {
+        "name": name,
+        "tasks": {
+            "task_1": {
+                "description": command,
+                "command": command,
+                "depends": [],
+            }
+        },
+        "schedule": {"crons": [cron], "timezone": timezone_name, "enabled": False},
+        "migration": {
+            "source": SOURCE_CRONTAB,
+            "requires_manual_review": True,
+        },
+    }
+    return config, []
 
 
 def convert_dolphinscheduler_export(

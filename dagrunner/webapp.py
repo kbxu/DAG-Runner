@@ -21,6 +21,7 @@ from .migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
     SOURCE_WINDOWS_TASK_SCHEDULER,
     WINDOWS_TASK_NAMESPACE,
+    convert_crontab_line,
     convert_dolphinscheduler_definition,
     convert_windows_task_scheduler_definition,
     dump_workflow_yaml,
@@ -462,6 +463,29 @@ def create_app(
         preview["task_id_replacements"] = replacements
         return jsonify(preview)
 
+    @app.post("/api/workflows/crontab-preview")
+    def crontab_workflow_preview():
+        payload = request.get_json(silent=True) or {}
+        line = str(payload.get("line", "")).strip()
+        if not line:
+            raise ServiceError("请粘贴 crontab 任务")
+        try:
+            config, warnings = convert_crontab_line(line)
+        except ValueError as exc:
+            raise ServiceError(f"Crontab 转换失败：{exc}") from exc
+        definition = dump_workflow_yaml(config)
+        definition, replacements = _unique_import_definition(
+            definition, str(config.get("name") or "crontab"), registry
+        )
+        return jsonify({
+            "source": "crontab",
+            "source_label": "Crontab",
+            "definition": definition,
+            "warnings": warnings,
+            "filename": "dagr_crontab.yaml",
+            "task_id_replacements": replacements,
+        })
+
     @app.get("/api/workflows/next-id")
     def next_workflow_id():
         return jsonify({"id": database.next_workflow_key()})
@@ -818,6 +842,9 @@ def _platform_example_definition(definition: str) -> str:
                 str(task.get("description") or ""),
                 _example_python_command(task["command"]),
             )
+        # Keep the quick-start demo short: only the first two tasks.
+        kept = list(tasks)[:2]
+        data["tasks"] = {name: tasks[name] for name in kept}
     return dump_workflow_yaml(data)
 
 
@@ -959,12 +986,14 @@ _ENGLISH_ERRORS = {
     "工作流文件不能为空": "The workflow file cannot be empty",
     "无法识别的 XML 工作流格式": "Unrecognized XML workflow format",
     "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入": "The DolphinScheduler export contains multiple workflows; split it and import each workflow separately",
+    "请粘贴 crontab 任务": "Paste a crontab task",
 }
 
 _ENGLISH_ERROR_PREFIXES = {
     "Windows Task Scheduler 转换失败：": "Windows Task Scheduler conversion failed: ",
     "DolphinScheduler 转换失败：": "DolphinScheduler conversion failed: ",
     "无法识别工作流来源：": "Could not detect the workflow source: ",
+    "Crontab 转换失败：": "Crontab conversion failed: ",
 }
 
 
