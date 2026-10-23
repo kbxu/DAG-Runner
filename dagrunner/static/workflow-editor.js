@@ -42,6 +42,7 @@ function initWorkflowEditor() {
   const panel = document.createElement('section');
   panel.className = 'workflow-preview';
   panel.innerHTML = `<div class="preview-heading"><strong>实时工作流预览</strong></div><div id="previewGraph" class="dag-scroll"><span class="secondary">有效的工作流将在这里显示</span></div>`;
+  panel.addEventListener('mousedown', event => event.preventDefault());
   const controls = document.createElement('section');
   controls.className = 'workflow-node-controls';
   controls.innerHTML = `<div class="preview-heading"><strong>节点操作</strong><button type="button" class="button ghost" id="previewUndo" disabled onclick="undoWorkflowGeneration()">撤销最近一次生成</button></div><p id="previewStatus" role="status" aria-live="polite">正在校验…</p><div id="previewSelection" class="dag-detail">点击预览节点，添加后续普通模块或条件分支。</div><p class="form-hint">预览不会保存或执行任务。添加节点只追加连接；条件分支自动附带两个后续任务。生成代码会重新排版 YAML（不保留注释），请检查占位命令和判断条件后再保存。</p>`;
@@ -151,6 +152,7 @@ function selectPreviewTask(name) {
   selection.innerHTML = `<strong>${esc(task.description || name)}</strong><div class="secondary mono">${esc(name)}</div><div class="preview-add-actions">${task.type === 'condition' ? '<label>连接分支<select id="previewBranch"><option value="success">条件成立（success）</option><option value="failure">条件不成立（failure）</option></select></label>' : ''}<button type="button" class="button ghost" data-add-node onclick="addPreviewTask('command')">＋ 普通模块</button><button type="button" class="button ghost" data-add-node onclick="addPreviewTask('condition')">＋ 条件分支</button></div><span class="form-hint">${task.type === 'condition' ? '新节点仅在所选分支被选中时运行。' : '新增模块依赖当前节点，已有后续模块继续保留。'} 条件分支默认判断当前节点状态为 SUCCESS，可在 YAML 中修改。</span>`;
   editor.panel.querySelectorAll('.dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === name));
   updateEditorControls();
+  editor.input.focus();
 }
 
 async function addPreviewTask(kind) {

@@ -254,7 +254,7 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
   .workflow-editor-card .modal-head { flex-wrap: wrap; }
   #workflowViewToggle { font-size: 11px; }
 }
-#previewStatus { white-space: pre-wrap; overflow-wrap: anywhere; color: #067647; }
+#previewStatus { height: 84px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #067647; }
 #previewStatus.preview-error { color: #b42318; }
 .preview-selected rect { stroke: #2e60db; stroke-width: 3; }
 .dag-branch-label { fill: #475467; font-size: 11px; paint-order: stroke; stroke: white; stroke-width: 4px; }

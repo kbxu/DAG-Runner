@@ -59,7 +59,7 @@ function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item 
 const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
 const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
-  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(value)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div></div>`;
+  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(value)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(value,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(value)}</textarea></div></div>`;
 }
 function yamlGutter(value) {
   const source=String(value ?? "");
@@ -117,6 +117,43 @@ function syncYamlScroll(id) {
   if (input && gutter) {
     const inputMax=input.scrollHeight-input.clientHeight, gutterMax=gutter.scrollHeight-gutter.clientHeight;
     gutter.scrollTop = inputMax > 0 && gutterMax > 0 ? Math.round(input.scrollTop*gutterMax/inputMax) : 0;
+  }
+}
+function yamlEditorKeydown(event, id) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  const value = input.value;
+  const start = input.selectionStart, end = input.selectionEnd;
+  if (event.key === 'Tab') {
+    event.preventDefault();
+    const blockStart = value.lastIndexOf('\n', start - 1) + 1;
+    const blockEndIndex = value.indexOf('\n', end);
+    const blockEnd = blockEndIndex === -1 ? value.length : blockEndIndex;
+    const block = value.slice(blockStart, blockEnd);
+    if (event.shiftKey) {
+      const dedented = block.split('\n').map(line => line.replace(/^ {1,2}/, '')).join('\n');
+      if (dedented !== block) {
+        const collapsed = start === end;
+        const removed = collapsed ? block.length - block.replace(/^ {1,2}/, '').length : 0;
+        input.setRangeText(dedented, blockStart, blockEnd, 'end');
+        if (collapsed) input.selectionStart = input.selectionEnd = Math.max(blockStart, start - removed);
+        input.dispatchEvent(new Event('input'));
+      }
+      return;
+    }
+    if (start === end) input.setRangeText('  ', start, end, 'end');
+    else input.setRangeText(block.split('\n').map(line => line ? '  ' + line : line).join('\n'), blockStart, blockEnd, 'end');
+    input.dispatchEvent(new Event('input'));
+    return;
+  }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    const before = value.slice(0, start);
+    const lineStart = before.lastIndexOf('\n') + 1;
+    const indent = (before.slice(lineStart).match(/^[ \t]*/) || [''])[0];
+    if (!indent) return;
+    event.preventDefault();
+    input.setRangeText('\n' + indent, start, end, 'end');
+    input.dispatchEvent(new Event('input'));
   }
 }
 function fmt(value) {
