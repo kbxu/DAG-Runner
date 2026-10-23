@@ -60,6 +60,13 @@ h2 { margin: 0; font-size: 17px; }
 @media (max-width: 1100px) { .workflow-panel-head .resource-bar { order: 3; margin: 0; } }
 @media (max-width: 480px) { .resource-bar { width: 100%; gap: 10px; padding-inline: 10px; } .resource-metric { flex: 1; } }
 .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.panel-head-title { display: flex; align-items: center; gap: 16px; }
+.run-stats { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.run-stat { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; color: var(--muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.run-stat b { color: var(--ink); font-size: 13px; font-weight: 650; }
+.run-stat-success b { color: #237b48; }
+.run-stat-running b { color: #b46e00; }
+.run-stat-failed b { color: var(--danger); }
 .table-wrap { overflow-x: auto; }
 .workflow-list-table, .run-list-table { width: var(--list-table-width); min-width: var(--list-table-width); max-width: var(--list-table-width); table-layout: fixed; }
 .workflow-col-name { width: 220px; }

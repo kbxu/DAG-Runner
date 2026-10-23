@@ -122,6 +122,23 @@ tasks:
         self.assertEqual(by_name["first"]["status"], "SKIPPED")
         self.assertIsNone(by_name["second"]["skip_kind"])
 
+    def test_run_stats_counts_tasks_in_window(self) -> None:
+        self.client.post(f"/api/workflows/{self.workflow_key}/run", json={})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            runs = self.database.list_runs(self.workflow_key, limit=1)
+            if runs and runs[0]["status"] in {"SUCCESS", "FAILED"}:
+                break
+            time.sleep(0.1)
+        stats = self.client.get("/api/runs/stats?hours=48").get_json()
+        self.assertEqual(stats["window_hours"], 48)
+        self.assertEqual(stats["success"], 3)
+        self.assertEqual(stats["running"], 0)
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(
+            self.client.get("/api/runs/stats?hours=0").status_code, 400
+        )
+
     def test_descendants_run_is_accepted(self) -> None:
         self.client.post(f"/api/workflows/{self.workflow_key}/run", json={})
         deadline = time.monotonic() + 5

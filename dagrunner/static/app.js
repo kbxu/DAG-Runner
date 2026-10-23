@@ -369,7 +369,19 @@ async function loadRuns(resetPage=false) {
       return `<tr><td><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
+    loadRunStats();
   } catch (error) { if (!error.offline) toast(error.message, true); }
+}
+
+async function loadRunStats() {
+  try {
+    const stats = await api("/api/runs/stats?hours=48");
+    const item = (label, value, className) => `<span class="run-stat ${className}"><b>${value}</b>${t(label)}</span>`;
+    document.getElementById("runStats").innerHTML =
+      item("成功", stats.success, "run-stat-success") +
+      item("运行中", stats.running, "run-stat-running") +
+      item("失败", stats.failed, "run-stat-failed");
+  } catch (error) { if (!error.offline) document.getElementById("runStats").innerHTML = ""; }
 }
 
 function renderRunPagination() {
@@ -490,7 +502,9 @@ async function openNewWorkflow() {
 }
 function openImportWorkflow() {
   openModal(t("导入工作流"), `<div class="import-choice">
-    <button type="button" class="import-choice-option" onclick="openImportWorkflowFile()"><strong>${t("Windows 计划任务文件")}</strong><span>${t("选择导出的 .xml 计划任务文件")}</span></button>
+    <button type="button" class="import-choice-option" onclick="openImportWorkflowFile('.yaml,.yml,text/yaml,application/yaml')"><strong>${t("DAG Runner YAML 文件")}</strong><span>${t("选择「导出 YAML」生成的 .yaml 文件")}</span></button>
+    <button type="button" class="import-choice-option" onclick="openImportWorkflowFile('.xml,text/xml,application/xml')"><strong>${t("Windows 计划任务文件")}</strong><span>${t("选择导出的 .xml 计划任务文件")}</span></button>
+    <button type="button" class="import-choice-option" onclick="openImportWorkflowFile('.json,application/json')"><strong>${t("DolphinScheduler 导出文件")}</strong><span>${t("选择导出的 .json 工作流定义")}</span></button>
     <div class="import-choice-option">
       <label>${t("Crontab 任务")}<input id="crontabInput" class="crontab-input" placeholder="${t("30 16 * * mon-fri /path/to/command arg")}" spellcheck="false"></label>
       <span class="form-hint">${t("粘贴单行 crontab：5 个时间字段 + 要执行的命令")}</span>
@@ -498,10 +512,10 @@ function openImportWorkflow() {
     </div>
   </div>`, false, "compact");
 }
-function openImportWorkflowFile() {
+function openImportWorkflowFile(accept=".yaml,.yml,.json,.xml,text/yaml,application/json,text/xml,application/xml") {
   closeModal();
   const input=document.createElement("input");
-  input.type="file"; input.accept=".yaml,.yml,.json,.xml,text/yaml,application/json,text/xml,application/xml";
+  input.type="file"; input.accept=accept;
   input.onchange=async () => {
     const file=input.files[0]; if (!file) return;
     pendingImportSuccessVerb="导入";

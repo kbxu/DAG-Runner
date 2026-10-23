@@ -56,7 +56,10 @@
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2 data-i18n>运行记录</h2><p data-i18n>按开始时间倒序；运行中的记录每 3 秒刷新</p></div>
+        <div class="panel-head-title">
+          <div><h2 data-i18n>运行记录</h2><p data-i18n>按开始时间倒序；运行中的记录每 3 秒刷新</p></div>
+          <div id="runStats" class="run-stats" title="近 48 小时任务数"></div>
+        </div>
         <button class="button ghost" onclick="loadRuns()" data-i18n>立即刷新</button>
       </div>
       <div class="table-wrap">

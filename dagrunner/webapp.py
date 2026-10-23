@@ -4,7 +4,7 @@ import atexit
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from xml.etree import ElementTree
@@ -637,6 +637,25 @@ def create_app(
             ) from exc
         return jsonify({"ok": True})
 
+    @app.get("/api/runs/stats")
+    def run_stats():
+        hours = request.args.get("hours", 48, type=int)
+        if hours <= 0 or hours > 24 * 30:
+            raise ServiceError("hours 必须在 1 到 720 之间")
+        since = (
+            datetime.now().astimezone() - timedelta(hours=hours)
+        ).isoformat(timespec="milliseconds")
+        counts = database.task_status_counts(since)
+        return jsonify(
+            {
+                "window_hours": hours,
+                "success": counts.get("SUCCESS", 0),
+                "running": counts.get("RUNNING", 0),
+                "failed": counts.get("FAILED", 0),
+                "skipped": counts.get("SKIPPED", 0),
+            }
+        )
+
     @app.get("/api/runs")
     def runs():
         registry.refresh()
@@ -1008,6 +1027,7 @@ _ENGLISH_ERRORS = {
     "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入": "The DolphinScheduler export contains multiple workflows; split it and import each workflow separately",
     "请粘贴 crontab 任务": "Paste a crontab task",
     "from_task 必须是文本": "from_task must be a string",
+    "hours 必须在 1 到 720 之间": "hours must be between 1 and 720",
     "only_task 需要 from_task": "only_task needs from_task",
 }
 

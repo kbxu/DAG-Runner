@@ -517,6 +517,17 @@ class StateDatabase:
             ).fetchall()
         return {row["task_name"]: row for row in rows}
 
+    def task_status_counts(self, since: str) -> dict[str, int]:
+        """Count task records per status for runs that started since an ISO timestamp."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT status, COUNT(*) AS count FROM task_runs
+                   WHERE start_time IS NOT NULL AND datetime(start_time) >= datetime(?)
+                   GROUP BY status""",
+                (since,),
+            ).fetchall()
+        return {row["status"]: row["count"] for row in rows}
+
     def list_runs(self, workflow_name: str, limit: int = 20) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
