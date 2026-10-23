@@ -4,8 +4,9 @@ import atexit
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from xml.etree import ElementTree
 
 import yaml
@@ -38,6 +39,24 @@ from .workflow_editor import demo_command, demo_setup, preview_definition, exten
 
 
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
+_LOG_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _log_download_filename(task, fallback_time=None) -> str:
+    raw = (task["task_name"] or "task").strip()
+    name = _LOG_FILENAME_UNSAFE.sub("_", raw).strip("_")[:80] or "task"
+    stamp = "unknown"
+    start_time = task["start_time"] or fallback_time
+    if start_time:
+        try:
+            stamp = (
+                datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                .astimezone()
+                .strftime("%Y%m%d-%H%M%S")
+            )
+        except ValueError:
+            stamp = _LOG_FILENAME_UNSAFE.sub("_", start_time).strip("_") or "unknown"
+    return f"{name}_{stamp}.txt"
 
 
 def create_app(
@@ -713,7 +732,34 @@ def create_app(
             raise ServiceError(f"task run not found: {run_id}/{task_name}")
         if not task["log_file"]:
             raise ServiceError("task has no log file")
-        return Response(TaskLogManager.read(task["log_file"]), mimetype="text/plain")
+        if "download" in request.args:
+            run = database.get_run(run_id)
+            text = TaskLogManager.read(task["log_file"])
+            response = Response(text, mimetype="text/plain; charset=utf-8")
+            response.headers["Content-Disposition"] = (
+                "attachment; filename*=UTF-8''"
+                f"{quote(_log_download_filename(task, run['start_time'] if run else None))}"
+            )
+            return response
+        offset = request.args.get("offset", default=None, type=int)
+        limit = request.args.get("limit", default=None, type=int)
+        if offset is None and limit is None:
+            return Response(TaskLogManager.read(task["log_file"]), mimetype="text/plain")
+        lines = TaskLogManager.read_lines(task["log_file"])
+        offset = max(0, offset or 0)
+        limit = min(max(1, limit or 200), 1000)
+        return jsonify(
+            {
+                "run_id": run_id,
+                "task_name": task_name,
+                "start_time": task["start_time"],
+                "offset": offset,
+                "limit": limit,
+                "total": len(lines),
+                "lines": lines[offset : offset + limit],
+                "has_more": offset + limit < len(lines),
+            }
+        )
 
     @app.post("/api/workflows/editor-preview")
     def editor_preview():

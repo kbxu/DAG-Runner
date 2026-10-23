@@ -1,11 +1,66 @@
 from __future__ import annotations
 
+import codecs
+import locale
+import os
 import re
 import shutil
 from pathlib import Path
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+_BOMS = (
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+)
+
+
+def _fallback_encodings() -> tuple[str, ...]:
+    encodings: list[str] = []
+    if os.name == "nt":
+        encodings.extend(("mbcs", "cp936", "gbk"))
+    try:
+        preferred = locale.getpreferredencoding(False)
+    except Exception:
+        preferred = None
+    if preferred:
+        encodings.append(preferred)
+    encodings.extend(("cp1252", "latin-1"))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for encoding in encodings:
+        if encoding and encoding not in seen:
+            seen.add(encoding)
+            unique.append(encoding)
+    return tuple(unique)
+
+
+def _decode_bytes(data: bytes) -> str:
+    for bom, encoding in _BOMS:
+        if data.startswith(bom):
+            return data.decode(encoding, errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    fallback = _fallback_encodings()
+    lines: list[str] = []
+    for raw_line in data.split(b"\n"):
+        try:
+            lines.append(raw_line.decode("utf-8"))
+        except UnicodeDecodeError:
+            for encoding in fallback:
+                try:
+                    lines.append(raw_line.decode(encoding))
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+            else:
+                lines.append(raw_line.decode("utf-8", errors="replace"))
+    return "\n".join(lines)
 
 
 class TaskLogManager:
@@ -26,7 +81,17 @@ class TaskLogManager:
 
     @staticmethod
     def read(path: str | Path) -> str:
-        return Path(path).read_text(encoding="utf-8", errors="replace")
+        return _decode_bytes(Path(path).read_bytes())
+
+    @staticmethod
+    def read_lines(path: str | Path) -> list[str]:
+        text = _decode_bytes(Path(path).read_bytes())
+        if not text:
+            return []
+        lines = text.split("\n")
+        if text.endswith("\n"):
+            lines.pop()
+        return [line[:-1] if line.endswith("\r") else line for line in lines]
 
     def delete_run(self, workflow_name: str, run_id: str) -> None:
         for value, label in (

@@ -454,6 +454,8 @@ class WorkflowRunner:
                     condition_result=old["condition_result"],
                     handled_by=old["handled_by"],
                     skip_kind=old["skip_kind"],
+                    start_time=old["start_time"],
+                    end_time=old["end_time"],
                 )
                 states[task_name] = old["status"]
                 if old["handled_by"]:
@@ -466,17 +468,21 @@ class WorkflowRunner:
                     task_name,
                     f"outside --from scope; previous status was {old['status'] if old else 'MISSING'}",
                     states,
+                    start_time=old["start_time"] if old else None,
+                    end_time=old["end_time"] if old else None,
                 )
 
     def _skip(
         self,
-        run_id: str,
-        task_name: str,
-        reason: str,
+        run_id,
+        task_name,
+        reason,
         states: dict[str, str],
         *,
         skip_kind: str | None = None,
         benign_skips: set[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
     ) -> None:
         self.database.set_task_status(
             run_id,
@@ -484,6 +490,8 @@ class WorkflowRunner:
             "SKIPPED",
             error_message=reason,
             skip_kind=skip_kind,
+            start_time=start_time,
+            end_time=end_time,
         )
         states[task_name] = "SKIPPED"
         if skip_kind in CONDITION_SKIP_KINDS and benign_skips is not None:

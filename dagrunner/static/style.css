@@ -144,7 +144,16 @@ tbody tr:hover { background: #fbfcfc; }
 .modal-head-actions { display: flex; align-items: center; gap: 10px; }
 .icon-button { border: 0; color: #667085; background: transparent; cursor: pointer; font-size: 25px; }
 .modal-body { max-height: calc(88vh - 64px); overflow: auto; padding: 20px; }
-.log-modal .modal-body { max-height: calc(80vh - 64px); }
+.log-modal .modal-body { max-height: calc(80vh - 64px); padding: 0; overflow: hidden; }
+.log-modal-body { display: flex; flex-direction: column; max-height: calc(80vh - 64px); }
+.log-scroll { flex: 1 1 auto; overflow: auto; padding: 10px 0; outline: none; }
+.log-content { min-width: min-content; }
+.log-line { display: flex; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.log-line-number { flex: 0 0 3.5em; padding: 0 12px 0 16px; color: #98a2b3; text-align: right; user-select: none; position: sticky; left: 0; background: white; }
+.log-line-text { flex: 1 1 auto; padding-right: 16px; white-space: pre-wrap; word-break: break-word; }
+.log-line:hover .log-line-number, .log-line:hover .log-line-text { background: #f2f6f8; }
+.log-status { flex: 0 0 auto; padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+.log-status:empty { display: none; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .form-stack { display: grid; gap: 16px; }
 .import-source { display: flex; align-items: center; gap: 9px; padding: 9px 11px; color: #475467; border: 1px solid #b2ddff; border-radius: 7px; background: #eff8ff; font-size: 12px; }

@@ -610,24 +610,97 @@ async function saveSchedule(name) { const values=validateScheduleForm(); if (!va
 async function showRun(id) {
   openWorkflowViewer('run', id);
 }
-async function showLog(runId, task, label) {
+const LOG_CHUNK_SIZE = 200;
+const LOG_SCROLL_THRESHOLD = 40;
+let logState = null;
+let logScrollBound = false;
+
+function setLogStatus(message) {
+  const status = document.getElementById("logStatus");
+  if (status) status.textContent = message;
+}
+
+function isLogScrollNearBottom() {
+  const scroll = document.getElementById("logScroll");
+  if (!scroll) return false;
+  return scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - LOG_SCROLL_THRESHOLD;
+}
+
+function onLogScroll() {
+  if (!logState || logState.loading || !logState.hasMore) return;
+  if (isLogScrollNearBottom()) loadLogChunk();
+}
+
+function bindLogScroll() {
+  if (logScrollBound) return;
+  const scroll = document.getElementById("logScroll");
+  if (!scroll) return;
+  scroll.addEventListener("scroll", onLogScroll);
+  logScrollBound = true;
+}
+
+function appendLogLines(lines, startLine) {
+  const content = document.getElementById("logContent");
+  if (!content) return;
+  const html = lines.map((line, index) => `<div class="log-line"><span class="log-line-number">${startLine + index + 1}</span><span class="log-line-text">${esc(line)}</span></div>`).join("");
+  content.insertAdjacentHTML("beforeend", html);
+}
+
+async function loadLogChunk() {
+  const state = logState;
+  if (!state || state.loading || !state.hasMore) return;
+  state.loading = true;
+  setLogStatus(t("正在加载…"));
   try {
-    const text = await api(`/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(task)}/log`);
-    document.getElementById("logModalTitle").textContent = currentLanguage === "en" ? `${label || task} (${task})` : `${label || task}（${task}）`;
-    document.getElementById("logContent").textContent = text;
-    document.getElementById("logModal").classList.remove("hidden");
-  } catch(e) { toast(e.message, true); }
+    const data = await api(`/api/runs/${encodeURIComponent(state.runId)}/tasks/${encodeURIComponent(state.task)}/log?offset=${state.offset}&limit=${LOG_CHUNK_SIZE}`);
+    if (logState !== state) return;
+    appendLogLines(data.lines, state.offset);
+    state.offset += data.lines.length;
+    state.hasMore = data.has_more;
+    setLogStatus(state.hasMore ? "" : t("已加载全部 {total} 行",{total:data.total}));
+  } catch(e) {
+    if (logState === state) toast(e.message, true);
+  } finally {
+    if (logState === state) {
+      state.loading = false;
+      if (state.hasMore && isLogScrollNearBottom()) loadLogChunk();
+    }
+  }
+}
+
+async function showLog(runId, task, label) {
+  const modal = document.getElementById("logModal");
+  document.getElementById("logModalTitle").textContent = currentLanguage === "en" ? `${label || task} (${task})` : `${label || task}（${task}）`;
+  document.getElementById("logContent").innerHTML = "";
+  setLogStatus("");
+  logState = {runId, task, offset: 0, hasMore: true, loading: false};
+  bindLogScroll();
+  modal.classList.remove("hidden");
+  await loadLogChunk();
+}
+
+function downloadLog() {
+  const state = logState;
+  if (!state) return;
+  const url = `/api/runs/${encodeURIComponent(state.runId)}/tasks/${encodeURIComponent(state.task)}/log?download=1`;
+  const link = document.createElement("a");
+  link.href = url;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 async function copyLog() {
-  const content = document.getElementById("logContent");
-  if (!content) return;
+  const state = logState;
+  if (!state) return;
+  let text = "";
   try {
+    text = await api(`/api/runs/${encodeURIComponent(state.runId)}/tasks/${encodeURIComponent(state.task)}/log`);
     if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(content.textContent);
+      await navigator.clipboard.writeText(text);
     } else {
       const input = document.createElement("textarea");
-      input.value = content.textContent;
+      input.value = text;
       input.className = "clipboard-fallback";
       document.body.appendChild(input);
       input.select();
@@ -653,7 +726,7 @@ function openModal(title, body, closeOnBackdrop=true, size="default") {
 }
 function closeModal() { disposeWorkflowViewer(); disposeWorkflowEditor(); closeLogModal(); document.getElementById("modal").classList.add("hidden"); }
 function closeModalFromBackdrop(event) { if (event.target.id === "modal" && modalBackdropClosable) closeModal(); }
-function closeLogModal() { document.getElementById("logModal").classList.add("hidden"); }
+function closeLogModal() { logState = null; setLogStatus(""); document.getElementById("logModal").classList.add("hidden"); }
 function closeLogModalFromBackdrop(event) { if (event.target.id === "logModal") closeLogModal(); }
 let toastTimer; function toast(message, error=false) { const box=document.getElementById("toast"); box.textContent=message; box.style.background=error?"#b42318":"#182230"; box.classList.remove("hidden"); clearTimeout(toastTimer); toastTimer=setTimeout(()=>box.classList.add("hidden"),4000); }
 

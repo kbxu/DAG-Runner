@@ -14,7 +14,7 @@ RUN_STATUSES = {"RUNNING", "SUCCESS", "FAILED"}
 
 
 def local_now() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 def _as_local_time(value: str) -> str:
@@ -22,7 +22,10 @@ def _as_local_time(value: str) -> str:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return value
-    return parsed.astimezone().isoformat(timespec="seconds")
+    local = parsed.astimezone()
+    if local.microsecond:
+        return local.isoformat(timespec="milliseconds")
+    return local.isoformat(timespec="seconds")
 
 
 class StateDatabase:
@@ -426,12 +429,14 @@ class StateDatabase:
         condition_result: str | None = None,
         handled_by: str | None = None,
         skip_kind: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
     ) -> None:
         if status not in TASK_STATUSES:
             raise ValueError(f"invalid task status: {status}")
         now = local_now()
-        start_time = now if status == "RUNNING" else None
-        end_time = now if status in {"SUCCESS", "FAILED", "SKIPPED"} else None
+        start_time = start_time if start_time is not None else (now if status == "RUNNING" else None)
+        end_time = end_time if end_time is not None else (now if status in {"SUCCESS", "FAILED", "SKIPPED"} else None)
         with self.connect() as connection:
             cursor = connection.execute(
                 """UPDATE task_runs

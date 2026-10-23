@@ -90,10 +90,16 @@
         <h3 id="logModalTitle"></h3>
         <div class="modal-head-actions">
           <button class="button ghost" onclick="copyLog()" data-i18n>复制日志</button>
+          <button class="button ghost" onclick="downloadLog()" data-i18n>下载日志</button>
           <button class="icon-button" onclick="closeLogModal()">×</button>
         </div>
       </div>
-      <div class="modal-body"><pre id="logContent"></pre></div>
+      <div class="modal-body log-modal-body">
+        <div id="logScroll" class="log-scroll" tabindex="0" role="region" aria-label="日志内容" data-i18n-aria-label="日志内容">
+          <div id="logContent" class="log-content"></div>
+          <div id="logStatus" class="log-status" role="status"></div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="deleteConfirmModal" class="modal confirm-modal hidden" onclick="closeDeleteConfirmFromBackdrop(event)">
