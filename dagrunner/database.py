@@ -561,6 +561,7 @@ class StateDatabase:
         workflow_query: str = "",
         status: str = "",
         trigger_type: str = "",
+        tag: str = "",
     ) -> tuple[list[sqlite3.Row], int, int]:
         conditions: list[str] = []
         parameters: list[object] = []
@@ -576,6 +577,12 @@ class StateDatabase:
         if trigger_type:
             conditions.append("wr.trigger_type = ?")
             parameters.append(trigger_type)
+        if tag.startswith("tag:"):
+            label = tag[4:]
+            conditions.append("w.name LIKE ?")
+            parameters.append(f"【{label}】%")
+        elif tag == "other":
+            conditions.append("w.name NOT LIKE '【%】%'")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         from_clause = (
             "FROM workflow_runs wr "

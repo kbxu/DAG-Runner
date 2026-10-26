@@ -8,7 +8,7 @@ const state = {
   runPage: 1,
   runPageSize: 15,
   runPagination: { page: 1, page_size: 15, total: 0, total_pages: 1 },
-  runFilters: { workflow: "", status: "", trigger: "" },
+  runFilters: { workflow: "", status: "", trigger: "", tag: "" },
 };
 let serviceState = "checking";
 let runLoadSequence = 0;
@@ -233,6 +233,8 @@ function setWorkflowTag(index) {
   state.workflowTag = option.key;
   state.workflowPage = 1;
   renderWorkflows();
+  state.runFilters.tag = option.key;
+  loadRuns(true);
 }
 
 function renderWorkflows() {

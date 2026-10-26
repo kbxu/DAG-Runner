@@ -667,6 +667,7 @@ def create_app(
         workflow_query = request.args.get("workflow", "").strip()
         status = request.args.get("status", "").strip().upper()
         trigger_type = request.args.get("trigger", "").strip().lower()
+        tag = request.args.get("tag", "").strip()
         if status and status not in {"RUNNING", "SUCCESS", "FAILED"}:
             raise ServiceError(f"invalid run status filter: {status}")
         if trigger_type and trigger_type not in {"manual", "schedule", "rerun", "resume"}:
@@ -677,6 +678,7 @@ def create_app(
             workflow_query=workflow_query,
             status=status,
             trigger_type=trigger_type,
+            tag=tag,
         )
         active_ids = executions.active_run_ids()
         run_rows = []
