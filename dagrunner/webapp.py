@@ -17,6 +17,14 @@ from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
 from .database import StateDatabase
 from .logger import TaskLogManager
 from .notifier import load_email_config, load_notifier, save_email_config
+from .remote import (
+    RemoteConfig,
+    RemoteMonitor,
+    RemoteSettings,
+    check_remote,
+    detect_key_path,
+    detect_ssh_path,
+)
 from .migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
     SOURCE_WINDOWS_TASK_SCHEDULER,
@@ -41,6 +49,8 @@ from .workflow_editor import demo_command, demo_setup, preview_definition, exten
 
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
 _LOG_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+_REMOTE_ALIAS = re.compile(r"^[A-Za-z0-9_.-]+$")
+_REMOTE_HOST_KEY_POLICIES = {"accept-new", "yes", "no", "ask"}
 
 
 def _log_download_filename(task, fallback_time=None) -> str:
@@ -87,15 +97,18 @@ def create_app(
     notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
     executions = ExecutionService(database, registry, logs, notifier=notifier)
     schedules = ScheduleService(database, registry, executions)
+    remote_monitor = RemoteMonitor(database)
     if start_scheduler:
         executions.recover_orphaned_runs()
         schedules.start()
+        remote_monitor.start()
 
     app.extensions["state_database"] = database
     app.extensions["workflow_registry"] = registry
     app.extensions["auth_service"] = auth
     app.extensions["execution_service"] = executions
     app.extensions["schedule_service"] = schedules
+    app.extensions["remote_monitor"] = remote_monitor
 
     public_endpoints = {"static", "login_page", "api_login"}
 
@@ -317,6 +330,120 @@ def create_app(
         executions.notifier = saved
         return jsonify({"ok": True})
 
+    @app.get("/api/remotes")
+    def list_remotes():
+        settings = database.get_remote_settings()
+        status = database.list_remote_status()
+        remotes = []
+        for config in database.list_remotes():
+            row = dict(status.get(config.alias) or {})
+            remotes.append(
+                {
+                    "alias": config.alias,
+                    "username": config.username,
+                    "host": config.host,
+                    "port": config.port,
+                    "workdir": config.workdir,
+                    "status": {
+                        "reachable": bool(row.get("reachable")) if row else False,
+                        "last_check": row.get("last_check") if row else None,
+                        "latency_ms": row.get("latency_ms") if row else None,
+                        "error_message": row.get("error_message") if row else None,
+                    },
+                }
+            )
+        return jsonify(
+            {
+                "settings": {
+                    "ssh_path": settings.ssh_path,
+                    "key_path": settings.key_path,
+                    "host_key_policy": settings.host_key_policy,
+                    "connect_timeout": settings.connect_timeout,
+                    "detected_ssh_path": detect_ssh_path(),
+                    "detected_key_path": detect_key_path(),
+                },
+                "remotes": remotes,
+            }
+        )
+
+    @app.put("/api/remotes/settings")
+    def update_remote_settings():
+        payload = request.get_json(silent=True) or {}
+        errors, ssh_path, key_path, policy, timeout = _remote_settings_errors(payload)
+        if errors:
+            raise ServiceError("远程全局设置校验失败", field_errors=errors)
+        database.update_remote_settings(
+            RemoteSettings(
+                ssh_path=ssh_path,
+                key_path=key_path,
+                host_key_policy=policy,
+                connect_timeout=timeout,
+            )
+        )
+        return jsonify({"ok": True})
+
+    @app.put("/api/remotes/<alias>")
+    def upsert_remote(alias: str):
+        payload = request.get_json(silent=True) or {}
+        errors, username, host, port, workdir = _remote_field_errors(payload, alias)
+        if errors:
+            raise ServiceError("远程配置校验失败", field_errors=errors)
+        database.upsert_remote(
+            RemoteConfig(
+                alias=alias,
+                username=username,
+                host=host,
+                port=port,
+                workdir=workdir,
+            )
+        )
+        return jsonify({"ok": True})
+
+    @app.delete("/api/remotes/<alias>")
+    def delete_remote(alias: str):
+        used = database.workflows_using_remote(alias)
+        if used:
+            raise ServiceError(f"远程被占用：{', '.join(used)}")
+        try:
+            database.delete_remote(alias)
+        except KeyError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.post("/api/remotes/test")
+    def test_remote_config():
+        payload = request.get_json(silent=True) or {}
+        alias = str(payload.get("alias", ""))
+        errors, username, host, port, workdir = _remote_field_errors(payload, alias)
+        errors.pop("alias", None)
+        if errors:
+            raise ServiceError("远程配置校验失败", field_errors=errors)
+        settings = database.get_remote_settings()
+        config = RemoteConfig(
+            alias=alias,
+            username=username,
+            host=host,
+            port=port,
+            workdir=workdir,
+            ssh_path=settings.ssh_path,
+            key_path=settings.key_path,
+            host_key_policy=settings.host_key_policy,
+            connect_timeout=settings.connect_timeout,
+        )
+        result = check_remote(config)
+        if database.get_remote(alias) is not None:
+            database.set_remote_status(
+                alias, result.reachable, result.error_message, result.latency_ms
+            )
+        return jsonify(
+            {
+                "ok": True,
+                "reachable": result.reachable,
+                "error_message": result.error_message,
+                "latency_ms": result.latency_ms,
+            }
+        )
+
     @app.get("/api/system/resources")
     def api_system_resources():
         # A short explicit sample works reliably across request worker threads.
@@ -368,6 +495,7 @@ def create_app(
                 {
                     "name": name,
                     "db_id": registry.rows[name]["id"],
+                    "runner": registry.rows[name]["runner"] or "local",
                     "description": workflow.description,
                     "last_run_time": last_run_times.get(name),
                     "task_count": len(workflow.tasks),
@@ -426,11 +554,16 @@ def create_app(
         requested_id = str(request.form.get("workflow_id", "")).strip() or None
         if requested_id is not None and not _HASH_WORKFLOW_ID.fullmatch(requested_id):
             raise ServiceError("invalid proposed workflow ID")
+        runner = str(request.form.get("runner", "local") or "local").strip() or "local"
+        if runner != "local" and database.get_remote(runner) is None:
+            raise ServiceError(f"远程机器不存在：{runner}")
         try:
             row = database.create_workflow(display_name, definition, requested_id)
         except ValueError as exc:
             raise ServiceError(str(exc)) from exc
         workflow_name = row["workflow_key"]
+        if runner != "local":
+            database.set_workflow_runner(workflow_name, runner)
         registry.refresh()
         schedule = parsed.schedule
         try:
@@ -560,8 +693,15 @@ def create_app(
             or parsed.description.strip()
             or current["name"]
         )
+        runner = (
+            str(payload.get("runner", current["runner"] or "local") or "local").strip()
+            or "local"
+        )
+        if runner != "local" and database.get_remote(runner) is None:
+            raise ServiceError(f"远程机器不存在：{runner}")
         database.update_workflow(workflow_name, display_name, definition)
         database.update_schedule_description(workflow_name, display_name)
+        database.set_workflow_runner(workflow_name, runner)
         registry.refresh()
         return jsonify({"ok": True})
 
@@ -851,18 +991,25 @@ def create_app(
     @app.errorhandler(ServiceError)
     @app.errorhandler(WorkflowError)
     def expected_error(exc):
-        return jsonify(
-            {"ok": False, "error": _localized_error(str(exc), g.language)}
-        ), 400
+        payload = {"ok": False, "error": _localized_error(str(exc), g.language)}
+        field_errors = getattr(exc, "field_errors", None)
+        if field_errors:
+            payload["field_errors"] = field_errors
+        return jsonify(payload), 400
 
     if start_scheduler:
-        atexit.register(_shutdown, schedules, executions)
+        atexit.register(_shutdown, schedules, executions, remote_monitor)
     return app
 
 
-def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
+def _shutdown(
+    schedules: ScheduleService,
+    executions: ExecutionService,
+    remote_monitor: RemoteMonitor,
+) -> None:
     schedules.shutdown()
     executions.shutdown()
+    remote_monitor.shutdown()
 
 
 def _platform_example_definition(definition: str) -> str:
@@ -874,15 +1021,24 @@ def _platform_example_definition(definition: str) -> str:
     if not isinstance(data, dict):
         return definition
     data["setup"] = demo_setup()
+    default_shell = "cmd" if os.name == "nt" else "bash"
     tasks = data.get("tasks")
     if isinstance(tasks, dict):
-        for task in tasks.values():
+        for name, task in list(tasks.items()):
             if not isinstance(task, dict) or "command" not in task:
                 continue
-            task["command"] = demo_command(
+            command = demo_command(
                 str(task.get("description") or ""),
                 _example_python_command(task["command"]),
             )
+            # Rebuild so the shell key sits right before command in the YAML.
+            rebuilt = {}
+            for key, value in task.items():
+                if key == "command":
+                    rebuilt["shell"] = default_shell
+                rebuilt[key] = value
+            rebuilt["command"] = command
+            tasks[name] = rebuilt
         # Keep the quick-start demo short: only the first two tasks.
         kept = list(tasks)[:2]
         data["tasks"] = {name: tasks[name] for name in kept}
@@ -1031,6 +1187,8 @@ _ENGLISH_ERRORS = {
     "from_task 必须是文本": "from_task must be a string",
     "hours 必须在 1 到 720 之间": "hours must be between 1 and 720",
     "only_task 需要 from_task": "only_task needs from_task",
+    "远程配置校验失败": "Remote configuration is invalid",
+    "远程全局设置校验失败": "Remote global settings are invalid",
 }
 
 _ENGLISH_ERROR_PREFIXES = {
@@ -1039,6 +1197,8 @@ _ENGLISH_ERROR_PREFIXES = {
     "无法识别工作流来源：": "Could not detect the workflow source: ",
     "Crontab 转换失败：": "Crontab conversion failed: ",
     "任务不存在：": "Unknown task: ",
+    "远程机器不存在：": "Remote machine does not exist: ",
+    "远程被占用：": "Remote is used by workflows: ",
 }
 
 
@@ -1051,6 +1211,48 @@ def _localized_error(message: str, language: str) -> str:
         if message.startswith(prefix):
             return translation + message[len(prefix):]
     return message
+
+
+def _remote_field_errors(payload: dict, alias: str):
+    errors: dict[str, str] = {}
+    if not _REMOTE_ALIAS.fullmatch(alias):
+        errors["alias"] = "别名只能包含字母、数字、_ . -"
+    username = str(payload.get("username", "")).strip()
+    if not username:
+        errors["username"] = "用户名不能为空"
+    host = str(payload.get("host", "")).strip()
+    if not host:
+        errors["host"] = "主机不能为空"
+    try:
+        port = int(payload.get("port", 22))
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        port = 22
+        errors["port"] = "端口必须是 1-65535 的整数"
+    workdir = str(payload.get("workdir", "") or "")
+    return errors, username, host, port, workdir
+
+
+def _remote_settings_errors(payload: dict):
+    errors: dict[str, str] = {}
+    ssh_path = str(payload.get("ssh_path", "") or "").strip()
+    if ssh_path and not Path(ssh_path).is_file():
+        errors["ssh_path"] = f"ssh 可执行文件不存在：{ssh_path}"
+    key_path = str(payload.get("key_path", "") or "").strip()
+    if key_path and not Path(key_path).is_file():
+        errors["key_path"] = f"私钥文件不存在：{key_path}"
+    policy = str(payload.get("host_key_policy", "accept-new")).strip()
+    if policy not in _REMOTE_HOST_KEY_POLICIES:
+        errors["host_key_policy"] = "主机密钥策略无效"
+    try:
+        timeout = int(payload.get("connect_timeout", 10))
+        if not 1 <= timeout <= 300:
+            raise ValueError
+    except (TypeError, ValueError):
+        timeout = 10
+        errors["connect_timeout"] = "连接超时必须是 1-300 的整数"
+    return errors, ssh_path, key_path, policy, timeout
 
 
 def _secure_cookie_enabled(allow_insecure_remote_login: bool = False) -> bool:

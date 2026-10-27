@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 
 from waitress import serve
@@ -43,11 +47,47 @@ def main(argv: list[str] | None = None) -> int:
         language=args.language,
         notifier_config_path=args.notifier_config,
     )
+    _install_signal_handlers(app)
     print(f"dag-runner service listening on http://{args.host}:{args.port}")
     if args.allow_insecure_remote_login:
         print("warning: insecure remote HTTP login is enabled")
     serve(app, host=args.host, port=args.port, threads=args.threads)
     return 0
+
+
+def _install_signal_handlers(app) -> None:
+    """Stop runs and exit at once on Ctrl+C / SIGTERM.
+
+    Waitress swallows KeyboardInterrupt, and interpreter shutdown joins
+    non-daemon executor threads before atexit handlers run, so a running task
+    could keep the process alive. Force the exit here instead.
+    """
+    executions = app.extensions["execution_service"]
+    schedules = app.extensions["schedule_service"]
+    remote_monitor = app.extensions["remote_monitor"]
+
+    def _handle(signum, frame):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        try:
+            executions.cancel_all()
+        except Exception:
+            pass
+        # Give running tasks a moment to terminate their child processes so a
+        # lingering ssh/command does not keep the terminal attached.
+        time.sleep(0.5)
+        for shutdown in (schedules.shutdown, remote_monitor.shutdown):
+            try:
+                shutdown()
+            except Exception:
+                pass
+        os._exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle)
+        except (ValueError, OSError):
+            pass
 
 
 if __name__ == "__main__":

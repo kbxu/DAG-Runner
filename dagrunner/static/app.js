@@ -38,7 +38,7 @@ async function api(url, options = {}) {
     error.loginRequired = true;
     throw error;
   }
-  if (!response.ok) throw new Error(t(body.error || body || `HTTP ${response.status}`));
+  if (!response.ok) { const error = new Error(t(body.error || body || `HTTP ${response.status}`)); error.data = body; throw error; }
   return body;
 }
 
@@ -61,7 +61,7 @@ function normalizeYamlNewlines(value) {
 function namedId(name, id) { return name && name !== id ? (currentLanguage === "en" ? `${name} (${id})` : `${name}（${id}）`) : id; }
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
 const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
-const usefulTaskKeys = new Set(["type", "description", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
+const usefulTaskKeys = new Set(["type", "description", "shell", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
 function yamlEditor(id, value, includeSchedule=false) {
   const source=normalizeYamlNewlines(value);
   return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(source)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(source,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(source)}</textarea></div></div>`;
@@ -266,7 +266,7 @@ function renderWorkflows() {
       const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
       const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
       return `<tr>
-        <td><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
+        <td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button>${runnerTag(w.runner)}</div><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
         <td>${scheduleSummary(s)}</td>
         <td>${fmt(w.last_run_time)}</td>
         <td>${fmt(s.next_run_time)}</td>
@@ -368,7 +368,7 @@ async function loadRuns(resetPage=false) {
       }
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
-      return `<tr><td><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
     loadRunStats();
@@ -451,7 +451,7 @@ async function openNotifierSettings() {
     const data=await api("/api/notifier"), email=data.email;
     const securityOption=(value,label)=>`<option value="${value}" ${email.security===value?"selected":""}>${t(label)}</option>`;
     const passwordHint=email.has_password?t("已保存密码；留空不会修改"):t("请输入 SMTP 密码或授权码");
-    openModal(t("通知渠道配置"), `<div class="channel-editor"><div class="channel-card"><div class="notification-icon">✉</div><div><strong>${t("邮件 SMTP")}</strong><p>${t("配置所有工作流共用的发件账号。收件人与发送时机仍在各工作流的通知面板中配置。")}</p></div><span class="channel-status ${email.configured?"configured":""}">${email.configured?t("已配置"):t("未配置")}</span></div><div class="channel-form-grid"><label>${t("SMTP 主机")}<input id="smtpHost" required value="${esc(email.host)}" placeholder="smtp.example.com"></label><label>${t("端口")}<input id="smtpPort" required type="number" min="1" max="65535" value="${esc(email.port)}"></label><label>${t("用户名")}<input id="smtpUsername" value="${esc(email.username)}" autocomplete="username"></label><label>${t("密码 / 授权码")}<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="${esc(passwordHint)}"></label><label class="channel-wide">${t("发件邮箱")}<input id="smtpFrom" required type="email" value="${esc(email.from)}" placeholder="sender@example.com"></label><label>${t("连接安全")}<select id="smtpSecurity">${securityOption("ssl","SSL/TLS")}${securityOption("starttls","STARTTLS")}${securityOption("plain","无加密")}</select></label><label>${t("超时（秒）")}<input id="smtpTimeout" required type="number" min="1" step="0.1" value="${esc(email.timeout)}"></label><label class="channel-wide">${t("邮件主题前缀")}<input id="smtpSubjectPrefix" value="${esc(email.subject_prefix)}" placeholder="[DAG Runner]"></label></div><span class="form-hint">${t("当前仅支持邮件渠道；此页面后续可继续增加飞书等通知渠道。")}</span><button class="button" onclick="saveNotifierSettings()">${t("保存发件配置")}</button></div>`, false, "compact");
+    openModal(t("通知渠道配置"), `<div class="channel-editor"><div class="channel-card"><div class="notification-icon">✉</div><div><strong>${t("邮件 SMTP")}</strong><p>${t("配置所有工作流共用的发件账号。收件人与发送时机仍在各工作流的通知面板中配置。")}</p></div><span class="channel-status ${email.configured?"configured":""}">${email.configured?t("已配置"):t("未配置")}</span></div><div class="channel-form-grid"><label>${t("SMTP 主机")}<input id="smtpHost" required value="${esc(email.host)}" placeholder="smtp.example.com"></label><label>${t("端口")}<input id="smtpPort" required type="number" min="1" max="65535" value="${esc(email.port)}"></label><label>${t("用户名")}<input id="smtpUsername" value="${esc(email.username)}" autocomplete="username"></label><label>${t("密码 / 授权码")}<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="${esc(passwordHint)}"></label><label class="channel-wide">${t("发件邮箱")}<input id="smtpFrom" required type="email" value="${esc(email.from)}" placeholder="sender@example.com"></label><label>${t("连接安全")}<select id="smtpSecurity" class="ui-select">${securityOption("ssl","SSL/TLS")}${securityOption("starttls","STARTTLS")}${securityOption("plain","无加密")}</select></label><label>${t("超时（秒）")}<input id="smtpTimeout" required type="number" min="1" step="0.1" value="${esc(email.timeout)}"></label><label class="channel-wide">${t("邮件主题前缀")}<input id="smtpSubjectPrefix" value="${esc(email.subject_prefix)}" placeholder="[DAG Runner]"></label></div><span class="form-hint">${t("当前仅支持邮件渠道；此页面后续可继续增加飞书等通知渠道。")}</span><button class="button" onclick="saveNotifierSettings()">${t("保存发件配置")}</button></div>`, false, "compact");
   } catch(e) { toast(e.message,true); }
 }
 
@@ -473,6 +473,172 @@ async function saveNotifierSettings() {
     closeModal(); toast(t("发件配置已保存"));
   } catch(e) { toast(e.message,true); }
 }
+
+let remoteConfigs = [];
+let remoteSettings = {ssh_path:"", key_path:"", host_key_policy:"accept-new", connect_timeout:10};
+let remoteDefaults = {ssh_path:"", key_path:""};
+
+async function loadRemoteStatus() {
+  try {
+    const data = await api("/api/remotes");
+    remoteConfigs = data.remotes || [];
+    const dot = document.getElementById("remoteStatusDot");
+    if (!dot) return;
+    if (!remoteConfigs.length) { dot.className = "remote-dot none"; dot.title = t("未配置远程"); return; }
+    const reachable = remoteConfigs.filter(r => r.status?.reachable).length;
+    dot.className = "remote-dot " + (reachable === remoteConfigs.length ? "ok" : reachable === 0 ? "bad" : "warn");
+    dot.title = t("{ok}/{total} 台远程可达", {ok: reachable, total: remoteConfigs.length});
+  } catch(e) { /* status is best-effort */ }
+}
+
+async function openRemoteSettings() {
+  try {
+    const data = await api("/api/remotes");
+    remoteConfigs = data.remotes || [];
+    remoteSettings = data.settings || remoteSettings;
+    remoteDefaults = {ssh_path: remoteSettings.detected_ssh_path || "", key_path: remoteSettings.detected_key_path || ""};
+    renderRemoteSettings();
+  } catch(e) { toast(e.message, true); }
+}
+
+function renderRemoteSettings() {
+  const policyOption = (value, label) => `<option value="${value}" ${remoteSettings.host_key_policy===value?"selected":""}>${esc(label)}</option>`;
+  const panels = remoteConfigs.map(remote => remotePanelHtml(remote, false)).join("");
+  openModal(t("远程执行配置"), `<div class="remote-editor">
+    <div class="remote-global">
+      <div class="remote-global-head"><strong>${t("全局设置")}</strong><span class="form-hint">${t("远程仅支持 Linux，使用私钥认证，不支持密码。")}</span></div>
+      <div class="remote-form-grid">
+        <label class="remote-wide">${t("本地 ssh 路径")}<input id="remoteSshPath" value="${esc(remoteSettings.ssh_path)}" placeholder="${esc(remoteDefaults.ssh_path ? t("已探测：{path}",{path:remoteDefaults.ssh_path}) : t("留空使用系统 PATH 中的 ssh"))}"></label>
+        <label class="remote-wide">${t("私钥路径")}<input id="remoteKeyPath" value="${esc(remoteSettings.key_path)}" placeholder="${esc(remoteDefaults.key_path ? t("已探测：{path}",{path:remoteDefaults.key_path}) : t("留空使用默认密钥"))}"></label>
+        <label>${t("主机密钥策略")}<select id="remoteHostKeyPolicy" class="ui-select">${policyOption("accept-new","accept-new（推荐）")}${policyOption("yes","yes（自动接受，不安全）")}${policyOption("no","no（仅已知主机）")}${policyOption("ask","ask（交互确认）")}</select></label>
+        <label>${t("连接超时（秒）")}<input id="remoteConnectTimeout" type="number" min="1" max="300" value="${esc(remoteSettings.connect_timeout)}"></label>
+      </div>
+      <button class="button" onclick="saveRemoteSettings()">${t("保存全局设置")}</button>
+    </div>
+    <div class="remote-list-head"><strong>${t("远程机器")}</strong><button class="button ghost" type="button" onclick="addRemotePanel()">＋ ${t("新增远程")}</button></div>
+    <div id="remoteList" class="remote-list">${panels || `<p class="form-hint">${t("还没有配置远程机器")}</p>`}</div>
+    <button class="button" onclick="closeModal()">${t("关闭")}</button>
+  </div>`, false, "compact");
+}
+
+function remotePanelHtml(remote, isNew) {
+  const r = remote || {alias:"", username:"", host:"", port:22, workdir:""};
+  const status = remote?.status || {};
+  const statusHtml = isNew ? `<span class="remote-status">${t("未测试")}</span>` : `<span class="remote-status ${status.reachable ? "ok" : "bad"}">${status.reachable ? t("在线") : t("离线")}</span>`;
+  const buttons = isNew
+    ? `<button class="button ghost" type="button" onclick="testRemotePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveRemotePanel(this)">${t("确认")}</button><button class="button ghost" type="button" onclick="cancelRemotePanel(this)">${t("取消")}</button>`
+    : `<button class="button ghost" type="button" onclick="testRemotePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveRemotePanel(this)">${t("保存")}</button><button class="button danger" type="button" onclick="deleteRemotePanel(this)">${t("删除")}</button>`;
+  return `<div class="remote-panel${isNew ? " remote-panel-new" : ""}">
+    <div class="remote-panel-head"><input class="remote-alias" value="${esc(r.alias)}" placeholder="${t("别名（唯一）")}">${statusHtml}</div>
+    <div class="remote-form-grid">
+      <label>${t("用户名")}<input class="remote-username" value="${esc(r.username)}" placeholder="root"></label>
+      <label>${t("主机")}<input class="remote-host" value="${esc(r.host)}" placeholder="192.168.1.10"></label>
+      <label>${t("端口")}<input class="remote-port" type="number" min="1" max="65535" value="${esc(r.port)}"></label>
+      <label class="remote-wide">${t("远程工作目录")}<input class="remote-workdir" value="${esc(r.workdir)}" placeholder="${t("留空使用远程 HOME")}"></label>
+    </div>
+    <div class="remote-panel-actions">${buttons}</div>
+  </div>`;
+}
+
+function addRemotePanel() {
+  const list = document.getElementById("remoteList");
+  const hint = list.querySelector(".form-hint");
+  if (hint) hint.remove();
+  const temp = document.createElement("div");
+  temp.innerHTML = remotePanelHtml(null, true);
+  list.appendChild(temp.firstElementChild);
+}
+
+function cancelRemotePanel(button) { button.closest(".remote-panel").remove(); }
+
+function readRemotePanel(panel) {
+  return {
+    alias: panel.querySelector(".remote-alias").value.trim(),
+    username: panel.querySelector(".remote-username").value.trim(),
+    host: panel.querySelector(".remote-host").value.trim(),
+    port: panel.querySelector(".remote-port").value.trim(),
+    workdir: panel.querySelector(".remote-workdir").value.trim(),
+  };
+}
+
+function markRemoteFieldErrors(panel, errors) {
+  panel.querySelectorAll(".remote-field-error").forEach(element => element.classList.remove("remote-field-error"));
+  const map = {alias:".remote-alias", username:".remote-username", host:".remote-host", port:".remote-port", workdir:".remote-workdir"};
+  for (const [field, selector] of Object.entries(map)) {
+    if (errors?.[field]) { const input = panel.querySelector(selector); if (input) input.classList.add("remote-field-error"); }
+  }
+}
+
+async function saveRemotePanel(button) {
+  const panel = button.closest(".remote-panel");
+  const data = readRemotePanel(panel);
+  const isNew = panel.classList.contains("remote-panel-new");
+  if (!data.alias) { toast(t("别名不能为空"), true); return; }
+  try {
+    await api(`/api/remotes/${encodeURIComponent(data.alias)}`, {method:"PUT", body:JSON.stringify(data)});
+    toast(t("远程配置已保存"));
+    if (isNew && panel.dataset.tested === "1") {
+      try { await api("/api/remotes/test", {method:"POST", body:JSON.stringify(data)}); } catch(_) {}
+    }
+    await openRemoteSettings();
+  } catch(e) { markRemoteFieldErrors(panel, e.data?.field_errors); toast(e.message, true); }
+}
+
+async function testRemotePanel(button) {
+  const panel = button.closest(".remote-panel");
+  const data = readRemotePanel(panel);
+  if (!data.alias) { toast(t("请先填写别名"), true); return; }
+  const badge = panel.querySelector(".remote-status");
+  const original = button.textContent;
+  button.disabled = true; button.textContent = t("检查中…");
+  try {
+    const result = await api("/api/remotes/test", {method:"POST", body:JSON.stringify(data)});
+    if (result.reachable) { toast(t("连接成功")); panel.dataset.tested = "1"; }
+    else { toast(t("连接失败：{error}", {error: result.error_message || ""}), true); delete panel.dataset.tested; }
+    if (badge) { badge.className = "remote-status " + (result.reachable ? "ok" : "bad"); badge.textContent = result.reachable ? t("在线") : t("离线"); }
+  } catch(e) { toast(e.message, true); }
+  finally { button.disabled = false; button.textContent = original; }
+}
+
+async function deleteRemotePanel(button) {
+  const panel = button.closest(".remote-panel");
+  const alias = readRemotePanel(panel).alias;
+  if (!await confirmDelete(t("删除远程配置“{alias}”？",{alias}), t("删除后无法恢复。"))) return;
+  try {
+    await api(`/api/remotes/${encodeURIComponent(alias)}`, {method:"DELETE"});
+    toast(t("已删除远程配置 {alias}",{alias}));
+    await openRemoteSettings();
+  } catch(e) { toast(e.message, true); }
+}
+
+async function saveRemoteSettings() {
+  const payload = {
+    ssh_path: document.getElementById("remoteSshPath").value.trim(),
+    key_path: document.getElementById("remoteKeyPath").value.trim(),
+    host_key_policy: document.getElementById("remoteHostKeyPolicy").value,
+    connect_timeout: Number(document.getElementById("remoteConnectTimeout").value),
+  };
+  try {
+    await api("/api/remotes/settings", {method:"PUT", body:JSON.stringify(payload)});
+    toast(t("全局设置已保存"));
+    await openRemoteSettings();
+  } catch(e) {
+    for (const id of ["remoteSshPath","remoteKeyPath","remoteHostKeyPolicy","remoteConnectTimeout"]) document.getElementById(id)?.classList.remove("remote-field-error");
+    const map = {ssh_path:"remoteSshPath", key_path:"remoteKeyPath", host_key_policy:"remoteHostKeyPolicy", connect_timeout:"remoteConnectTimeout"};
+    for (const [field, id] of Object.entries(map)) if (e.data?.field_errors?.[field]) document.getElementById(id)?.classList.add("remote-field-error");
+    toast(e.message, true);
+  }
+}
+
+function runnerOptions(selected) {
+  const options = [`<option value="local"${selected==="local"?" selected":""}>${t("本机")}</option>`];
+  for (const remote of remoteConfigs) options.push(`<option value="${esc(remote.alias)}"${selected===remote.alias?" selected":""}>${esc(remote.alias)}</option>`);
+  return options.join("");
+}
+function runnerTag(runner) {
+  return runner && runner !== "local" ? `<span class="runner-tag">${esc(runner)}</span>` : "";
+}
+
 let pendingImportFilename = "workflow.yaml";
 let pendingImportSuccessVerb = "导入";
 let pendingWorkflowId = "";
@@ -492,7 +658,7 @@ function openWorkflowImportEditor(title, definition, nextId, submitLabel, source
   const split = splitWorkflowName(definition);
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
-  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select">${runnerOptions("local")}</select></label><label>${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
 }
 async function openNewWorkflow() {
   pendingImportFilename = "dagr_example_pipeline.yaml";
@@ -544,7 +710,7 @@ async function submitImportWorkflow() {
   if (!workflowEditorCanSave()) return;
   const definition=normalizeYamlNewlines(document.getElementById("importDefinition").value);
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
-  const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId); form.append("name",document.getElementById("importWorkflowName").value.trim());
+  const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId); form.append("name",document.getElementById("importWorkflowName").value.trim()); form.append("runner",document.getElementById("importRunner")?.value || "local");
   try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { toast(e.message,true); }
 }
 async function editWorkflow(name) {
@@ -552,13 +718,13 @@ async function editWorkflow(name) {
   try {
     const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
     const split=splitWorkflowName(definition);
-    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
+    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select">${runnerOptions(workflow.runner)}</select></label><label>${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
   } catch(e) { toast(e.message,true); }
 }
 async function saveWorkflow(name) {
   if (!workflowEditorCanSave()) return;
   try {
-    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:normalizeYamlNewlines(document.getElementById("workflowDefinition").value),name:document.getElementById("workflowDisplayName").value.trim()})});
+    await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:normalizeYamlNewlines(document.getElementById("workflowDefinition").value),name:document.getElementById("workflowDisplayName").value.trim(),runner:document.getElementById("workflowRunner")?.value || "local"})});
     closeModal(); toast(t("工作流已更新")); await loadWorkflows();
   } catch(e) { toast(e.message,true); }
 }
@@ -678,7 +844,7 @@ function editNotification(name) {
   if (!workflow) return;
   const email = workflow.notification?.email || {send_on:"disabled", to:[]};
   const option = (value, label) => `<option value="${value}" ${email.send_on === value ? "selected" : ""}>${t(label)}</option>`;
-  openModal(`${namedId(workflow.description, workflow.name)} · ${t("邮件通知")}`, `<div class="notification-editor"><div class="notification-card"><div class="notification-icon">✉</div><div><strong>${t("工作流结果邮件")}</strong><p>${t("每次工作流结束后最多发送一封邮件，发件账号取自 var 通知配置。")}</p></div></div><label>${t("发送时机")}<select id="notificationSendOn">${option("disabled","不发送")}${option("success","仅成功时发送")}${option("failure","仅失败时发送")}${option("always","成功或失败都发送")}</select></label><label>${t("收件邮箱")}<textarea id="notificationRecipients" class="notification-recipients" placeholder="ops@example.com&#10;owner@example.com">${esc((email.to || []).join("\n"))}</textarea></label><span class="form-hint">${t("每行填写一个邮箱，也可以使用逗号或分号分隔。保存后会更新完整的工作流 YAML 配置。")}</span><button class="button" onclick='saveNotification(${jsArg(name)})'>${t("保存通知配置")}</button></div>`, false, "compact");
+  openModal(`${namedId(workflow.description, workflow.name)} · ${t("邮件通知")}`, `<div class="notification-editor"><div class="notification-card"><div class="notification-icon">✉</div><div><strong>${t("工作流结果邮件")}</strong><p>${t("每次工作流结束后最多发送一封邮件，发件账号取自 var 通知配置。")}</p></div></div><label>${t("发送时机")}<select id="notificationSendOn" class="ui-select">${option("disabled","不发送")}${option("success","仅成功时发送")}${option("failure","仅失败时发送")}${option("always","成功或失败都发送")}</select></label><label>${t("收件邮箱")}<textarea id="notificationRecipients" class="notification-recipients" placeholder="ops@example.com&#10;owner@example.com">${esc((email.to || []).join("\n"))}</textarea></label><span class="form-hint">${t("每行填写一个邮箱，也可以使用逗号或分号分隔。保存后会更新完整的工作流 YAML 配置。")}</span><button class="button" onclick='saveNotification(${jsArg(name)})'>${t("保存通知配置")}</button></div>`, false, "compact");
 }
 
 async function saveNotification(name) {
@@ -918,4 +1084,5 @@ async function loadResources() {
 window.addEventListener("dagrunner-language-change", () => renderResources(resourceSnapshot));
 loadResources(); setInterval(loadResources, 10000);
 loadWorkflows(); loadRuns(); setInterval(loadRuns, 3000); setInterval(loadWorkflows, 15000);
+loadRemoteStatus(); setInterval(loadRemoteStatus, 10000);
 window.addEventListener("resize", positionWorkflowTags);

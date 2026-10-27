@@ -4,7 +4,7 @@ import json
 import re
 import sys
 from collections.abc import Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Event, Lock
 
@@ -13,7 +13,9 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .database import StateDatabase
 from .logger import TaskLogManager
+from .pool import DaemonPool
 from .notifier import Notifier, NullNotifier
+from .remote import RemoteTaskExecutor
 from .runner import AlreadyRunningError, WorkflowRunner, new_run_id, workflow_lock
 from .workflow import Workflow, WorkflowError
 
@@ -23,7 +25,9 @@ DEFAULT_SCHEDULE_TIMEZONE = "Asia/Shanghai"
 
 
 class ServiceError(RuntimeError):
-    pass
+    def __init__(self, message: str, field_errors: dict[str, str] | None = None):
+        super().__init__(message)
+        self.field_errors = field_errors or {}
 
 
 def linux_cron_trigger(expression: str, timezone: str) -> CronTrigger:
@@ -146,7 +150,7 @@ class ExecutionService:
         self.registry = registry
         self.logs = logs
         self.notifier = notifier or NullNotifier()
-        self.pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dag-run")
+        self.pool = DaemonPool(max_workers=max_workers, thread_name_prefix="dag-run")
         self._active: dict[str, ActiveRun] = {}
         self._lock = Lock()
 
@@ -168,6 +172,7 @@ class ExecutionService:
                 workflow.descendants(from_task)  # Fail before scheduling the background job.
         elif only_task:
             raise ServiceError("only_task 需要 from_task")
+        runner_alias = self._runner_alias(workflow_name)
         run_id = new_run_id()
         active = ActiveRun(workflow_name=workflow_name, cancel_event=Event())
         with self._lock:
@@ -184,6 +189,7 @@ class ExecutionService:
                     trigger_type,
                     active.cancel_event,
                     resume_run_id,
+                    runner_alias,
                 )
             except Exception:
                 self._active.pop(run_id, None)
@@ -191,6 +197,12 @@ class ExecutionService:
             future = active.future
         future.add_done_callback(lambda completed: self._completed(run_id, completed))
         return run_id
+
+    def _runner_alias(self, workflow_name: str) -> str:
+        stored = self.database.get_workflow(workflow_name)
+        if stored is None:
+            return "local"
+        return stored["runner"] or "local"
 
     def _run(
         self,
@@ -201,10 +213,22 @@ class ExecutionService:
         trigger_type: str,
         cancel_event: Event,
         resume_run_id: str | None,
+        runner_alias: str = "local",
     ) -> tuple[str, str]:
+        remote_executor = None
+        if runner_alias and runner_alias != "local":
+            config = self.database.get_remote(runner_alias)
+            if config is None:
+                raise WorkflowError(f"remote {runner_alias!r} not found")
+            remote_executor = RemoteTaskExecutor(config)
         lock_path = self.database.path.parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
-            return WorkflowRunner(self.database, self.logs, notifier=self.notifier).run(
+            return WorkflowRunner(
+                self.database,
+                self.logs,
+                notifier=self.notifier,
+                remote_executor=remote_executor,
+            ).run(
                 workflow,
                 from_task,
                 run_id=run_id,
@@ -212,6 +236,7 @@ class ExecutionService:
                 cancel_event=cancel_event,
                 resume_run_id=resume_run_id,
                 only_task=only_task,
+                runner_alias=runner_alias,
             )
 
     def _completed(self, run_id: str, future: Future) -> None:
@@ -280,11 +305,17 @@ class ExecutionService:
                 continue
         return recovered
 
-    def shutdown(self) -> None:
+    def cancel_all(self) -> None:
+        """Ask every active run to stop without waiting for it to finish."""
         with self._lock:
             for active in self._active.values():
                 active.cancel_event.set()
-        self.pool.shutdown(wait=True, cancel_futures=False)
+
+    def shutdown(self) -> None:
+        # Cancel first so executor threads finish promptly; wait=False keeps the
+        # caller (including interpreter shutdown) from blocking on a long task.
+        self.cancel_all()
+        self.pool.shutdown(wait=False, cancel_futures=True)
 
 
 class ScheduleService:

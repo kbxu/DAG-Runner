@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from .remote import RemoteConfig, RemoteSettings
+
 
 TASK_STATUSES = {"PENDING", "RUNNING", "SUCCESS", "FAILED", "SKIPPED"}
 RUN_STATUSES = {"RUNNING", "SUCCESS", "FAILED"}
@@ -135,6 +137,31 @@ class StateDatabase:
                     created_time TEXT NOT NULL,
                     updated_time TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS remotes (
+                    alias TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL DEFAULT 22,
+                    workdir TEXT NOT NULL DEFAULT '',
+                    created_time TEXT NOT NULL,
+                    updated_time TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS remote_status (
+                    alias TEXT PRIMARY KEY,
+                    reachable INTEGER NOT NULL DEFAULT 0,
+                    last_check TEXT,
+                    latency_ms INTEGER,
+                    error_message TEXT,
+                    updated_time TEXT NOT NULL,
+                    FOREIGN KEY (alias) REFERENCES remotes(alias) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS remote_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    ssh_path TEXT NOT NULL DEFAULT '',
+                    key_path TEXT NOT NULL DEFAULT '',
+                    host_key_policy TEXT NOT NULL DEFAULT 'accept-new',
+                    connect_timeout INTEGER NOT NULL DEFAULT 10
+                );
                 """
             )
             self._ensure_column(
@@ -162,6 +189,12 @@ class StateDatabase:
             self._ensure_column(connection, "task_runs", "handled_by", "TEXT")
             self._ensure_column(connection, "task_runs", "skip_kind", "TEXT")
             self._ensure_column(connection, "workflow_runs", "scope", "TEXT")
+            self._ensure_column(
+                connection, "workflow_runs", "runner", "TEXT NOT NULL DEFAULT 'local'"
+            )
+            self._ensure_column(
+                connection, "workflows", "runner", "TEXT NOT NULL DEFAULT 'local'"
+            )
             self._ensure_column(
                 connection, "task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0"
             )
@@ -386,14 +419,15 @@ class StateDatabase:
         trigger_type: str = "manual",
         task_metadata: dict[str, dict[str, object]] | None = None,
         scope: Sequence[str] | None = None,
+        runner: str = "local",
     ) -> None:
         now = local_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO workflow_runs
                    (run_id, workflow_name, status, start_time, resumed_from_run_id, from_task,
-                    trigger_type, scope)
-                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?)""",
+                    trigger_type, scope, runner)
+                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id,
                     workflow_name,
@@ -402,6 +436,7 @@ class StateDatabase:
                     from_task,
                     trigger_type,
                     json.dumps(list(scope), ensure_ascii=False) if scope is not None else None,
+                    runner or "local",
                 ),
             )
             metadata = task_metadata or {}
@@ -701,6 +736,158 @@ class StateDatabase:
             connection.execute(
                 "DELETE FROM schedules WHERE workflow_name = ?", (workflow_name,)
             )
+
+    def get_remote_settings(self) -> RemoteSettings:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM remote_settings WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return RemoteSettings()
+        return RemoteSettings(
+            ssh_path=row["ssh_path"],
+            key_path=row["key_path"],
+            host_key_policy=row["host_key_policy"],
+            connect_timeout=row["connect_timeout"],
+        )
+
+    def update_remote_settings(self, settings: RemoteSettings) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO remote_settings
+                        (id, ssh_path, key_path, host_key_policy, connect_timeout)
+                    VALUES (1, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        ssh_path = excluded.ssh_path,
+                        key_path = excluded.key_path,
+                        host_key_policy = excluded.host_key_policy,
+                        connect_timeout = excluded.connect_timeout""",
+                (
+                    settings.ssh_path,
+                    settings.key_path,
+                    settings.host_key_policy,
+                    settings.connect_timeout,
+                ),
+            )
+
+    def upsert_remote(self, config: RemoteConfig) -> None:
+        now = local_now()
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO remotes
+                        (alias, username, host, port, workdir, created_time, updated_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(alias) DO UPDATE SET
+                        username = excluded.username,
+                        host = excluded.host,
+                        port = excluded.port,
+                        workdir = excluded.workdir,
+                        updated_time = excluded.updated_time""",
+                (
+                    config.alias,
+                    config.username,
+                    config.host,
+                    config.port,
+                    config.workdir,
+                    now,
+                    now,
+                ),
+            )
+
+    def list_remotes(self) -> list[RemoteConfig]:
+        settings = self.get_remote_settings()
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM remotes ORDER BY alias"
+            ).fetchall()
+        return [
+            RemoteConfig(
+                alias=row["alias"],
+                username=row["username"],
+                host=row["host"],
+                port=row["port"],
+                workdir=row["workdir"],
+                ssh_path=settings.ssh_path,
+                key_path=settings.key_path,
+                host_key_policy=settings.host_key_policy,
+                connect_timeout=settings.connect_timeout,
+            )
+            for row in rows
+        ]
+
+    def get_remote(self, alias: str) -> RemoteConfig | None:
+        settings = self.get_remote_settings()
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM remotes WHERE alias = ?", (alias,)
+            ).fetchone()
+        if row is None:
+            return None
+        return RemoteConfig(
+            alias=row["alias"],
+            username=row["username"],
+            host=row["host"],
+            port=row["port"],
+            workdir=row["workdir"],
+            ssh_path=settings.ssh_path,
+            key_path=settings.key_path,
+            host_key_policy=settings.host_key_policy,
+            connect_timeout=settings.connect_timeout,
+        )
+
+    def delete_remote(self, alias: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM remotes WHERE alias = ?", (alias,)
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"remote not found: {alias}")
+
+    def set_remote_status(
+        self,
+        alias: str,
+        reachable: bool,
+        error_message: str | None,
+        latency_ms: int | None,
+    ) -> None:
+        now = local_now()
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO remote_status
+                        (alias, reachable, last_check, latency_ms, error_message, updated_time)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(alias) DO UPDATE SET
+                        reachable = excluded.reachable,
+                        last_check = excluded.last_check,
+                        latency_ms = excluded.latency_ms,
+                        error_message = excluded.error_message,
+                        updated_time = excluded.updated_time""",
+                (alias, int(reachable), now, latency_ms, error_message, now),
+            )
+
+    def list_remote_status(self) -> dict[str, sqlite3.Row]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM remote_status").fetchall()
+        return {row["alias"]: row for row in rows}
+
+    def workflows_using_remote(self, alias: str) -> list[str]:
+        with self.connect() as connection:
+            return [
+                row[0]
+                for row in connection.execute(
+                    "SELECT workflow_key FROM workflows WHERE runner = ? ORDER BY workflow_key",
+                    (alias,),
+                ).fetchall()
+            ]
+
+    def set_workflow_runner(self, workflow_key: str, runner: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE workflows SET runner = ?, updated_time = ? WHERE workflow_key = ?",
+                (runner, local_now(), workflow_key),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"workflow not found: {workflow_key}")
 
     def mark_orphaned(self, workflow_name: str) -> int:
         """Close runs left RUNNING after a process or host crash (call while holding lock)."""

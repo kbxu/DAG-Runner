@@ -7,7 +7,7 @@ import os
 import sys
 import uuid
 from collections.abc import Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +16,7 @@ from threading import Event, Timer
 from .database import StateDatabase
 from .executor import TaskExecutor
 from .logger import TaskLogManager
+from .pool import DaemonPool
 from .notifier import Notifier, NullNotifier, TaskFailure, WorkflowEvent, load_notifier
 from .workflow import Workflow, WorkflowError
 
@@ -36,6 +37,7 @@ class WorkflowRunner:
         executor: TaskExecutor | None = None,
         notifier: Notifier | None = None,
         max_parallel_tasks: int = 4,
+        remote_executor: TaskExecutor | None = None,
     ):
         if max_parallel_tasks <= 0:
             raise ValueError("max_parallel_tasks must be positive")
@@ -44,6 +46,8 @@ class WorkflowRunner:
         self.executor = executor or TaskExecutor()
         self.notifier = notifier or NullNotifier()
         self.max_parallel_tasks = max_parallel_tasks
+        self.remote_executor = remote_executor
+        self._runner_alias = "local"
 
     def run(
         self,
@@ -55,7 +59,9 @@ class WorkflowRunner:
         cancel_event: Event | None = None,
         resume_run_id: str | None = None,
         only_task: bool = False,
+        runner_alias: str = "local",
     ) -> tuple[str, str]:
+        self._runner_alias = runner_alias or "local"
         if from_task and resume_run_id:
             raise WorkflowError("from_task and resume_run_id cannot be used together")
         if only_task and not from_task:
@@ -90,6 +96,7 @@ class WorkflowRunner:
             from_task=from_task,
             trigger_type=trigger_type,
             scope=scope,
+            runner=self._runner_alias,
             task_metadata={
                 name: {
                     "description": workflow.tasks[name].description,
@@ -201,9 +208,18 @@ class WorkflowRunner:
         reused: set[str] | None = None,
     ) -> None:
         reused = reused or set()
+        use_remote = (
+            self._runner_alias not in ("", "local") and self.remote_executor is not None
+        )
+        executor = self.remote_executor if use_remote else self.executor
+        workflow_setup = (
+            workflow.setup_for_platform("linux")
+            if use_remote
+            else workflow.setup_for_current_platform()
+        )
         order_index = {name: index for index, name in enumerate(order)}
         running: dict[Future, tuple[str, Path]] = {}
-        pool = ThreadPoolExecutor(
+        pool = DaemonPool(
             max_workers=self.max_parallel_tasks,
             thread_name_prefix="dag-task",
         )
@@ -286,10 +302,10 @@ class WorkflowRunner:
                         )
                         states[task_name] = "RUNNING"
                         future = pool.submit(
-                            self.executor.execute,
+                            executor.execute,
                             task,
                             cwd=workflow.task_cwd(task),
-                            workflow_setup=workflow.setup_for_current_platform(),
+                            workflow_setup=workflow_setup,
                             log_file=log_file,
                             cancel_event=cancel_event,
                             workflow_timeout_event=workflow_timeout_event,
@@ -593,6 +609,15 @@ def main(argv: list[str] | None = None) -> int:
             name_override=stored["workflow_key"],
             description_override=stored["name"],
         )
+        runner_alias = stored["runner"] or "local"
+        remote_executor = None
+        if runner_alias != "local":
+            from .remote import RemoteTaskExecutor
+
+            config = database.get_remote(runner_alias)
+            if config is None:
+                raise WorkflowError(f"remote {runner_alias!r} not found")
+            remote_executor = RemoteTaskExecutor(config)
         lock_path = args.db.resolve().parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             recovered = database.mark_orphaned(workflow.name)
@@ -602,8 +627,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.notifier_config, var_dir=args.db.resolve().parent
             )
             run_id, status = WorkflowRunner(
-                database, TaskLogManager(args.logs), notifier=notifier
-            ).run(workflow, args.from_task)
+                database,
+                TaskLogManager(args.logs),
+                notifier=notifier,
+                remote_executor=remote_executor,
+            ).run(workflow, args.from_task, runner_alias=runner_alias)
         print(f"workflow={workflow.name} run_id={run_id} status={status}")
         return 0 if status == "SUCCESS" else 1
     except (WorkflowError, AlreadyRunningError, OSError, ValueError, KeyError) as exc:

@@ -12,7 +12,7 @@ from .migrate_workflows import LiteralDumper
 def demo_setup() -> str:
     """Two-line example setup: change directory and define a global variable."""
     if os.name == "nt":
-        return 'cd demo\n$env:DEMO_ENV = "local"'
+        return "cd demo\nset DEMO_ENV=local"
     return "cd demo\nexport DEMO_ENV=local"
 
 
@@ -23,7 +23,7 @@ def demo_command(description: str, python_command: str) -> str:
         return "\n".join(
             (
                 f'echo "windows - {label}"',
-                '$env:DEMO_STEP = "1"',
+                "set DEMO_STEP=1",
                 python_command,
             )
         )

@@ -76,6 +76,15 @@ def uniquify_task_ids(
     return dump_workflow_yaml(data), replacements
 
 
+def _detect_setup_shell(setup: str) -> str:
+    """Guess the shell dialect of a hand-written setup string."""
+    if "$env:" in setup or "Set-Location" in setup:
+        return "powershell"
+    if re.search(r"(?m)^\s*set\s+[A-Za-z_][A-Za-z0-9_]*=", setup):
+        return "cmd"
+    return "bash"
+
+
 def migrate_legacy_env(content: str) -> tuple[str, bool]:
     """Promote legacy workflow/task env mappings into setup."""
     try:
@@ -113,12 +122,15 @@ def migrate_legacy_env(content: str) -> tuple[str, bool]:
     def assignments(shell: str) -> str:
         lines = []
         for name, value in values.items():
-            escaped = value.replace("'", "''" if shell == "powershell" else "'\"'\"'")
-            lines.append(
-                f"$env:{name} = '{escaped}'"
-                if shell == "powershell"
-                else f"export {name}='{escaped}'"
-            )
+            if shell == "powershell":
+                escaped = value.replace("'", "''")
+                lines.append(f"$env:{name} = '{escaped}'")
+            elif shell == "cmd":
+                escaped = value.replace('"', '""')
+                lines.append(f'set "{name}={escaped}"')
+            else:
+                escaped = value.replace("'", "'\"'\"'")
+                lines.append(f"export {name}='{escaped}'")
         return "\n".join(lines)
 
     setup = data.get("setup")
@@ -126,25 +138,20 @@ def migrate_legacy_env(content: str) -> tuple[str, bool]:
         if setup:
             updated = dict(setup)
             for platform, script in setup.items():
-                shell = "powershell" if platform == "windows" else "bash"
+                shell = "cmd" if platform == "windows" else "bash"
                 updated[platform] = "\n".join((assignments(shell), str(script).strip())).strip()
         else:
             updated = {
                 "linux": assignments("bash"),
-                "windows": assignments("powershell"),
+                "windows": assignments("cmd"),
             }
         data["setup"] = updated
     elif isinstance(setup, str) and setup.strip():
-        shell = (
-            "powershell"
-            if "$env:" in setup or "Set-Location" in setup
-            else "bash"
-        )
-        data["setup"] = "\n".join((assignments(shell), setup.strip())).strip()
+        data["setup"] = "\n".join((assignments(_detect_setup_shell(setup)), setup.strip())).strip()
     else:
         data["setup"] = {
             "linux": assignments("bash"),
-            "windows": assignments("powershell"),
+            "windows": assignments("cmd"),
         }
     return dump_workflow_yaml(data), True
 
@@ -181,6 +188,10 @@ class ConditionSpec:
         )
 
 
+TASK_SHELLS = ("cmd", "powershell", "bash", "sh")
+DEFAULT_TASK_SHELLS = {"windows": "cmd", "linux": "bash"}
+
+
 @dataclass(frozen=True)
 class Task:
     name: str
@@ -195,6 +206,7 @@ class Task:
     condition: ConditionSpec | None = None
     success: tuple[str, ...] = ()
     failure: tuple[str, ...] = ()
+    shell: str | None = None
 
     @property
     def is_condition(self) -> bool:
@@ -337,6 +349,13 @@ class Workflow:
                     )
             depends = _string_tuple(raw.get("depends", []), task_name, "depends")
             args = _string_tuple(raw.get("args", []), task_name, "args")
+            shell = raw.get("shell")
+            if shell is not None and (
+                not isinstance(shell, str) or shell not in TASK_SHELLS
+            ):
+                raise WorkflowError(
+                    f"task {task_name!r} shell must be one of: {', '.join(TASK_SHELLS)}"
+                )
             timeout = raw.get("timeout")
             if timeout is not None and (
                 isinstance(timeout, bool)
@@ -357,6 +376,7 @@ class Workflow:
                 condition=condition,
                 success=success,
                 failure=failure,
+                shell=shell,
             )
 
         workflow = cls(
@@ -445,9 +465,12 @@ class Workflow:
         return value if value.is_absolute() else (self.config_dir / value).resolve()
 
     def setup_for_current_platform(self) -> str:
+        platform_name = "windows" if os.name == "nt" else "linux"
+        return self.setup_for_platform(platform_name)
+
+    def setup_for_platform(self, platform_name: str) -> str:
         if isinstance(self.setup, str):
             return self.setup
-        platform_name = "windows" if os.name == "nt" else "linux"
         return self.setup.get(platform_name, self.setup.get("default", ""))
 
 

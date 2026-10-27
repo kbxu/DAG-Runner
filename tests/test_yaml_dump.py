@@ -98,7 +98,7 @@ class LegacyEnvMigrationTests(unittest.TestCase):
         data = yaml.safe_load(migrated)
         self.assertNotIn("env", data)
         self.assertEqual(data["setup"]["linux"], "export DEMO='local'")
-        self.assertEqual(data["setup"]["windows"], "$env:DEMO = 'local'")
+        self.assertEqual(data["setup"]["windows"], 'set "DEMO=local"')
 
 
 if __name__ == "__main__":

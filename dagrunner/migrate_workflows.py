@@ -509,6 +509,11 @@ def _environment_lines(values: dict[str, Any], shell: str) -> list[str]:
                 lines.append(f"$env:{name} = '{escaped}'")
             else:
                 lines.append(f"${{env:{name}}} = '{escaped}'")
+        elif shell == "cmd":
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"cannot set invalid cmd environment name {name!r}")
+            escaped = text.replace('"', '""')
+            lines.append(f'set "{name}={escaped}"')
         else:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 raise ValueError(f"cannot export invalid Bash environment name {name!r}")
