@@ -371,19 +371,17 @@ async function loadRuns(resetPage=false) {
       return `<tr><td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
-    loadRunStats();
+    renderRunStats(data.stats);
   } catch (error) { if (!error.offline) toast(error.message, true); }
 }
 
-async function loadRunStats() {
-  try {
-    const stats = await api("/api/runs/stats?hours=48");
-    const item = (label, value, className) => `<span class="run-stat ${className}"><b>${value}</b>${t(label)}</span>`;
-    document.getElementById("runStats").innerHTML =
-      item("成功", stats.success, "run-stat-success") +
+function renderRunStats(stats) {
+  const item = (label, value, className) => `<span class="run-stat ${className}"><b>${value}</b>${t(label)}</span>`;
+  document.getElementById("runStats").innerHTML = stats
+    ? item("成功", stats.success, "run-stat-success") +
       item("运行中", stats.running, "run-stat-running") +
-      item("失败", stats.failed, "run-stat-failed");
-  } catch (error) { if (!error.offline) document.getElementById("runStats").innerHTML = ""; }
+      item("失败", stats.failed, "run-stat-failed")
+    : "";
 }
 
 function renderRunPagination() {
@@ -478,17 +476,14 @@ let remoteConfigs = [];
 let remoteSettings = {ssh_path:"", key_path:"", host_key_policy:"accept-new", connect_timeout:10};
 let remoteDefaults = {ssh_path:"", key_path:""};
 
-async function loadRemoteStatus() {
-  try {
-    const data = await api("/api/remotes");
-    remoteConfigs = data.remotes || [];
-    const dot = document.getElementById("remoteStatusDot");
-    if (!dot) return;
-    if (!remoteConfigs.length) { dot.className = "remote-dot none"; dot.title = t("未配置远程"); return; }
-    const reachable = remoteConfigs.filter(r => r.status?.reachable).length;
-    dot.className = "remote-dot " + (reachable === remoteConfigs.length ? "ok" : reachable === 0 ? "bad" : "warn");
-    dot.title = t("{ok}/{total} 台远程可达", {ok: reachable, total: remoteConfigs.length});
-  } catch(e) { /* status is best-effort */ }
+function renderRemoteStatus(remotes) {
+  remoteConfigs = remotes || [];
+  const dot = document.getElementById("remoteStatusDot");
+  if (!dot) return;
+  if (!remoteConfigs.length) { dot.className = "remote-dot none"; dot.title = t("未配置远程"); return; }
+  const reachable = remoteConfigs.filter(r => r.status?.reachable).length;
+  dot.className = "remote-dot " + (reachable === remoteConfigs.length ? "ok" : reachable === 0 ? "bad" : "warn");
+  dot.title = t("{ok}/{total} 台远程可达", {ok: reachable, total: remoteConfigs.length});
 }
 
 async function openRemoteSettings() {
@@ -1045,7 +1040,6 @@ window.addEventListener("dagrunner-language-change", () => {
   loadRuns();
 });
 
-let resourceLoading = false;
 let resourceSnapshot = null;
 function renderResources(data) {
   const bar = document.getElementById("resourceBar");
@@ -1065,24 +1059,62 @@ function renderResources(data) {
     metric.title = percent === null ? t("暂不可用") : `${t(key === "disk" ? "数据库所在磁盘" : "服务器资源")} · ${percent.toFixed(1)}%${capacity ? ` · ${capacity}` : ""}`;
   }
 }
-async function loadResources() {
-  if (resourceLoading) return;
-  resourceLoading = true;
+async function loadSystemStatus() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    resourceSnapshot = await api("/api/system/resources", {signal: controller.signal});
-    renderResources(resourceSnapshot);
+    const data = await api("/api/system/overview", {signal: controller.signal});
+    resourceSnapshot = data.resources;
+    renderResources(data.resources);
+    renderRemoteStatus(data.remotes);
   } catch (_) {
     resourceSnapshot = null;
     renderResources(null);
   } finally {
     clearTimeout(timeout);
-    resourceLoading = false;
   }
 }
 window.addEventListener("dagrunner-language-change", () => renderResources(resourceSnapshot));
-loadResources(); setInterval(loadResources, 10000);
-loadWorkflows(); loadRuns(); setInterval(loadRuns, 3000); setInterval(loadWorkflows, 15000);
-loadRemoteStatus(); setInterval(loadRemoteStatus, 10000);
+
+const pollers = new Map();
+function stopPoller(key) {
+  const poller = pollers.get(key);
+  if (!poller) return;
+  poller.stop();
+  pollers.delete(key);
+}
+function startPoller(key, task, activeInterval, hiddenInterval) {
+  stopPoller(key);
+  let timer = null;
+  let running = false;
+  let stopped = false;
+  const delay = () => (document.hidden ? hiddenInterval : activeInterval);
+  function schedule(wait) {
+    if (stopped) return;
+    clearTimeout(timer);
+    timer = setTimeout(tick, wait ?? delay());
+  }
+  async function tick() {
+    if (stopped || running) return;
+    running = true;
+    try { await task(); } finally {
+      running = false;
+      schedule();
+    }
+  }
+  tick();
+  pollers.set(key, {
+    reschedule: () => schedule(),
+    kick: () => schedule(0),
+    stop: () => { stopped = true; clearTimeout(timer); },
+  });
+}
+document.addEventListener("visibilitychange", () => {
+  for (const poller of pollers.values()) poller.reschedule();
+  if (!document.hidden) for (const poller of pollers.values()) poller.kick();
+});
+
+startPoller("workflows", loadWorkflows, 15000, 60000);
+startPoller("runs", () => loadRuns(), 3000, 30000);
+startPoller("system", loadSystemStatus, 10000, 30000);
 window.addEventListener("resize", positionWorkflowTags);

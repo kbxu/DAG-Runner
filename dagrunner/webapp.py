@@ -70,6 +70,59 @@ def _log_download_filename(task, fallback_time=None) -> str:
     return f"{name}_{stamp}.txt"
 
 
+def _remotes_payload(database: StateDatabase) -> list[dict]:
+    status = database.list_remote_status()
+    remotes = []
+    for config in database.list_remotes():
+        row = dict(status.get(config.alias) or {})
+        remotes.append(
+            {
+                "alias": config.alias,
+                "username": config.username,
+                "host": config.host,
+                "port": config.port,
+                "workdir": config.workdir,
+                "status": {
+                    "reachable": bool(row.get("reachable")) if row else False,
+                    "last_check": row.get("last_check") if row else None,
+                    "latency_ms": row.get("latency_ms") if row else None,
+                    "error_message": row.get("error_message") if row else None,
+                },
+            }
+        )
+    return remotes
+
+
+def _system_resources_payload(database_path: str) -> dict:
+    # A short explicit sample works reliably across request worker threads.
+    cpu = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage(str(Path(database_path).resolve().parent))
+    return {
+        "cpu": {"percent": cpu},
+        "memory": {
+            "percent": memory.percent,
+            "used": memory.total - memory.available,
+            "total": memory.total,
+        },
+        "disk": {"percent": disk.percent, "used": disk.used, "total": disk.total},
+    }
+
+
+def _run_stats_payload(database: StateDatabase, hours: int) -> dict:
+    since = (
+        datetime.now().astimezone() - timedelta(hours=hours)
+    ).isoformat(timespec="milliseconds")
+    counts = database.task_status_counts(since)
+    return {
+        "window_hours": hours,
+        "success": counts.get("SUCCESS", 0),
+        "running": counts.get("RUNNING", 0),
+        "failed": counts.get("FAILED", 0),
+        "skipped": counts.get("SKIPPED", 0),
+    }
+
+
 def create_app(
     *,
     database_path="var/scheduler.db",
@@ -333,25 +386,7 @@ def create_app(
     @app.get("/api/remotes")
     def list_remotes():
         settings = database.get_remote_settings()
-        status = database.list_remote_status()
-        remotes = []
-        for config in database.list_remotes():
-            row = dict(status.get(config.alias) or {})
-            remotes.append(
-                {
-                    "alias": config.alias,
-                    "username": config.username,
-                    "host": config.host,
-                    "port": config.port,
-                    "workdir": config.workdir,
-                    "status": {
-                        "reachable": bool(row.get("reachable")) if row else False,
-                        "last_check": row.get("last_check") if row else None,
-                        "latency_ms": row.get("latency_ms") if row else None,
-                        "error_message": row.get("error_message") if row else None,
-                    },
-                }
-            )
+        remotes = _remotes_payload(database)
         return jsonify(
             {
                 "settings": {
@@ -446,14 +481,13 @@ def create_app(
 
     @app.get("/api/system/resources")
     def api_system_resources():
-        # A short explicit sample works reliably across request worker threads.
-        cpu = psutil.cpu_percent(interval=0.1)
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage(str(Path(database_path).resolve().parent))
+        return jsonify(_system_resources_payload(database_path))
+
+    @app.get("/api/system/overview")
+    def api_system_overview():
         return jsonify(
-            cpu={"percent": cpu},
-            memory={"percent": memory.percent, "used": memory.total - memory.available, "total": memory.total},
-            disk={"percent": disk.percent, "used": disk.used, "total": disk.total},
+            resources=_system_resources_payload(database_path),
+            remotes=_remotes_payload(database),
         )
 
     @app.get("/api/workflows")
@@ -782,19 +816,7 @@ def create_app(
         hours = request.args.get("hours", 48, type=int)
         if hours <= 0 or hours > 24 * 30:
             raise ServiceError("hours 必须在 1 到 720 之间")
-        since = (
-            datetime.now().astimezone() - timedelta(hours=hours)
-        ).isoformat(timespec="milliseconds")
-        counts = database.task_status_counts(since)
-        return jsonify(
-            {
-                "window_hours": hours,
-                "success": counts.get("SUCCESS", 0),
-                "running": counts.get("RUNNING", 0),
-                "failed": counts.get("FAILED", 0),
-                "skipped": counts.get("SKIPPED", 0),
-            }
-        )
+        return jsonify(_run_stats_payload(database, hours))
 
     @app.get("/api/runs")
     def runs():
@@ -837,6 +859,7 @@ def create_app(
                     "total": total,
                     "total_pages": max(1, (total + page_size - 1) // page_size),
                 },
+                "stats": _run_stats_payload(database, 48),
             }
         )
 
