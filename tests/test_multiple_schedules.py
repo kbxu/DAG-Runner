@@ -82,12 +82,15 @@ class MultipleScheduleTests(unittest.TestCase):
             self.assertIn('<html lang="en">', page)
             self.assertIn('data-default-language="en"', page)
 
-        with patch("dagrunner.server.create_app") as create, patch(
-            "dagrunner.server.serve"
-        ) as serve:
-            self.assertEqual(server_main(["--language", "en"]), 0)
-            self.assertEqual(create.call_args.kwargs["language"], "en")
-            serve.assert_called_once()
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.write_text("language: en\n", encoding="utf-8")
+            with patch("dagrunner.server.create_app") as create, patch(
+                "dagrunner.server.serve"
+            ) as serve:
+                self.assertEqual(server_main(["--config", str(config_path)]), 0)
+                self.assertEqual(create.call_args.kwargs["language"], "en")
+                serve.assert_called_once()
 
     def test_invalid_web_language_is_rejected(self) -> None:
         with TemporaryDirectory() as directory, self.assertRaises(ValueError):

@@ -19,6 +19,9 @@ data/
 var/*
 !var/.gitkeep
 !var/notifier.example.yaml
+!var/config.example.yaml
+!var/start.example.bat
+!var/start.example.sh
 
 # Demo execution output.
 .demo_data/

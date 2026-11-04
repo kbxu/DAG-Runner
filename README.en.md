@@ -70,34 +70,63 @@ python -m dagrunner.server
 
 Open <http://127.0.0.1:7119> and sign in as `admin` with the generated password. Database tables are created automatically when the service starts.
 
-`dagrunner.server` options:
+`dagrunner.server` accepts one option:
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | HTTP listen address; use `0.0.0.0` to accept connections from other machines |
-| `--port` | `7119` | HTTP listen port |
-| `--db` | `var/scheduler.db` | SQLite database path |
-| `--logs` | `var/logs` | Workflow and task log directory |
-| `--threads` | `8` | Task execution thread-pool size |
-| `--language` | `zh-CN` | Default web language; `zh-CN` or `en`. It can also be switched from the top-right button |
-| `--allow-insecure-remote-login` | off | Allow non-local clients to keep sessions over HTTP; use only temporarily on a trusted network |
+| `--config` | `var/config.example.yaml` | Startup YAML config; all other settings are read from this file |
 
-Example for trusted LAN access with custom data paths:
+See `var/config.example.yaml` for the available settings:
+
+```yaml
+host: 127.0.0.1
+port: 7119
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+language: zh-CN
+notifier_config: null
+allow_insecure_remote_login: false
+```
+
+`notifier_config` points to the notification (email SMTP) config file. `null` (the default) means no
+explicit path: the service auto-discovers `notifier.yaml`, `notifier.yml`, or `notifier.json` in the
+directory of `db` (default `var/`); if none exists, saving the sender settings in the Web console's
+"Notification" dialog creates `var/notifier.yaml` automatically. Set an explicit path when needed,
+e.g. `notifier_config: var/notifier.yaml`. `var/notifier.example.yaml` is only a template and is never
+read or updated automatically; copy it to `var/notifier.yaml` and edit that file if desired.
+
+For example, to allow LAN access and HTTP login on a trusted network, set in the config file:
+
+```yaml
+host: 0.0.0.0
+port: 7119
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+allow_insecure_remote_login: true
+```
+
+To use another config, copy it to `var/config.yaml` and pass `--config var/config.yaml`.
+
+Two launcher examples are provided under `var/`:
+
+- Windows: `var/start.example.bat`
+- Linux: `var/start.example.sh`
+
+`DAGR_PYTHON` in each script selects the Python executable and defaults to `python`. Edit it to use another interpreter, e.g. `set DAGR_PYTHON=C:\Python311\python.exe` or `DAGR_PYTHON=/opt/python3.11/bin/python`. Run them with:
 
 ```bash
-python -m dagrunner.server \
-  --host 0.0.0.0 \
-  --port 7119 \
-  --db var/scheduler.db \
-  --logs var/logs \
-  --threads 8 \
-  --language en \
-  --allow-insecure-remote-login
+bash var/start.example.sh
+```
+
+```bat
+var\start.example.bat
 ```
 
 The browser first hashes the login password with SHA-256. The backend then stores a salted PBKDF2-HMAC-SHA256 verifier with 600,000 iterations. The browser hash is still a replayable credential and does not replace transport encryption. Non-local deployments must use HTTPS and set `DAGRUNNER_COOKIE_SECURE=1` so session cookies are sent only over HTTPS.
 
-For temporary HTTP use on a trusted LAN, pass both `--host 0.0.0.0` and `--allow-insecure-remote-login`. This permits HTTP session cookies and enables the page's built-in SHA-256 implementation when Web Crypto is unavailable. It also permits HTTP login even when `DAGRUNNER_COOKIE_SECURE=1` is set, so never use it on the public internet.
+For temporary HTTP use on a trusted LAN, set `host: 0.0.0.0` and `allow_insecure_remote_login: true` in the config file. This permits HTTP session cookies and enables the page's built-in SHA-256 implementation when Web Crypto is unavailable. It also permits HTTP login even when `DAGRUNNER_COOKIE_SECURE=1` is set, so never use it on the public internet.
 
 ### 4. Define or import a workflow
 

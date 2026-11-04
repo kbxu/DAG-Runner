@@ -72,43 +72,74 @@ python -m dagrunner.server
 启动后访问 <http://127.0.0.1:7119>，使用账号 `admin` 和刚生成的密码登录。数据库表会在
 服务启动时自动创建，无需手工建表。
 
-`dagrunner.server` 参数：
+`dagrunner.server` 只接受一个参数：
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | HTTP 服务监听地址；需要允许其他机器访问时可设为 `0.0.0.0` |
-| `--port` | `7119` | HTTP 服务监听端口 |
-| `--db` | `var/scheduler.db` | SQLite 数据库文件路径 |
-| `--logs` | `var/logs` | 工作流和任务日志目录 |
-| `--threads` | `8` | 任务执行线程池大小 |
-| `--language` | `zh-CN` | Web 默认语言；可选 `zh-CN` 或 `en`，页面右上角也可随时切换 |
-| `--allow-insecure-remote-login` | 关闭 | 允许非本机客户端通过 HTTP 保持登录，仅建议在可信局域网临时使用 |
+| `--config` | `var/config.example.yaml` | 启动配置 YAML 文件，其他启动参数全部从该文件读取 |
 
-例如，允许局域网访问并使用自定义数据目录：
+配置示例见 `var/config.example.yaml`：
+
+```yaml
+host: 127.0.0.1
+port: 7119
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+language: zh-CN
+notifier_config: null
+allow_insecure_remote_login: false
+```
+
+`notifier_config` 用于指定通知（邮件 SMTP）配置文件。`null` 是默认值，表示不指定路径：服务会在
+`db` 所在目录（默认 `var/`）下自动查找 `notifier.yaml`、`notifier.yml` 或 `notifier.json`；如果都
+不存在，在 Web 控制台点击“通知”保存发件配置时会自动创建 `var/notifier.yaml`。需要固定路径时也可以
+显式配置，例如 `notifier_config: var/notifier.yaml`。`var/notifier.example.yaml` 只是示例模板，不会被
+自动读取或更新，需要时复制为 `var/notifier.yaml` 再修改。
+
+例如，允许局域网访问并在可信网络中使用 HTTP 登录时，在配置文件中设置：
+
+```yaml
+host: 0.0.0.0
+port: 7119
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+allow_insecure_remote_login: true
+```
+
+需要其它配置时可复制为 `var/config.yaml`，再通过 `--config var/config.yaml` 指定。
+
+`var/` 下提供了两个启动脚本示例：
+
+- Windows：`var/start.example.bat`
+- Linux：`var/start.example.sh`
+
+脚本中通过 `DAGR_PYTHON` 指定 Python 可执行文件，默认为 `python`。需要指定时编辑脚本中的
+`DAGR_PYTHON`，例如 `set DAGR_PYTHON=C:\Python311\python.exe` 或
+`DAGR_PYTHON=/opt/python3.11/bin/python`。运行方式：
 
 ```bash
-python -m dagrunner.server \
-  --host 0.0.0.0 \
-  --port 7119 \
-  --db var/scheduler.db \
-  --logs var/logs \
-  --threads 8 \
-  --allow-insecure-remote-login
+bash var/start.example.sh
+```
+
+```bat
+var\start.example.bat
 ```
 
 Web 登录的密码会先在浏览器中计算 SHA-256，再由后端使用随机盐和
 PBKDF2-HMAC-SHA256（600,000 次迭代）生成数据库校验值。前端摘要仍然属于可重放的
 密码凭据，不能代替传输加密；非本机部署必须启用 HTTPS，并设置
 `DAGRUNNER_COOKIE_SECURE=1`，确保会话 Cookie 只通过 HTTPS 发送。确需在可信局域网中
-使用 HTTP 时，可同时指定 `--host 0.0.0.0 --allow-insecure-remote-login`；该参数会允许
+使用 HTTP 时，可在配置文件中设置 `host: 0.0.0.0` 和 `allow_insecure_remote_login: true`；该选项会允许
 HTTP 会话 Cookie，并在浏览器 Web Crypto 不可用时启用页面内置的 SHA-256 实现。即使
 设置了 `DAGRUNNER_COOKIE_SECURE=1`，该模式也允许 HTTP 登录，因此不应在公网环境中使用。
 
 ### 4. 定义或导入工作流
 
 工作流使用 YAML 描述任务、依赖、准备脚本和定时配置，完整格式可参考
-[示例工作流](demo/examples/dagr_example_pipeline.yaml)。登录 Web 控制台后，可以点击“新增工作流”
-基于示例编辑，也可以点击“导入工作流”选择已有文件。导入后的调度默认关闭，请检查命令、
+[示例工作流](demo/examples/dagr_example_pipeline.yaml)。登录 Web 控制台后，点击“新建工作流”，
+可以选择“新增工作流”基于示例编辑，也可以选择已有文件导入。导入后的调度默认关闭，请检查命令、
 依赖关系、工作目录和调度时间后再手动启用。
 新工作流使用随机 hash 型 ID；如果导入任务的 ID 已被其他工作流使用，预览会为冲突任务
 生成新的 hash 型 ID，并同步更新依赖和条件分支引用。
@@ -124,7 +155,7 @@ tasks:
     timeout: 600
 ```
 
-“导入工作流”可以直接识别以下格式：
+“新建工作流”弹窗可以直接识别以下格式：
 
 - DAG Runner YAML
 - DolphinScheduler 导出的 JSON，例如 [示例文件](demo/examples/ds_9000001001.json)

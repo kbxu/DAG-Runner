@@ -274,7 +274,7 @@ class RemoteApiTests(unittest.TestCase):
         self.database.set_workflow_runner(row["workflow_key"], "box")
         response = self.client.delete("/api/remotes/box")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("远程被占用", response.get_json()["error"])
+        self.assertIn("远程被占用，需先解除工作流中的远程绑定", response.get_json()["error"])
 
         self.database.set_workflow_runner(row["workflow_key"], "local")
         self.assertEqual(self.client.delete("/api/remotes/box").status_code, 200)

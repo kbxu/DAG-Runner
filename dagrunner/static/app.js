@@ -660,11 +660,12 @@ async function openNewWorkflow() {
   pendingImportSuccessVerb = "新增";
   try {
     const [definition,nextId]=await Promise.all([api("/api/workflows/example-definition"),api("/api/workflows/next-id")]);
-    openWorkflowImportEditor(t("新增工作流"),definition,nextId.id,t("新增"));
+    openWorkflowImportEditor(t("创建"),definition,nextId.id,t("新增"));
   } catch(e) { toast(t("加载示例工作流失败：{error}",{error:e.message}),true); }
 }
 function openImportWorkflow() {
-  openModal(t("导入工作流"), `<div class="import-choice">
+  openModal(t("新建工作流"), `<div class="import-choice">
+    <button type="button" class="import-choice-option" onclick="openNewWorkflow()"><strong>${t("创建")}</strong><span>${t("从示例工作流开始创建，可编辑 YAML")}</span></button>
     <button type="button" class="import-choice-option" onclick="openImportWorkflowFile('.yaml,.yml,text/yaml,application/yaml')"><strong>${t("DAG Runner YAML 文件")}</strong><span>${t("选择「导出 YAML」生成的 .yaml 文件")}</span></button>
     <button type="button" class="import-choice-option" onclick="openImportWorkflowFile('.xml,text/xml,application/xml')"><strong>${t("Windows 计划任务文件")}</strong><span>${t("选择导出的 .xml 计划任务文件")}</span></button>
     <button type="button" class="import-choice-option" onclick="openImportWorkflowFile('.json,application/json')"><strong>${t("DolphinScheduler 导出文件")}</strong><span>${t("选择导出的 .json 工作流定义")}</span></button>
@@ -698,7 +699,7 @@ async function submitCrontabImport() {
     const [preview,nextId]=await Promise.all([api("/api/workflows/crontab-preview",{method:"POST",body:JSON.stringify({line})}),api("/api/workflows/next-id")]);
     pendingImportFilename=preview.filename || "dagr_crontab.yaml";
     pendingImportSuccessVerb="新增";
-    openWorkflowImportEditor(t("新增工作流"),preview.definition,nextId.id,t("新增"),preview);
+    openWorkflowImportEditor(t("创建"),preview.definition,nextId.id,t("新增"),preview);
   } catch(e) { toast(t("识别或转换 crontab 失败：{error}",{error:e.message}),true); }
 }
 async function submitImportWorkflow() {
@@ -1044,8 +1045,6 @@ let resourceSnapshot = null;
 function renderResources(data) {
   const bar = document.getElementById("resourceBar");
   bar.classList.toggle("unavailable", !data);
-  bar.querySelector(".resource-refresh span").textContent = t(data ? "10s 刷新" : "暂不可用");
-  bar.querySelector(".resource-refresh span").dataset.i18nKey = data ? "10s 刷新" : "暂不可用";
   for (const metric of bar.querySelectorAll("[data-resource]")) {
     const key = metric.dataset.resource, value = data?.[key];
     const percent = value && Number.isFinite(value.percent) ? Math.max(0, Math.min(100, value.percent)) : null;

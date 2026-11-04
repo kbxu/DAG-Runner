@@ -1,0 +1,12 @@
+# DAG Runner 启动配置示例。
+# dagrunner.server 默认读取本文件，启动参数全部来自此文件。
+# 如需使用其他配置文件，可复制为 var/config.yaml 后执行：
+#   python -m dagrunner.server --config var/config.yaml
+host: 127.0.0.1
+port: 7119
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+language: zh-CN
+notifier_config: null
+allow_insecure_remote_login: false

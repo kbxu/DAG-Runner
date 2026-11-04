@@ -438,7 +438,7 @@ def create_app(
     def delete_remote(alias: str):
         used = database.workflows_using_remote(alias)
         if used:
-            raise ServiceError(f"远程被占用：{', '.join(used)}")
+            raise ServiceError(f"远程被占用，需先解除工作流中的远程绑定：{', '.join(used)}")
         try:
             database.delete_remote(alias)
         except KeyError as exc:
@@ -1221,7 +1221,7 @@ _ENGLISH_ERROR_PREFIXES = {
     "Crontab 转换失败：": "Crontab conversion failed: ",
     "任务不存在：": "Unknown task: ",
     "远程机器不存在：": "Remote machine does not exist: ",
-    "远程被占用：": "Remote is used by workflows: ",
+    "远程被占用，需先解除工作流中的远程绑定：": "Remote is used by workflows: ",
 }
 
 

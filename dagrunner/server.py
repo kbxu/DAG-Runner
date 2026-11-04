@@ -8,50 +8,60 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
 from waitress import serve
 
 from .webapp import create_app
 
+DEFAULT_CONFIG_PATH = Path("var") / "config.example.yaml"
+
+
+def load_config_file(path: Path) -> dict:
+    """Read startup settings from a YAML config file."""
+    if not path.is_file():
+        raise SystemExit(f"配置文件不存在: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"无法解析配置文件 {path}: {exc}") from exc
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"配置文件 {path} 必须是 YAML 对象")
+    return data
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DAG Workflow Runner Web Service")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7119)
-    parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
-    parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument(
-        "--notifier-config",
+        "--config",
         type=Path,
-        help="email notifier YAML/JSON (default: discover beside --db)",
-    )
-    parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument(
-        "--language",
-        choices=("zh-CN", "en"),
-        default="zh-CN",
-        help="default web interface language (default: zh-CN)",
-    )
-    parser.add_argument(
-        "--allow-insecure-remote-login",
-        action="store_true",
-        help=(
-            "allow non-local clients to keep login sessions over HTTP; "
-            "use only on a trusted network"
-        ),
+        default=DEFAULT_CONFIG_PATH,
+        help="startup YAML config (default: var/config.example.yaml)",
     )
     args = parser.parse_args(argv)
+    config = load_config_file(args.config)
+    host = str(config.get("host", "127.0.0.1"))
+    port = int(config.get("port", 7119))
+    threads = int(config.get("threads", 8))
+    language = config.get("language", "zh-CN")
+    db = Path(config.get("db", "var/scheduler.db"))
+    logs = Path(config.get("logs", "var/logs"))
+    notifier_config = config.get("notifier_config")
+    allow_insecure_remote_login = bool(config.get("allow_insecure_remote_login", False))
     app = create_app(
-        database_path=args.db,
-        logs_path=args.logs,
-        allow_insecure_remote_login=args.allow_insecure_remote_login,
-        language=args.language,
-        notifier_config_path=args.notifier_config,
+        database_path=db,
+        logs_path=logs,
+        allow_insecure_remote_login=allow_insecure_remote_login,
+        language=language,
+        notifier_config_path=Path(notifier_config) if notifier_config else None,
     )
     _install_signal_handlers(app)
-    print(f"dag-runner service listening on http://{args.host}:{args.port}")
-    if args.allow_insecure_remote_login:
+    print(f"dag-runner service listening on http://{host}:{port}")
+    if allow_insecure_remote_login:
         print("warning: insecure remote HTTP login is enabled")
-    serve(app, host=args.host, port=args.port, threads=args.threads)
+    serve(app, host=host, port=port, threads=threads)
     return 0
 
 
