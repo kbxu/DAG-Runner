@@ -128,7 +128,7 @@ async function refreshWorkflowPreview(editor, addition=null) {
     const status = document.getElementById('previewStatus');
     status.classList.remove('preview-error');
     status.textContent = `校验通过 · ${data.tasks.length} 个节点 · 尚未保存`;
-    if (editor.selected && data.tasks.some(task => task.name === editor.selected)) selectPreviewTask(editor.selected);
+    if (editor.selected && data.tasks.some(task => task.name === editor.selected)) selectPreviewTask(editor.selected, Boolean(addition));
     else {
       editor.selected = null;
       document.getElementById('previewSelection').textContent = '点击节点，添加后续普通模块或条件分支。';
@@ -144,7 +144,7 @@ async function refreshWorkflowPreview(editor, addition=null) {
   }
 }
 
-function selectPreviewTask(name) {
+function selectPreviewTask(name, scrollToTask=true) {
   const editor = workflowEditor, task = editor?.tasks.find(item => item.name === name);
   if (!task) return;
   editor.selected = name;
@@ -152,7 +152,12 @@ function selectPreviewTask(name) {
   selection.innerHTML = `<strong>${esc(task.description || name)}</strong><div class="secondary mono">${esc(name)}</div><div class="preview-add-actions">${task.type === 'condition' ? '<label>连接分支<select id="previewBranch"><option value="success">条件成立（success）</option><option value="failure">条件不成立（failure）</option></select></label>' : ''}<button type="button" class="button ghost" data-add-node onclick="addPreviewTask('command')">＋ 普通模块</button><button type="button" class="button ghost" data-add-node onclick="addPreviewTask('condition')">＋ 条件分支</button></div><span class="form-hint">${task.type === 'condition' ? '新节点仅在所选分支被选中时运行。' : '新增模块依赖当前节点，已有后续模块继续保留。'} 条件分支默认判断当前节点状态为 SUCCESS，可在 YAML 中修改。</span>`;
   editor.panel.querySelectorAll('.dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === name));
   updateEditorControls();
-  editor.input.focus();
+  if (scrollToTask) {
+    const line = scrollYamlToTask(editor.input, editor.input.value, name);
+    flashYamlLine(editor.input, line);
+  } else {
+    editor.input.focus();
+  }
 }
 
 async function addPreviewTask(kind) {

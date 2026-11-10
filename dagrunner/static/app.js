@@ -62,9 +62,9 @@ function namedId(name, id) { return name && name !== id ? (currentLanguage === "
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
 const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
 const usefulTaskKeys = new Set(["type", "description", "shell", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
-function yamlEditor(id, value, includeSchedule=false) {
+function yamlEditor(id, value, includeSchedule=false, readOnly=false) {
   const source=normalizeYamlNewlines(value);
-  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(source)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(source,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(source)}</textarea></div></div>`;
+  return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(source)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(source,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" ${readOnly ? "readonly" : ""} oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(source)}</textarea></div></div>`;
 }
 function yamlGutter(value) {
   const source=String(value ?? "");
@@ -132,9 +132,70 @@ function syncYamlScroll(id) {
     gutter.scrollTop = inputMax > 0 && gutterMax > 0 ? Math.round(input.scrollTop*gutterMax/inputMax) : 0;
   }
 }
+function yamlTaskOffset(definition, name) {
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tasksMatch = /^tasks\s*:\s*(?:#.*)?$/m.exec(definition);
+  const from = tasksMatch ? tasksMatch.index + tasksMatch[0].length : 0;
+  const match = new RegExp(`(?:^|\\n)([ \\t]*)(['"]?)${escaped}\\2\\s*:`, "m").exec(definition.slice(from));
+  if (!match) return null;
+  return from + match.index + (match[0].startsWith("\n") ? 1 : 0) + match[1].length;
+}
+function scrollYamlToTask(textarea, definition, name) {
+  const offset = yamlTaskOffset(definition, name);
+  const start = offset ?? 0;
+  textarea.focus();
+  textarea.setSelectionRange(start, start);
+  const line = definition.slice(0, start).split("\n").length - 1;
+  const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 18.6;
+  const targetTop = Math.max(0, (line - 2) * lineHeight);
+  const maxScrollTop = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
+  textarea.scrollTop = Math.min(targetTop, maxScrollTop);
+  syncYamlScroll(textarea.id);
+  return line;
+}
+function ensureYamlFlash(textarea) {
+  const code = textarea?.closest(".yaml-code");
+  if (!code) return null;
+  let flash = code.querySelector(".yaml-flash");
+  if (!flash) {
+    flash = document.createElement("div");
+    flash.className = "yaml-flash";
+    flash.style.display = "none";
+    code.appendChild(flash);
+    textarea.addEventListener("scroll", () => positionYamlFlash(textarea, flash));
+  }
+  return flash;
+}
+function positionYamlFlash(textarea, flash) {
+  if (!textarea.dataset.flashLine) { flash.style.display = "none"; return; }
+  const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 18.6;
+  const paddingTop = parseFloat(getComputedStyle(textarea).paddingTop) || 12;
+  flash.style.display = "block";
+  flash.style.top = `${paddingTop + Number(textarea.dataset.flashLine) * lineHeight - textarea.scrollTop}px`;
+  flash.style.height = `${lineHeight}px`;
+}
+function flashYamlLine(textarea, line) {
+  const flash = ensureYamlFlash(textarea);
+  if (!flash) return;
+  textarea.dataset.flashLine = String(line);
+  positionYamlFlash(textarea, flash);
+  flash.classList.remove("active");
+  void flash.offsetWidth;
+  flash.classList.add("active");
+  clearTimeout(textarea._flashTimer);
+  textarea._flashTimer = setTimeout(() => {
+    flash.classList.remove("active");
+    setTimeout(() => { delete textarea.dataset.flashLine; flash.style.display = "none"; }, 500);
+  }, 600);
+}
+function clearYamlFlash(textarea) {
+  const flash = textarea?.closest(".yaml-code")?.querySelector(".yaml-flash");
+  if (flash) { flash.classList.remove("active"); flash.style.display = "none"; }
+  if (textarea) { delete textarea.dataset.flashLine; clearTimeout(textarea._flashTimer); }
+}
 function yamlEditorKeydown(event, id) {
   const input = document.getElementById(id);
-  if (!input) return;
+  if (!input || input.readOnly) return;
   const value = input.value;
   const start = input.selectionStart, end = input.selectionEnd;
   if (event.key === 'Tab') {
@@ -653,7 +714,7 @@ function openWorkflowImportEditor(title, definition, nextId, submitLabel, source
   const split = splitWorkflowName(definition);
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
-  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select">${runnerOptions("local")}</select></label><label>${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select">${runnerOptions("local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
 }
 async function openNewWorkflow() {
   pendingImportFilename = "dagr_example_pipeline.yaml";
@@ -714,7 +775,7 @@ async function editWorkflow(name) {
   try {
     const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
     const split=splitWorkflowName(definition);
-    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select">${runnerOptions(workflow.runner)}</select></label><label>${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
+    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select">${runnerOptions(workflow.runner)}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
   } catch(e) { toast(e.message,true); }
 }
 async function saveWorkflow(name) {
@@ -1016,12 +1077,27 @@ async function copyLog() {
 }
 
 let modalBackdropClosable = true;
+function toggleModalMaximize() {
+  const card = document.querySelector("#modal .modal-card");
+  if (!card) return;
+  card.classList.toggle("maximized");
+  const button = document.getElementById("modalMaximize");
+  if (button) {
+    const maximized = card.classList.contains("maximized");
+    button.textContent = maximized ? "⤡" : "⤢";
+    button.title = t(maximized ? "还原" : "最大化");
+  }
+}
 function openModal(title, body, closeOnBackdrop=true, size="default") {
   disposeWorkflowViewer();
   disposeWorkflowEditor();
   modalBackdropClosable=closeOnBackdrop;
   const modal=document.getElementById("modal");
-  modal.querySelector(".modal-card").classList.toggle("compact-modal-card", size === "compact");
+  const card = modal.querySelector(".modal-card");
+  card.classList.remove("maximized");
+  const maximizeButton = document.getElementById("modalMaximize");
+  if (maximizeButton) { maximizeButton.textContent = "⤢"; maximizeButton.title = t("最大化"); }
+  card.classList.toggle("compact-modal-card", size === "compact");
   document.getElementById("modalTitle").textContent=title;
   document.getElementById("modalBody").innerHTML=body;
   modal.classList.remove("hidden");

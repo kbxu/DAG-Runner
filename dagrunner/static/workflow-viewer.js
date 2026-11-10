@@ -39,7 +39,7 @@ async function refreshWorkflowViewer() {
     document.getElementById('viewerMessage').classList.add('hidden');
     document.getElementById('viewerLegend').innerHTML = run
       ? ['RUNNING','SUCCESS','FAILED','SKIPPED','PENDING'].map(status => statusBadge(status)).join(' ')
-      : `<span>${t("点击节点查看 YAML 代码 · 右键执行任务")}</span>`;
+      : `<span>${t("点击节点定位 YAML · 右键执行任务")}</span>`;
     if (run) {
       // Scoped runs hide the tasks that were never part of the run.
       if (view.hideOutsideScope === undefined) view.hideOutsideScope = Boolean(run.from_task);
@@ -50,13 +50,24 @@ async function refreshWorkflowViewer() {
       updatedScroll.scrollTop = scrollTop;
       updatedScroll.scrollLeft = scrollLeft;
     }
-    if (!view.tasks.some(task => task.name === view.selected)) view.selected = view.tasks[0]?.name || null;
     renderViewerGraph();
-    if (view.tasks.some(task => task.name === view.selected)) selectViewerTask(view.selected);
-    else {
-      view.selected = null;
-      view.renderedNode = null;
-      document.getElementById('viewerNode').textContent = '点击节点查看详情';
+    if (view.kind === 'workflow') {
+      const rendered = renderViewerYaml(view);
+      if (rendered && view.tasks.some(task => task.name === view.selected)) selectViewerTask(view.selected);
+      else if (!rendered) {
+        view.selected = null;
+        view.renderedNode = null;
+        document.getElementById('viewerNode').textContent = '点击节点查看详情';
+      }
+    } else if (view.tasks.some(task => task.name === view.selected)) {
+      selectViewerTask(view.selected);
+    } else {
+      view.selected = view.tasks[0]?.name || null;
+      if (view.selected) selectViewerTask(view.selected);
+      else {
+        view.renderedNode = null;
+        document.getElementById('viewerNode').textContent = '点击节点查看详情';
+      }
     }
   } catch (error) {
     if (workflowViewer === view && view.request === request) {
@@ -113,6 +124,13 @@ function renderViewerGraph() {
     graph.scrollLeft = scrollLeft;
   }
   document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === view.selected));
+  if (view.kind === 'workflow' && !graph.dataset.blankClick) {
+    graph.dataset.blankClick = '1';
+    graph.addEventListener('click', event => {
+      if (event.target.closest('.dag-node')) return;
+      clearViewerSelection();
+    });
+  }
   if (view.kind === 'workflow' && !graph.dataset.runMenu) {
     graph.dataset.runMenu = '1';
     graph.addEventListener('contextmenu', event => {
@@ -124,12 +142,66 @@ function renderViewerGraph() {
   }
 }
 
+function renderViewerYaml(view) {
+  const definition = view.data?.definition;
+  const target = document.getElementById('viewerNode');
+  if (definition == null) {
+    view.yamlRendered = false;
+    view.yamlDefinition = null;
+    target.classList.remove('viewer-yaml-node');
+    return false;
+  }
+  target.classList.add('viewer-yaml-node');
+  if (view.yamlDefinition !== definition) {
+    view.yamlDefinition = definition;
+    const run = view.data.run;
+    const title = run ? namedId(run.workflow_description, run.workflow_name) : namedId(view.data.description, view.data.name);
+    const caption = run ? '工作流 YAML（只读 · 当前定义，非运行时快照）' : '工作流 YAML（只读）';
+    target.innerHTML = `<div class="viewer-node-heading"><strong title="${esc(title)}">${esc(title)}</strong><span class="secondary viewer-node-caption">${caption}</span></div><div class="viewer-yaml">${yamlEditor('viewerYaml', definition, false, true)}</div>`;
+    syncYamlHighlight('viewerYaml');
+    ensureYamlFlash(document.getElementById('viewerYaml'));
+  }
+  view.yamlRendered = true;
+  return true;
+}
+
+function focusViewerYamlTask(name) {
+  const view = workflowViewer;
+  const textarea = document.getElementById('viewerYaml');
+  if (!view || !textarea) return;
+  const definition = normalizeYamlNewlines(view.data?.definition ?? textarea.value);
+  const line = scrollYamlToTask(textarea, definition, name);
+  flashYamlLine(textarea, line);
+}
+
+function clearViewerSelection() {
+  const view = workflowViewer;
+  if (!view) return;
+  view.selected = null;
+  document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.remove('preview-selected'));
+  document.querySelectorAll('[data-run-task]').forEach(row => row.classList.remove('viewer-row-selected'));
+  const textarea = document.getElementById('viewerYaml');
+  if (textarea) {
+    clearYamlFlash(textarea);
+    textarea.focus();
+    textarea.setSelectionRange(0, 0);
+    textarea.scrollTop = 0;
+    syncYamlScroll('viewerYaml');
+  } else {
+    document.getElementById('viewerNode').textContent = '点击节点查看详情';
+  }
+}
+
 function selectViewerTask(name) {
   const view = workflowViewer, task = view?.tasks.find(item => item.name === name);
   if (!task) return;
   view.selected = name;
   document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === name));
   document.querySelectorAll('[data-run-task]').forEach(row => row.classList.toggle('viewer-row-selected', row.dataset.runTask === name));
+  if (view.yamlRendered) {
+    focusViewerYamlTask(name);
+    return;
+  }
   // Status refreshes must not replace the code DOM or reset its selection/scroll.
   if (view.renderedNode === name) return;
   view.renderedNode = name;

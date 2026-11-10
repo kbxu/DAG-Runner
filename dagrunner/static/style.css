@@ -151,6 +151,18 @@ tbody tr:hover { background: #fbfcfc; }
 .modal-head h3 { margin: 0; }
 .modal-head-actions { display: flex; align-items: center; gap: 10px; }
 .icon-button { border: 0; color: #667085; background: transparent; cursor: pointer; font-size: 25px; }
+#modalMaximize { display: none; }
+.workflow-editor-card #modalMaximize { display: block; }
+.modal-card.maximized { height: calc(100vh - 40px); max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.modal-card.maximized .modal-head { flex: 0 0 auto; }
+.modal-card.maximized .modal-body { flex: 1 1 auto; min-height: 0; max-height: none; display: flex; flex-direction: column; }
+.modal-card.maximized .modal-body > .workflow-editor-layout { flex: 1 1 auto; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.modal-card.maximized .workflow-editor-footer { flex: 0 0 auto; }
+.modal-card.maximized .workflow-editor-layout .form-stack { display: flex; flex-direction: column; }
+.modal-card.maximized .workflow-editor-layout .form-stack > .yaml-editor-label { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.modal-card.maximized .workflow-editor-layout .yaml-editor { flex: 1 1 auto; height: auto; min-height: 0; }
+.modal-card.maximized #viewerNode { max-height: none; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.modal-card.maximized .viewer-code { max-height: none; flex: 1 1 auto; }
 .modal-body { max-height: calc(88vh - 64px); overflow: auto; padding: 20px; }
 .log-modal .modal-body { max-height: calc(80vh - 64px); padding: 0; overflow: hidden; }
 .log-modal-body { display: flex; flex-direction: column; max-height: calc(80vh - 64px); }
@@ -272,13 +284,22 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .viewer-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .viewer-details { min-width: 0; overflow-wrap: anywhere; }
 .workflow-viewer-frame.workflow-editor-vertical { height: min(680px, calc(88vh - 110px)); min-height: 320px; }
-.workflow-viewer-frame.workflow-editor-vertical .viewer-details { min-height: 0; overflow: auto; padding-right: 6px; }
+.workflow-viewer-frame.workflow-editor-vertical .viewer-details { min-height: 0; overflow: auto; padding-right: 6px; display: flex; flex-direction: column; gap: 16px; }
 .workflow-viewer-frame.workflow-editor-vertical .workflow-preview { min-height: 0; }
 .workflow-viewer-frame.workflow-editor-vertical .dag-scroll { min-height: 0; }
 .viewer-details h4 { margin: 12px 0; }
 #viewerGraph .dag-canvas { margin-inline: auto; }
 #viewerGraph .dag-node { cursor: pointer; }
-#viewerNode { min-width: 0; max-height: 430px; overflow: auto; }
+#viewerNode { min-width: 0; max-height: 430px; overflow: auto; flex: 0 0 auto; }
+#viewerNode.viewer-yaml-node { max-height: none; overflow: visible; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.viewer-yaml { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.viewer-yaml .yaml-editor { height: auto; min-height: 0; flex: 1 1 auto; }
+.yaml-editor .yaml-code { overflow: hidden; }
+#viewerTasks { flex: 0 0 auto; }
+#viewerTasks:empty { display: none; }
+.yaml-editor textarea { outline: none; }
+.yaml-flash { position: absolute; left: 0; right: 0; z-index: 0; background: #fde68a; opacity: 0; pointer-events: none; transition: opacity .45s ease; }
+.yaml-flash.active { opacity: .55; }
 .viewer-node-heading { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 8px; font-size: 12px; }
 .viewer-node-heading > strong, .viewer-node-heading > .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .viewer-node-heading > strong { flex: 0 1 auto; }

@@ -82,7 +82,7 @@
 
   <div id="modal" class="modal hidden" onclick="closeModalFromBackdrop(event)">
     <div class="modal-card">
-      <div class="modal-head"><h3 id="modalTitle"></h3><button class="icon-button" onclick="closeModal()">×</button></div>
+      <div class="modal-head"><h3 id="modalTitle"></h3><div class="modal-head-actions"><button id="modalMaximize" class="icon-button" type="button" onclick="toggleModalMaximize()" title="最大化">⤢</button><button class="icon-button" onclick="closeModal()">×</button></div></div>
       <div id="modalBody" class="modal-body"></div>
     </div>
   </div>

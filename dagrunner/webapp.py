@@ -694,6 +694,7 @@ def create_app(
         return jsonify({
             "name": workflow_name,
             "description": workflow.description,
+            "definition": definition,
             "tasks": [
                 {
                     "name": task.name, "description": task.description,
