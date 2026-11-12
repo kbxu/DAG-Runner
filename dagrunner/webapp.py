@@ -4,6 +4,7 @@ import atexit
 import json
 import os
 import re
+import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -17,14 +18,6 @@ from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
 from .database import StateDatabase
 from .logger import TaskLogManager
 from .notifier import load_email_config, load_notifier, save_email_config
-from .remote import (
-    RemoteConfig,
-    RemoteMonitor,
-    RemoteSettings,
-    check_remote,
-    detect_key_path,
-    detect_ssh_path,
-)
 from .migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
     SOURCE_WINDOWS_TASK_SCHEDULER,
@@ -34,6 +27,8 @@ from .migrate_workflows import (
     convert_windows_task_scheduler_definition,
     dump_workflow_yaml,
 )
+from .satellite_master import SatelliteError
+from .satellite_protocol import PATH_PING, SatelliteConfig
 from .service import (
     DEFAULT_SCHEDULE_CRON,
     DEFAULT_SCHEDULE_TIMEZONE,
@@ -49,8 +44,7 @@ from .workflow_editor import demo_command, demo_setup, preview_definition, exten
 
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
 _LOG_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
-_REMOTE_ALIAS = re.compile(r"^[A-Za-z0-9_.-]+$")
-_REMOTE_HOST_KEY_POLICIES = {"accept-new", "yes", "no", "ask"}
+_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _log_download_filename(task, fallback_time=None) -> str:
@@ -70,27 +64,43 @@ def _log_download_filename(task, fallback_time=None) -> str:
     return f"{name}_{stamp}.txt"
 
 
-def _remotes_payload(database: StateDatabase) -> list[dict]:
-    status = database.list_remote_status()
-    remotes = []
-    for config in database.list_remotes():
-        row = dict(status.get(config.alias) or {})
-        remotes.append(
+def _satellites_payload(database: StateDatabase) -> list[dict]:
+    jobs_by_alias: dict[str, list] = {}
+    for job in database.list_satellite_jobs(limit=200):
+        jobs_by_alias.setdefault(job["satellite_alias"], []).append(job)
+    satellites = []
+    for config in database.list_satellites():
+        satellites.append(
             {
                 "alias": config.alias,
-                "username": config.username,
-                "host": config.host,
-                "port": config.port,
-                "workdir": config.workdir,
+                "name": config.name,
+                "mode": config.mode,
+                "url": config.url,
+                "host_key_policy": config.host_key_policy,
+                "cert_fingerprint": config.cert_fingerprint,
+                "has_token": bool(config.token),
                 "status": {
-                    "reachable": bool(row.get("reachable")) if row else False,
-                    "last_check": row.get("last_check") if row else None,
-                    "latency_ms": row.get("latency_ms") if row else None,
-                    "error_message": row.get("error_message") if row else None,
+                    "status": config.status,
+                    "last_seen": config.last_seen,
+                    "last_error": config.last_error,
+                    "platform": config.platform,
+                    "hostname": config.hostname,
+                    "agent_version": config.agent_version,
                 },
+                "jobs": [
+                    {
+                        "job_id": job["job_id"],
+                        "task_name": job["task_name"],
+                        "status": job["status"],
+                        "exit_code": job["exit_code"],
+                        "created_time": job["created_time"],
+                        "finished_time": job["finished_time"],
+                    }
+                    for job in jobs_by_alias.get(config.alias, [])[:10]
+                ],
             }
         )
-    return remotes
+    return satellites
 
 
 def _system_resources_payload(database_path: str) -> dict:
@@ -131,6 +141,10 @@ def create_app(
     allow_insecure_remote_login: bool = False,
     language: str = "zh-CN",
     notifier_config_path=None,
+    satellite_manager=None,
+    satellite_url: str = "",
+    satellite_port: int = 7120,
+    satellite_fingerprint: str = "",
 ) -> Flask:
     if language not in {"zh-CN", "en"}:
         raise ValueError("language must be 'zh-CN' or 'en'")
@@ -148,20 +162,20 @@ def create_app(
     logs = TaskLogManager(logs_path)
     notifier_var_dir = Path(database_path).resolve().parent
     notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
-    executions = ExecutionService(database, registry, logs, notifier=notifier)
+    executions = ExecutionService(
+        database, registry, logs, notifier=notifier, satellite_manager=satellite_manager
+    )
     schedules = ScheduleService(database, registry, executions)
-    remote_monitor = RemoteMonitor(database)
     if start_scheduler:
         executions.recover_orphaned_runs()
         schedules.start()
-        remote_monitor.start()
 
     app.extensions["state_database"] = database
     app.extensions["workflow_registry"] = registry
     app.extensions["auth_service"] = auth
     app.extensions["execution_service"] = executions
     app.extensions["schedule_service"] = schedules
-    app.extensions["remote_monitor"] = remote_monitor
+    app.extensions["satellite_manager"] = satellite_manager
 
     public_endpoints = {"static", "login_page", "api_login"}
 
@@ -383,100 +397,100 @@ def create_app(
         executions.notifier = saved
         return jsonify({"ok": True})
 
-    @app.get("/api/remotes")
-    def list_remotes():
-        settings = database.get_remote_settings()
-        remotes = _remotes_payload(database)
-        return jsonify(
-            {
-                "settings": {
-                    "ssh_path": settings.ssh_path,
-                    "key_path": settings.key_path,
-                    "host_key_policy": settings.host_key_policy,
-                    "connect_timeout": settings.connect_timeout,
-                    "detected_ssh_path": detect_ssh_path(),
-                    "detected_key_path": detect_key_path(),
-                },
-                "remotes": remotes,
-            }
-        )
+    @app.get("/api/satellites")
+    def list_satellites():
+        return jsonify({"satellites": _satellites_payload(database)})
 
-    @app.put("/api/remotes/settings")
-    def update_remote_settings():
+    @app.put("/api/satellites/<alias>")
+    def upsert_satellite(alias: str):
         payload = request.get_json(silent=True) or {}
-        errors, ssh_path, key_path, policy, timeout = _remote_settings_errors(payload)
+        errors = _satellite_field_errors(payload, alias)
         if errors:
-            raise ServiceError("远程全局设置校验失败", field_errors=errors)
-        database.update_remote_settings(
-            RemoteSettings(
-                ssh_path=ssh_path,
-                key_path=key_path,
-                host_key_policy=policy,
-                connect_timeout=timeout,
-            )
-        )
-        return jsonify({"ok": True})
-
-    @app.put("/api/remotes/<alias>")
-    def upsert_remote(alias: str):
-        payload = request.get_json(silent=True) or {}
-        errors, username, host, port, workdir = _remote_field_errors(payload, alias)
-        if errors:
-            raise ServiceError("远程配置校验失败", field_errors=errors)
-        database.upsert_remote(
-            RemoteConfig(
+            raise ServiceError("卫星配置校验失败", field_errors=errors)
+        existing = database.get_satellite(alias)
+        token = str(payload.get("token", "") or "").strip()
+        if bool(payload.get("generate_token")):
+            token = secrets.token_urlsafe(24)
+            returned_token = token
+        elif not token and existing is None:
+            token = secrets.token_urlsafe(24)
+            returned_token = token
+        else:
+            if not token and existing is not None:
+                token = existing.token
+            returned_token = None
+        database.upsert_satellite(
+            SatelliteConfig(
                 alias=alias,
-                username=username,
-                host=host,
-                port=port,
-                workdir=workdir,
+                name=str(payload.get("name", "") or "").strip(),
+                mode=str(payload.get("mode", "auto")),
+                url=str(payload.get("url", "") or "").strip(),
+                token=token,
+                host_key_policy=str(payload.get("host_key_policy", "accept-new")),
+                cert_fingerprint=str(payload.get("cert_fingerprint", "") or "")
+                .strip()
+                .lower(),
             )
         )
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "token": returned_token})
 
-    @app.delete("/api/remotes/<alias>")
-    def delete_remote(alias: str):
-        used = database.workflows_using_remote(alias)
+    @app.delete("/api/satellites/<alias>")
+    def delete_satellite(alias: str):
+        used = database.workflows_using_runner(alias)
         if used:
-            raise ServiceError(f"远程被占用，需先解除工作流中的远程绑定：{', '.join(used)}")
+            raise ServiceError(f"卫星被占用，需先解除工作流中的绑定：{', '.join(used)}")
         try:
-            database.delete_remote(alias)
+            database.delete_satellite(alias)
         except KeyError as exc:
             raise ServiceError(str(exc)) from exc
         return jsonify({"ok": True})
 
-    @app.post("/api/remotes/test")
-    def test_remote_config():
-        payload = request.get_json(silent=True) or {}
-        alias = str(payload.get("alias", ""))
-        errors, username, host, port, workdir = _remote_field_errors(payload, alias)
-        errors.pop("alias", None)
-        if errors:
-            raise ServiceError("远程配置校验失败", field_errors=errors)
-        settings = database.get_remote_settings()
-        config = RemoteConfig(
-            alias=alias,
-            username=username,
-            host=host,
-            port=port,
-            workdir=workdir,
-            ssh_path=settings.ssh_path,
-            key_path=settings.key_path,
-            host_key_policy=settings.host_key_policy,
-            connect_timeout=settings.connect_timeout,
-        )
-        result = check_remote(config)
-        if database.get_remote(alias) is not None:
-            database.set_remote_status(
-                alias, result.reachable, result.error_message, result.latency_ms
+    @app.post("/api/satellites/<alias>/test")
+    def test_satellite(alias: str):
+        manager = app.extensions.get("satellite_manager")
+        if manager is None:
+            return jsonify(
+                {"ok": True, "reachable": False, "error_message": "卫星服务未启用"}
             )
-        return jsonify(
-            {
-                "ok": True,
-                "reachable": result.reachable,
-                "error_message": result.error_message,
-                "latency_ms": result.latency_ms,
-            }
+        try:
+            result = manager.test_connection(alias)
+        except SatelliteError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/satellites/<alias>/config")
+    def satellite_config(alias: str):
+        config = database.get_satellite(alias)
+        if config is None:
+            raise ServiceError(f"卫星不存在：{alias}")
+        if satellite_url:
+            master_url = satellite_url
+        else:
+            host = request.host.rsplit(":", 1)[0] if ":" in request.host else request.host
+            master_url = f"https://{host}:{satellite_port}"
+        lines = [
+            "# DAG Runner 卫星版配置",
+            "satellite:",
+            f"  alias: {config.alias}",
+            f"  master_url: {master_url}",
+            f'  token: "{config.token}"',
+            f"  mode: {config.mode}",
+            "  listen_host: 0.0.0.0",
+            "  listen_port: 7121",
+            "  cert: var/satellite/cert.pem",
+            "  key: var/satellite/key.pem",
+            f"  host_key_policy: {config.host_key_policy}",
+            f'  master_cert_fingerprint: "{satellite_fingerprint}"',
+            '  workdir: ""',
+            "  log_dir: var/satellite-logs",
+        ]
+        text = "\n".join(lines) + "\n"
+        return Response(
+            text,
+            mimetype="text/yaml",
+            headers={
+                "Content-Disposition": f"attachment; filename=satellite-{config.alias}.yaml"
+            },
         )
 
     @app.get("/api/system/resources")
@@ -487,7 +501,7 @@ def create_app(
     def api_system_overview():
         return jsonify(
             resources=_system_resources_payload(database_path),
-            remotes=_remotes_payload(database),
+            satellites=_satellites_payload(database),
         )
 
     @app.get("/api/workflows")
@@ -589,8 +603,8 @@ def create_app(
         if requested_id is not None and not _HASH_WORKFLOW_ID.fullmatch(requested_id):
             raise ServiceError("invalid proposed workflow ID")
         runner = str(request.form.get("runner", "local") or "local").strip() or "local"
-        if runner != "local" and database.get_remote(runner) is None:
-            raise ServiceError(f"远程机器不存在：{runner}")
+        if runner != "local" and not database.is_satellite(runner):
+            raise ServiceError(f"运行位置不存在：{runner}")
         try:
             row = database.create_workflow(display_name, definition, requested_id)
         except ValueError as exc:
@@ -732,8 +746,8 @@ def create_app(
             str(payload.get("runner", current["runner"] or "local") or "local").strip()
             or "local"
         )
-        if runner != "local" and database.get_remote(runner) is None:
-            raise ServiceError(f"远程机器不存在：{runner}")
+        if runner != "local" and not database.is_satellite(runner):
+            raise ServiceError(f"运行位置不存在：{runner}")
         database.update_workflow(workflow_name, display_name, definition)
         database.update_schedule_description(workflow_name, display_name)
         database.set_workflow_runner(workflow_name, runner)
@@ -1022,18 +1036,13 @@ def create_app(
         return jsonify(payload), 400
 
     if start_scheduler:
-        atexit.register(_shutdown, schedules, executions, remote_monitor)
+        atexit.register(_shutdown, schedules, executions)
     return app
 
 
-def _shutdown(
-    schedules: ScheduleService,
-    executions: ExecutionService,
-    remote_monitor: RemoteMonitor,
-) -> None:
+def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
     schedules.shutdown()
     executions.shutdown()
-    remote_monitor.shutdown()
 
 
 def _platform_example_definition(definition: str) -> str:
@@ -1211,8 +1220,6 @@ _ENGLISH_ERRORS = {
     "from_task 必须是文本": "from_task must be a string",
     "hours 必须在 1 到 720 之间": "hours must be between 1 and 720",
     "only_task 需要 from_task": "only_task needs from_task",
-    "远程配置校验失败": "Remote configuration is invalid",
-    "远程全局设置校验失败": "Remote global settings are invalid",
 }
 
 _ENGLISH_ERROR_PREFIXES = {
@@ -1221,8 +1228,6 @@ _ENGLISH_ERROR_PREFIXES = {
     "无法识别工作流来源：": "Could not detect the workflow source: ",
     "Crontab 转换失败：": "Crontab conversion failed: ",
     "任务不存在：": "Unknown task: ",
-    "远程机器不存在：": "Remote machine does not exist: ",
-    "远程被占用，需先解除工作流中的远程绑定：": "Remote is used by workflows: ",
 }
 
 
@@ -1237,46 +1242,25 @@ def _localized_error(message: str, language: str) -> str:
     return message
 
 
-def _remote_field_errors(payload: dict, alias: str):
+def _satellite_field_errors(payload: dict, alias: str):
     errors: dict[str, str] = {}
-    if not _REMOTE_ALIAS.fullmatch(alias):
+    if not _ALIAS_PATTERN.fullmatch(alias):
         errors["alias"] = "别名只能包含字母、数字、_ . -"
-    username = str(payload.get("username", "")).strip()
-    if not username:
-        errors["username"] = "用户名不能为空"
-    host = str(payload.get("host", "")).strip()
-    if not host:
-        errors["host"] = "主机不能为空"
-    try:
-        port = int(payload.get("port", 22))
-        if not 1 <= port <= 65535:
-            raise ValueError
-    except (TypeError, ValueError):
-        port = 22
-        errors["port"] = "端口必须是 1-65535 的整数"
-    workdir = str(payload.get("workdir", "") or "")
-    return errors, username, host, port, workdir
-
-
-def _remote_settings_errors(payload: dict):
-    errors: dict[str, str] = {}
-    ssh_path = str(payload.get("ssh_path", "") or "").strip()
-    if ssh_path and not Path(ssh_path).is_file():
-        errors["ssh_path"] = f"ssh 可执行文件不存在：{ssh_path}"
-    key_path = str(payload.get("key_path", "") or "").strip()
-    if key_path and not Path(key_path).is_file():
-        errors["key_path"] = f"私钥文件不存在：{key_path}"
+    mode = str(payload.get("mode", "auto")).strip()
+    if mode not in ("auto", "forward", "reverse"):
+        errors["mode"] = "模式必须是 auto / forward / reverse"
+    url = str(payload.get("url", "") or "").strip()
+    if url:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            errors["url"] = "URL 必须是 https:// 开头"
     policy = str(payload.get("host_key_policy", "accept-new")).strip()
-    if policy not in _REMOTE_HOST_KEY_POLICIES:
-        errors["host_key_policy"] = "主机密钥策略无效"
-    try:
-        timeout = int(payload.get("connect_timeout", 10))
-        if not 1 <= timeout <= 300:
-            raise ValueError
-    except (TypeError, ValueError):
-        timeout = 10
-        errors["connect_timeout"] = "连接超时必须是 1-300 的整数"
-    return errors, ssh_path, key_path, policy, timeout
+    if policy not in ("accept-new", "pinned"):
+        errors["host_key_policy"] = "主机密钥策略必须是 accept-new 或 pinned"
+    fingerprint = str(payload.get("cert_fingerprint", "") or "").strip()
+    if fingerprint and not re.fullmatch(r"[0-9a-fA-F]{64}", fingerprint):
+        errors["cert_fingerprint"] = "证书指纹必须是 64 位十六进制字符串"
+    return errors
 
 
 def _secure_cookie_enabled(allow_insecure_remote_login: bool = False) -> bool:

@@ -11,7 +11,15 @@ from pathlib import Path
 import yaml
 from waitress import serve
 
+from .satellite_crypto import (
+    certificate_fingerprint,
+    ensure_certificate,
+    server_ssl_context,
+)
+from .satellite_master import SatelliteManager, create_satellite_master_app
+from .satellite_server import serve_ssl
 from .webapp import create_app
+
 
 DEFAULT_CONFIG_PATH = Path("var") / "config.example.yaml"
 
@@ -32,6 +40,43 @@ def load_config_file(path: Path) -> dict:
     return data
 
 
+def _start_satellite_service(config: dict, database_path: Path):
+    """Start the satellite-facing HTTPS service in a background thread."""
+    satellite_config = config.get("satellite") or {}
+    if not satellite_config.get("enabled", False):
+        return None
+    from .database import StateDatabase
+
+    database = StateDatabase(database_path)
+    manager = SatelliteManager(
+        database,
+        timeout=float(satellite_config.get("timeout", 15)),
+        poll_interval=float(satellite_config.get("poll_interval", 1.0)),
+    )
+    cert = Path(satellite_config.get("cert", "var/satellite/cert.pem"))
+    key = Path(satellite_config.get("key", "var/satellite/key.pem"))
+    ensure_certificate(cert, key, common_name="dagrunner-satellite-master")
+    app = create_satellite_master_app(manager)
+    host = str(satellite_config.get("host", "0.0.0.0"))
+    port = int(satellite_config.get("port", 7120))
+    threads = int(satellite_config.get("threads", 16))
+    context = server_ssl_context(cert, key)
+    try:
+        serve_ssl(
+            app, host=host, port=port, threads=threads, ssl_context=context
+        )
+    except OSError as exc:
+        raise SystemExit(f"卫星服务端口绑定失败 {host}:{port}: {exc}") from exc
+    manager.start()
+    print(f"dagrunner satellite service listening on https://{host}:{port}")
+    return {
+        "manager": manager,
+        "url": str(satellite_config.get("public_url", "") or ""),
+        "port": port,
+        "fingerprint": certificate_fingerprint(cert),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DAG Workflow Runner Web Service")
     parser.add_argument(
@@ -50,12 +95,17 @@ def main(argv: list[str] | None = None) -> int:
     logs = Path(config.get("logs", "var/logs"))
     notifier_config = config.get("notifier_config")
     allow_insecure_remote_login = bool(config.get("allow_insecure_remote_login", False))
+    satellite = _start_satellite_service(config, db)
     app = create_app(
         database_path=db,
         logs_path=logs,
         allow_insecure_remote_login=allow_insecure_remote_login,
         language=language,
         notifier_config_path=Path(notifier_config) if notifier_config else None,
+        satellite_manager=satellite["manager"] if satellite else None,
+        satellite_url=satellite["url"] if satellite else "",
+        satellite_port=satellite["port"] if satellite else 7120,
+        satellite_fingerprint=satellite["fingerprint"] if satellite else "",
     )
     _install_signal_handlers(app)
     print(f"dag-runner service listening on http://{host}:{port}")
@@ -74,7 +124,7 @@ def _install_signal_handlers(app) -> None:
     """
     executions = app.extensions["execution_service"]
     schedules = app.extensions["schedule_service"]
-    remote_monitor = app.extensions["remote_monitor"]
+    satellite_manager = app.extensions.get("satellite_manager")
 
     def _handle(signum, frame):
         sys.stdout.flush()
@@ -84,11 +134,15 @@ def _install_signal_handlers(app) -> None:
         except Exception:
             pass
         # Give running tasks a moment to terminate their child processes so a
-        # lingering ssh/command does not keep the terminal attached.
+        # lingering command does not keep the terminal attached.
         time.sleep(0.5)
-        for shutdown in (schedules.shutdown, remote_monitor.shutdown):
+        try:
+            schedules.shutdown()
+        except Exception:
+            pass
+        if satellite_manager is not None:
             try:
-                shutdown()
+                satellite_manager.shutdown()
             except Exception:
                 pass
         os._exit(0)

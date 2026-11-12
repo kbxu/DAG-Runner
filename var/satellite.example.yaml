@@ -1,0 +1,28 @@
+# DAG Runner 卫星版启动配置示例。
+# 启动：python -m dagrunner.satellite --config var/satellite.yaml
+# token 由主程序 Web 控制台的“卫星”页面生成，下载配置时会自动填入。
+satellite:
+  # 卫星节点别名，必须与主程序上配置的一致
+  alias: sat-01
+  # 主程序卫星服务地址（HTTPS）
+  master_url: https://master.example.com:7120
+  # 与主程序共享的令牌，留空可临时启动，但必须与主程序配置一致
+  token: ""
+  # auto：优先反向连接主程序，失败则监听前向连接
+  # forward：仅监听，等待主程序连接（仅主程序能访问卫星端口）
+  # reverse：仅主动连接主程序（仅卫星能访问主程序端口）
+  mode: auto
+  listen_host: 0.0.0.0
+  listen_port: 7121
+  # 首次启动自动生成自签名证书
+  cert: var/satellite/cert.pem
+  key: var/satellite/key.pem
+  host_key_policy: accept-new
+  # 固定主程序证书指纹（可选，64 位十六进制）；留空使用 accept-new
+  master_cert_fingerprint: ""
+  # 任务默认工作目录，留空使用进程当前目录
+  workdir: ""
+  log_dir: var/satellite-logs
+  heartbeat_interval: 30
+  probe_interval: 60
+  timeout: 15

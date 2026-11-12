@@ -10,3 +10,19 @@ threads: 8
 language: zh-CN
 notifier_config: null
 allow_insecure_remote_login: false
+
+# 卫星版服务（主程序侧，HTTPS）。启用后监听独立端口，接收卫星版注册并下发任务。
+# 三种网络拓扑：双向可达用反向模式；仅主程序能访问卫星用前向模式；
+# 仅卫星能访问主程序用反向模式。卫星版会根据 mode 自动选择。
+satellite:
+  enabled: false
+  host: 0.0.0.0
+  port: 7120
+  threads: 16
+  # 首次启动自动生成自签名证书
+  cert: var/satellite/cert.pem
+  key: var/satellite/key.pem
+  # 卫星版回连主程序时使用的地址；留空则按 Web 请求的 Host 推导
+  public_url: ""
+  timeout: 15
+  poll_interval: 1.0

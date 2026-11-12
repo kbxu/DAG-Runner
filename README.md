@@ -30,6 +30,7 @@ flowchart LR
 - **集中管理**：通过 Web 页面导入和编辑工作流、配置定时、查看运行 DAG 与任务日志
 - **登录保护**：账号密码登录、36 小时会话，以及连续失败 3 次后按 IP 封禁 10 分钟
 - **跨平台**：Linux 使用 Bash，Windows 使用 PowerShell，支持在 `setup` 中激活 Conda 环境
+- **卫星节点**：在其它机器部署卫星版后端，主程序加密下发命令；支持前向/反向两种连接模式，覆盖双向、仅主→星、仅星→主三种网络拓扑
 
 ## 快速开始
 
@@ -212,15 +213,61 @@ python -m dagrunner --workflow workflow_a1b2c3d4e5f6 --from transform_data
 python -m dagrunner --show-log --run-id <run_id> --task transform_data
 ```
 
+## 卫星节点（跨机器执行）
+
+卫星版是部署在目标机器上的独立后端，接收主程序下发的命令并在本机执行：Linux 默认 bash，Windows 默认 cmd。主程序与卫星版之间使用 HTTPS 加密通信，并通过共享令牌做挑战-响应认证；首次连接自动固定证书指纹，也可以切换到 pinned 模式填写指纹。
+
+三种网络拓扑都支持：
+
+| 拓扑 | 可达性 | 采用模式 | 连接发起方 |
+| --- | --- | --- | --- |
+| 1 | 双向可达 | 反向（优先） | 卫星版 |
+| 2 | 仅主程序 → 卫星 | 前向 | 主程序 |
+| 3 | 仅卫星 → 主程序 | 反向 | 卫星版 |
+
+### 1. 主程序启用卫星服务
+
+在 `var/config.yaml` 中启用（首次启动自动生成自签名证书）：
+
+```yaml
+satellite:
+  enabled: true
+  host: 0.0.0.0
+  port: 7120
+  cert: var/satellite/cert.pem
+  key: var/satellite/key.pem
+  # 卫星版回连主程序的地址，留空按 Web 请求 Host 推导
+  public_url: ""
+```
+
+### 2. 在 Web 控制台添加卫星节点
+
+登录后点击顶部「卫星」按钮，新增卫星节点：填写别名、模式、URL（前向模式）和共享令牌（留空自动生成），点击「检查连通」验证配置，然后「下载配置」得到可直接下发的 `satellite.yaml`。
+
+### 3. 在目标机器启动卫星版
+
+```bash
+python -m dagrunner.satellite --config var/satellite.yaml
+```
+
+把工作流的「运行位置」设置为该卫星别名，任务就会在卫星机器上执行，日志实时回传到主程序。卫星版默认 `auto` 模式：能连上主程序就用反向模式，连不上就监听前向连接，网络恢复后自动切换。
+
 ## 项目结构
 
 ```text
 dagrunner/        核心代码、Web 页面和静态资源
+  satellite.py          卫星版启动入口
+  satellite_agent.py    卫星版进程与执行器
+  satellite_master.py   主程序侧卫星管理器与 7120 端点
+  satellite_protocol.py 协议类型、任务规范与脚本构建
+  satellite_crypto.py   证书、TLS、nonce 与 HMAC 认证
+  satellite_http.py     卫星协议 HTTPS 客户端
+  satellite_server.py   waitress + 进程内 TLS 终结
 demo/tasks/       可安全运行的虚构示例任务脚本
 demo/examples/    ds_*.json、ts_*.xml 和 dagr_*.yaml 公开示例
 templates/        Bash 和 PowerShell 生产 setup 模板
 data/             私有迁移数据，Git 忽略
-var/              SQLite、日志和本地运行数据，Git 忽略
+var/              SQLite、日志、卫星证书和本地运行数据，Git 忽略
 docs/images/      README 首页图片
 ```
 

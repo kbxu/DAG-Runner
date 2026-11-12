@@ -31,6 +31,7 @@ flowchart LR
 - **Centralized management:** import and edit workflows, configure schedules, inspect DAGs, and read task logs in the web console
 - **Login protection:** username/password login, 36-hour sessions, and a 10-minute IP block after three consecutive failures
 - **Cross-platform:** Bash on Linux and PowerShell on Windows, including Conda activation in workflow `setup`
+- **Satellite nodes:** deploy the satellite agent on other machines and dispatch commands over an encrypted channel; forward and reverse transport cover bidirectional, master-to-satellite, and satellite-to-master networks
 
 ## Quick start
 
@@ -196,15 +197,61 @@ python -m dagrunner --workflow workflow_a1b2c3d4e5f6 --from transform_data
 python -m dagrunner --show-log --run-id <run_id> --task transform_data
 ```
 
+## Satellite nodes (cross-machine execution)
+
+The satellite agent is a standalone backend deployed on a target machine. It receives commands from the master and runs them locally: bash on Linux and cmd on Windows by default. The master and satellites communicate over HTTPS and authenticate with a shared-token challenge-response; the certificate fingerprint is pinned automatically on first contact, or fill it in pinned mode.
+
+All three network topologies are supported:
+
+| Topology | Reachability | Transport | Connector |
+| --- | --- | --- | --- |
+| 1 | Bidirectional | reverse (preferred) | satellite |
+| 2 | Master to satellite only | forward | master |
+| 3 | Satellite to master only | reverse | satellite |
+
+### 1. Enable the satellite service on the master
+
+Enable it in `var/config.yaml` (a self-signed certificate is generated on first start):
+
+```yaml
+satellite:
+  enabled: true
+  host: 0.0.0.0
+  port: 7120
+  cert: var/satellite/cert.pem
+  key: var/satellite/key.pem
+  # Address satellites use to reach the master; derived from the web Host when empty
+  public_url: ""
+```
+
+### 2. Add a satellite node in the web console
+
+After signing in, click the **Satellite** button at the top, add a node with an alias, mode, URL (forward mode), and shared token (leave blank to generate one), then use **Test connection** to validate the configuration and **Download config** to get a ready-to-use `satellite.yaml`.
+
+### 3. Start the agent on the target machine
+
+```bash
+python -m dagrunner.satellite --config var/satellite.yaml
+```
+
+Set a workflow's run location to the satellite alias to execute its tasks on that machine; logs stream back to the master in near real time. The default `auto` mode prefers the reverse channel and falls back to listening for forward connections, switching automatically when the network changes.
+
 ## Project structure
 
 ```text
 dagrunner/        Core code, web templates, and static assets
+  satellite.py          Satellite agent entry point
+  satellite_agent.py    Satellite process and job executor
+  satellite_master.py   Master-side satellite manager and port 7120 endpoints
+  satellite_protocol.py Protocol types, job specs, and script building
+  satellite_crypto.py   Certificates, TLS, nonce, and HMAC authentication
+  satellite_http.py     HTTPS client for the satellite protocol
+  satellite_server.py   waitress plus in-process TLS termination
 demo/tasks/       Safe, fictional example task scripts
 demo/examples/    Public ds_*.json, ts_*.xml, and dagr_*.yaml examples
 templates/        Production Bash and PowerShell setup templates
 data/             Private migration data, ignored by Git
-var/              SQLite, logs, and local runtime data, ignored by Git
+var/              SQLite, logs, satellite certificates, and local runtime data, ignored by Git
 docs/images/      README images
 ```
 

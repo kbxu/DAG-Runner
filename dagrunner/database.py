@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from .remote import RemoteConfig, RemoteSettings
+from .satellite_protocol import SatelliteConfig
 
 
 TASK_STATUSES = {"PENDING", "RUNNING", "SUCCESS", "FAILED", "SKIPPED"}
@@ -28,6 +28,24 @@ def _as_local_time(value: str) -> str:
     if local.microsecond:
         return local.isoformat(timespec="milliseconds")
     return local.isoformat(timespec="seconds")
+
+
+def _satellite_config(row: sqlite3.Row) -> SatelliteConfig:
+    return SatelliteConfig(
+        alias=row["alias"],
+        name=row["name"],
+        mode=row["mode"],
+        url=row["url"],
+        token=row["token"],
+        host_key_policy=row["host_key_policy"],
+        cert_fingerprint=row["cert_fingerprint"],
+        status=row["status"],
+        last_seen=row["last_seen"],
+        last_error=row["last_error"],
+        platform=row["platform"],
+        hostname=row["hostname"],
+        agent_version=row["agent_version"],
+    )
 
 
 class StateDatabase:
@@ -137,31 +155,42 @@ class StateDatabase:
                     created_time TEXT NOT NULL,
                     updated_time TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS remotes (
+                CREATE TABLE IF NOT EXISTS satellites (
                     alias TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
-                    host TEXT NOT NULL,
-                    port INTEGER NOT NULL DEFAULT 22,
-                    workdir TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL DEFAULT '',
+                    mode TEXT NOT NULL DEFAULT 'auto'
+                        CHECK (mode IN ('auto','forward','reverse')),
+                    url TEXT NOT NULL DEFAULT '',
+                    token TEXT NOT NULL,
+                    host_key_policy TEXT NOT NULL DEFAULT 'accept-new',
+                    cert_fingerprint TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'offline'
+                        CHECK (status IN ('offline','online','error')),
+                    last_seen TEXT,
+                    last_error TEXT,
+                    platform TEXT NOT NULL DEFAULT '',
+                    hostname TEXT NOT NULL DEFAULT '',
+                    agent_version TEXT NOT NULL DEFAULT '',
                     created_time TEXT NOT NULL,
                     updated_time TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS remote_status (
-                    alias TEXT PRIMARY KEY,
-                    reachable INTEGER NOT NULL DEFAULT 0,
-                    last_check TEXT,
-                    latency_ms INTEGER,
+                CREATE TABLE IF NOT EXISTS satellite_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    satellite_alias TEXT NOT NULL,
+                    workflow_name TEXT NOT NULL DEFAULT '',
+                    run_id TEXT NOT NULL DEFAULT '',
+                    task_name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','running','success','failed','cancelled','error')),
+                    exit_code INTEGER,
                     error_message TEXT,
-                    updated_time TEXT NOT NULL,
-                    FOREIGN KEY (alias) REFERENCES remotes(alias) ON DELETE CASCADE
+                    log_file TEXT NOT NULL DEFAULT '',
+                    created_time TEXT NOT NULL,
+                    started_time TEXT,
+                    finished_time TEXT
                 );
-                CREATE TABLE IF NOT EXISTS remote_settings (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    ssh_path TEXT NOT NULL DEFAULT '',
-                    key_path TEXT NOT NULL DEFAULT '',
-                    host_key_policy TEXT NOT NULL DEFAULT 'accept-new',
-                    connect_timeout INTEGER NOT NULL DEFAULT 10
-                );
+                CREATE INDEX IF NOT EXISTS idx_satellite_jobs_alias_time
+                    ON satellite_jobs(satellite_alias, created_time);
                 """
             )
             self._ensure_column(
@@ -198,8 +227,15 @@ class StateDatabase:
             self._ensure_column(
                 connection, "task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0"
             )
+            self._drop_legacy_tables(connection)
             self._normalize_timestamps(connection)
             connection.execute("PRAGMA optimize")
+
+    @staticmethod
+    def _drop_legacy_tables(connection: sqlite3.Connection) -> None:
+        """Remove tables from the retired SSH remote feature."""
+        for table in ("remote_status", "remote_settings", "remotes"):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
 
     def upsert_user(self, username: str, password_hash: str) -> None:
         now = local_now()
@@ -737,140 +773,7 @@ class StateDatabase:
                 "DELETE FROM schedules WHERE workflow_name = ?", (workflow_name,)
             )
 
-    def get_remote_settings(self) -> RemoteSettings:
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM remote_settings WHERE id = 1"
-            ).fetchone()
-        if row is None:
-            return RemoteSettings()
-        return RemoteSettings(
-            ssh_path=row["ssh_path"],
-            key_path=row["key_path"],
-            host_key_policy=row["host_key_policy"],
-            connect_timeout=row["connect_timeout"],
-        )
-
-    def update_remote_settings(self, settings: RemoteSettings) -> None:
-        with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO remote_settings
-                        (id, ssh_path, key_path, host_key_policy, connect_timeout)
-                    VALUES (1, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        ssh_path = excluded.ssh_path,
-                        key_path = excluded.key_path,
-                        host_key_policy = excluded.host_key_policy,
-                        connect_timeout = excluded.connect_timeout""",
-                (
-                    settings.ssh_path,
-                    settings.key_path,
-                    settings.host_key_policy,
-                    settings.connect_timeout,
-                ),
-            )
-
-    def upsert_remote(self, config: RemoteConfig) -> None:
-        now = local_now()
-        with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO remotes
-                        (alias, username, host, port, workdir, created_time, updated_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(alias) DO UPDATE SET
-                        username = excluded.username,
-                        host = excluded.host,
-                        port = excluded.port,
-                        workdir = excluded.workdir,
-                        updated_time = excluded.updated_time""",
-                (
-                    config.alias,
-                    config.username,
-                    config.host,
-                    config.port,
-                    config.workdir,
-                    now,
-                    now,
-                ),
-            )
-
-    def list_remotes(self) -> list[RemoteConfig]:
-        settings = self.get_remote_settings()
-        with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM remotes ORDER BY alias"
-            ).fetchall()
-        return [
-            RemoteConfig(
-                alias=row["alias"],
-                username=row["username"],
-                host=row["host"],
-                port=row["port"],
-                workdir=row["workdir"],
-                ssh_path=settings.ssh_path,
-                key_path=settings.key_path,
-                host_key_policy=settings.host_key_policy,
-                connect_timeout=settings.connect_timeout,
-            )
-            for row in rows
-        ]
-
-    def get_remote(self, alias: str) -> RemoteConfig | None:
-        settings = self.get_remote_settings()
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM remotes WHERE alias = ?", (alias,)
-            ).fetchone()
-        if row is None:
-            return None
-        return RemoteConfig(
-            alias=row["alias"],
-            username=row["username"],
-            host=row["host"],
-            port=row["port"],
-            workdir=row["workdir"],
-            ssh_path=settings.ssh_path,
-            key_path=settings.key_path,
-            host_key_policy=settings.host_key_policy,
-            connect_timeout=settings.connect_timeout,
-        )
-
-    def delete_remote(self, alias: str) -> None:
-        with self.connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM remotes WHERE alias = ?", (alias,)
-            )
-            if cursor.rowcount != 1:
-                raise KeyError(f"remote not found: {alias}")
-
-    def set_remote_status(
-        self,
-        alias: str,
-        reachable: bool,
-        error_message: str | None,
-        latency_ms: int | None,
-    ) -> None:
-        now = local_now()
-        with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO remote_status
-                        (alias, reachable, last_check, latency_ms, error_message, updated_time)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(alias) DO UPDATE SET
-                        reachable = excluded.reachable,
-                        last_check = excluded.last_check,
-                        latency_ms = excluded.latency_ms,
-                        error_message = excluded.error_message,
-                        updated_time = excluded.updated_time""",
-                (alias, int(reachable), now, latency_ms, error_message, now),
-            )
-
-    def list_remote_status(self) -> dict[str, sqlite3.Row]:
-        with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM remote_status").fetchall()
-        return {row["alias"]: row for row in rows}
-
-    def workflows_using_remote(self, alias: str) -> list[str]:
+    def workflows_using_runner(self, alias: str) -> list[str]:
         with self.connect() as connection:
             return [
                 row[0]
@@ -888,6 +791,192 @@ class StateDatabase:
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"workflow not found: {workflow_key}")
+
+    # ------------------------------------------------------------------
+    # Satellites
+    # ------------------------------------------------------------------
+
+    def upsert_satellite(self, config: SatelliteConfig) -> None:
+        now = local_now()
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO satellites
+                        (alias, name, mode, url, token, host_key_policy, cert_fingerprint,
+                         status, last_seen, last_error, platform, hostname, agent_version,
+                         created_time, updated_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'offline', NULL, NULL, '', '', '', ?, ?)
+                    ON CONFLICT(alias) DO UPDATE SET
+                        name = excluded.name,
+                        mode = excluded.mode,
+                        url = excluded.url,
+                        token = excluded.token,
+                        host_key_policy = excluded.host_key_policy,
+                        cert_fingerprint = excluded.cert_fingerprint,
+                        status = 'offline',
+                        last_seen = NULL,
+                        last_error = NULL,
+                        platform = '',
+                        hostname = '',
+                        agent_version = '',
+                        updated_time = excluded.updated_time""",
+                (
+                    config.alias,
+                    config.name,
+                    config.mode,
+                    config.url,
+                    config.token,
+                    config.host_key_policy,
+                    config.cert_fingerprint,
+                    now,
+                    now,
+                ),
+            )
+
+    def list_satellites(self) -> list[SatelliteConfig]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM satellites ORDER BY alias"
+            ).fetchall()
+        return [_satellite_config(row) for row in rows]
+
+    def get_satellite(self, alias: str) -> SatelliteConfig | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM satellites WHERE alias = ?", (alias,)
+            ).fetchone()
+        return _satellite_config(row) if row is not None else None
+
+    def delete_satellite(self, alias: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM satellites WHERE alias = ?", (alias,)
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"satellite not found: {alias}")
+
+    def is_satellite(self, alias: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM satellites WHERE alias = ?", (alias,)
+            ).fetchone()
+        return row is not None
+
+    def set_satellite_status(
+        self,
+        alias: str,
+        status: str,
+        *,
+        last_error: str | None = None,
+        platform: str | None = None,
+        hostname: str | None = None,
+        agent_version: str | None = None,
+        last_seen: str | None = None,
+    ) -> None:
+        now = local_now()
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE satellites
+                    SET status = ?,
+                        last_seen = COALESCE(?, last_seen),
+                        last_error = ?,
+                        platform = COALESCE(?, platform),
+                        hostname = COALESCE(?, hostname),
+                        agent_version = COALESCE(?, agent_version),
+                        updated_time = ?
+                    WHERE alias = ?""",
+                (
+                    status,
+                    last_seen or (now if status == "online" else None),
+                    last_error,
+                    platform,
+                    hostname,
+                    agent_version,
+                    now,
+                    alias,
+                ),
+            )
+
+    def remember_satellite_fingerprint(self, alias: str, fingerprint: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE satellites SET cert_fingerprint = ?, updated_time = ? "
+                "WHERE alias = ?",
+                (fingerprint, local_now(), alias),
+            )
+
+    def create_satellite_job(
+        self,
+        job_id: str,
+        satellite_alias: str,
+        workflow_name: str,
+        run_id: str,
+        task_name: str,
+        log_file: str,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO satellite_jobs
+                        (job_id, satellite_alias, workflow_name, run_id, task_name,
+                         status, log_file, created_time)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (
+                    job_id,
+                    satellite_alias,
+                    workflow_name,
+                    run_id,
+                    task_name,
+                    log_file,
+                    local_now(),
+                ),
+            )
+
+    def get_satellite_job(self, job_id: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM satellite_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+
+    def update_satellite_job(self, job_id: str, **fields: object) -> None:
+        if not fields:
+            return
+        allowed = {
+            "status",
+            "exit_code",
+            "error_message",
+            "started_time",
+            "finished_time",
+            "log_file",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unknown satellite job field(s): {', '.join(sorted(unknown))}")
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        values: list[object] = list(fields.values())
+        if "status" in fields and fields["status"] in {"success", "failed", "cancelled", "error"}:
+            assignments += ", finished_time = ?"
+            values.append(local_now())
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE satellite_jobs SET {assignments} WHERE job_id = ?",
+                (*values, job_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"satellite job not found: {job_id}")
+
+    def list_satellite_jobs(
+        self, satellite_alias: str = "", limit: int = 50
+    ) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            if satellite_alias:
+                return connection.execute(
+                    "SELECT * FROM satellite_jobs WHERE satellite_alias = ? "
+                    "ORDER BY created_time DESC LIMIT ?",
+                    (satellite_alias, limit),
+                ).fetchall()
+            return connection.execute(
+                "SELECT * FROM satellite_jobs ORDER BY created_time DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
 
     def mark_orphaned(self, workflow_name: str) -> int:
         """Close runs left RUNNING after a process or host crash (call while holding lock)."""

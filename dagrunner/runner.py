@@ -37,7 +37,7 @@ class WorkflowRunner:
         executor: TaskExecutor | None = None,
         notifier: Notifier | None = None,
         max_parallel_tasks: int = 4,
-        remote_executor: TaskExecutor | None = None,
+        satellite_executor: TaskExecutor | None = None,
     ):
         if max_parallel_tasks <= 0:
             raise ValueError("max_parallel_tasks must be positive")
@@ -46,7 +46,7 @@ class WorkflowRunner:
         self.executor = executor or TaskExecutor()
         self.notifier = notifier or NullNotifier()
         self.max_parallel_tasks = max_parallel_tasks
-        self.remote_executor = remote_executor
+        self.satellite_executor = satellite_executor
         self._runner_alias = "local"
 
     def run(
@@ -208,13 +208,14 @@ class WorkflowRunner:
         reused: set[str] | None = None,
     ) -> None:
         reused = reused or set()
-        use_remote = (
-            self._runner_alias not in ("", "local") and self.remote_executor is not None
+        use_satellite = (
+            self._runner_alias not in ("", "local")
+            and self.satellite_executor is not None
         )
-        executor = self.remote_executor if use_remote else self.executor
+        executor = self.satellite_executor if use_satellite else self.executor
         workflow_setup = (
-            workflow.setup_for_platform("linux")
-            if use_remote
+            workflow.setup_for_platform(_executor_platform(self.satellite_executor))
+            if use_satellite
             else workflow.setup_for_current_platform()
         )
         order_index = {name: index for index, name in enumerate(order)}
@@ -310,6 +311,8 @@ class WorkflowRunner:
                             cancel_event=cancel_event,
                             workflow_timeout_event=workflow_timeout_event,
                             workflow_timeout=workflow.timeout,
+                            run_id=run_id,
+                            workflow_name=workflow.name,
                         )
                         running[future] = (task_name, log_file)
 
@@ -545,6 +548,12 @@ class WorkflowRunner:
             )
 
 
+def _executor_platform(executor: TaskExecutor | None) -> str:
+    """Return the platform used to pick a workflow setup script."""
+    platform = getattr(executor, "platform", "linux")
+    return "windows" if platform == "windows" else "linux"
+
+
 def _decode_scope(raw: str | None, order: list[str]) -> list[str]:
     """Read the recorded scope of a run, keeping only tasks the workflow still has."""
     if not raw:
@@ -610,14 +619,16 @@ def main(argv: list[str] | None = None) -> int:
             description_override=stored["name"],
         )
         runner_alias = stored["runner"] or "local"
-        remote_executor = None
+        satellite_executor = None
         if runner_alias != "local":
-            from .remote import RemoteTaskExecutor
+            if not database.is_satellite(runner_alias):
+                raise WorkflowError(f"卫星不存在：{runner_alias!r}")
+            from .satellite_executor import SatelliteTaskExecutor
+            from .satellite_master import SatelliteManager
 
-            config = database.get_remote(runner_alias)
-            if config is None:
-                raise WorkflowError(f"remote {runner_alias!r} not found")
-            remote_executor = RemoteTaskExecutor(config)
+            satellite_executor = SatelliteTaskExecutor(
+                SatelliteManager(database), runner_alias
+            )
         lock_path = args.db.resolve().parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             recovered = database.mark_orphaned(workflow.name)
@@ -630,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
                 database,
                 TaskLogManager(args.logs),
                 notifier=notifier,
-                remote_executor=remote_executor,
+                satellite_executor=satellite_executor,
             ).run(workflow, args.from_task, runner_alias=runner_alias)
         print(f"workflow={workflow.name} run_id={run_id} status={status}")
         return 0 if status == "SUCCESS" else 1

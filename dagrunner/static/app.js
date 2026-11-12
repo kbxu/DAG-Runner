@@ -533,162 +533,168 @@ async function saveNotifierSettings() {
   } catch(e) { toast(e.message,true); }
 }
 
-let remoteConfigs = [];
-let remoteSettings = {ssh_path:"", key_path:"", host_key_policy:"accept-new", connect_timeout:10};
-let remoteDefaults = {ssh_path:"", key_path:""};
+let satelliteConfigs = [];
 
-function renderRemoteStatus(remotes) {
-  remoteConfigs = remotes || [];
-  const dot = document.getElementById("remoteStatusDot");
+function renderSatelliteStatus(satellites) {
+  satelliteConfigs = satellites || [];
+  const dot = document.getElementById("satelliteStatusDot");
   if (!dot) return;
-  if (!remoteConfigs.length) { dot.className = "remote-dot none"; dot.title = t("未配置远程"); return; }
-  const reachable = remoteConfigs.filter(r => r.status?.reachable).length;
-  dot.className = "remote-dot " + (reachable === remoteConfigs.length ? "ok" : reachable === 0 ? "bad" : "warn");
-  dot.title = t("{ok}/{total} 台远程可达", {ok: reachable, total: remoteConfigs.length});
+  if (!satelliteConfigs.length) { dot.className = "satellite-dot none"; dot.title = t("未配置卫星"); return; }
+  const online = satelliteConfigs.filter(s => s.status?.status === "online").length;
+  dot.className = "satellite-dot " + (online === satelliteConfigs.length ? "ok" : online === 0 ? "bad" : "warn");
+  dot.title = t("{ok}/{total} 台卫星在线", {ok: online, total: satelliteConfigs.length});
 }
 
-async function openRemoteSettings() {
+async function openSatelliteSettings() {
   try {
-    const data = await api("/api/remotes");
-    remoteConfigs = data.remotes || [];
-    remoteSettings = data.settings || remoteSettings;
-    remoteDefaults = {ssh_path: remoteSettings.detected_ssh_path || "", key_path: remoteSettings.detected_key_path || ""};
-    renderRemoteSettings();
+    const data = await api("/api/satellites");
+    satelliteConfigs = data.satellites || [];
+    renderSatelliteSettings();
   } catch(e) { toast(e.message, true); }
 }
 
-function renderRemoteSettings() {
-  const policyOption = (value, label) => `<option value="${value}" ${remoteSettings.host_key_policy===value?"selected":""}>${esc(label)}</option>`;
-  const panels = remoteConfigs.map(remote => remotePanelHtml(remote, false)).join("");
-  openModal(t("远程执行配置"), `<div class="remote-editor">
-    <div class="remote-global">
-      <div class="remote-global-head"><strong>${t("全局设置")}</strong><span class="form-hint">${t("远程仅支持 Linux，使用私钥认证，不支持密码。")}</span></div>
-      <div class="remote-form-grid">
-        <label class="remote-wide">${t("本地 ssh 路径")}<input id="remoteSshPath" value="${esc(remoteSettings.ssh_path)}" placeholder="${esc(remoteDefaults.ssh_path ? t("已探测：{path}",{path:remoteDefaults.ssh_path}) : t("留空使用系统 PATH 中的 ssh"))}"></label>
-        <label class="remote-wide">${t("私钥路径")}<input id="remoteKeyPath" value="${esc(remoteSettings.key_path)}" placeholder="${esc(remoteDefaults.key_path ? t("已探测：{path}",{path:remoteDefaults.key_path}) : t("留空使用默认密钥"))}"></label>
-        <label>${t("主机密钥策略")}<select id="remoteHostKeyPolicy" class="ui-select">${policyOption("accept-new","accept-new（推荐）")}${policyOption("yes","yes（自动接受，不安全）")}${policyOption("no","no（仅已知主机）")}${policyOption("ask","ask（交互确认）")}</select></label>
-        <label>${t("连接超时（秒）")}<input id="remoteConnectTimeout" type="number" min="1" max="300" value="${esc(remoteSettings.connect_timeout)}"></label>
-      </div>
-      <button class="button" onclick="saveRemoteSettings()">${t("保存全局设置")}</button>
+function satelliteStatusBadge(satellite) {
+  const status = satellite.status || {};
+  const state = status.status === "online" ? "online" : status.status === "error" ? "error" : "offline";
+  const label = state === "online" ? t("在线") : state === "error" ? t("异常") : t("离线");
+  return `<span class="satellite-status ${state}">${label}</span>`;
+}
+
+function satellitePanelHtml(satellite, isNew) {
+  const s = satellite || {alias:"", name:"", mode:"auto", url:"", host_key_policy:"accept-new", cert_fingerprint:"", has_token:false, status:{}};
+  const status = s.status || {};
+  const badge = isNew ? `<span class="satellite-status">${t("未测试")}</span>` : satelliteStatusBadge(s);
+  const meta = isNew ? "" : `<span class="satellite-meta">${esc(status.platform || "")}${status.hostname ? " · " + esc(status.hostname) : ""}${status.agent_version ? " · " + esc(status.agent_version) : ""}${status.last_seen ? " · " + esc(status.last_seen) : ""}</span>`;
+  const buttons = isNew
+    ? `<button class="button ghost" type="button" onclick="testSatellitePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveSatellitePanel(this)">${t("确认")}</button><button class="button ghost" type="button" onclick="cancelSatellitePanel(this)">${t("取消")}</button>`
+    : `<button class="button ghost" type="button" onclick="testSatellitePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveSatellitePanel(this)">${t("保存")}</button><button class="button ghost" type="button" onclick="downloadSatelliteConfig(this)">${t("下载配置")}</button><button class="button danger" type="button" onclick="deleteSatellitePanel(this)">${t("删除")}</button>`;
+  return `<div class="satellite-panel${isNew ? " satellite-panel-new" : ""}">
+    <div class="satellite-panel-head"><input class="satellite-alias" value="${esc(s.alias)}" placeholder="${t("别名（唯一）")}" ${isNew ? "" : "readonly"}>${badge}${meta}</div>
+    <div class="satellite-form-grid">
+      <label>${t("名称")}<input class="satellite-name" value="${esc(s.name)}" placeholder="${t("可选")}"></label>
+      <label>${t("模式")}<select class="satellite-mode ui-select">
+        <option value="auto"${s.mode==="auto"?" selected":""}>${t("自动（推荐）")}</option>
+        <option value="forward"${s.mode==="forward"?" selected":""}>${t("前向（主程序连接卫星）")}</option>
+        <option value="reverse"${s.mode==="reverse"?" selected":""}>${t("反向（卫星连接主程序）")}</option>
+      </select></label>
+      <label class="satellite-wide">${t("卫星 URL（前向模式）")}<input class="satellite-url" value="${esc(s.url)}" placeholder="https://192.168.1.10:7121"></label>
+      <label class="satellite-wide">${t("共享令牌")}<input class="satellite-token" value="" placeholder="${s.has_token ? t("已保存，留空保持不变") : t("留空自动生成")}"></label>
+      <label>${t("证书信任")}<select class="satellite-policy ui-select">
+        <option value="accept-new"${s.host_key_policy!=="pinned"?" selected":""}>accept-new（${t("自动固定指纹")}）</option>
+        <option value="pinned"${s.host_key_policy==="pinned"?" selected":""}>pinned（${t("校验固定指纹")}）</option>
+      </select></label>
+      <label class="satellite-wide">${t("证书指纹（pinned 时填写）")}<input class="satellite-fingerprint" value="${esc(s.cert_fingerprint)}" placeholder="64 位十六进制"></label>
     </div>
-    <div class="remote-list-head"><strong>${t("远程机器")}</strong><button class="button ghost" type="button" onclick="addRemotePanel()">＋ ${t("新增远程")}</button></div>
-    <div id="remoteList" class="remote-list">${panels || `<p class="form-hint">${t("还没有配置远程机器")}</p>`}</div>
+    <div class="satellite-panel-actions">${buttons}</div>
+  </div>`;
+}
+
+function renderSatelliteSettings() {
+  const panels = satelliteConfigs.map(satellite => satellitePanelHtml(satellite, false)).join("");
+  openModal(t("卫星节点管理"), `<div class="satellite-editor">
+    <div class="satellite-global">
+      <div class="satellite-global-head"><strong>${t("加密通信")}</strong><span class="form-hint">${t("主程序与卫星版之间使用 HTTPS 加密通信，并通过共享令牌做挑战-响应认证；首次连接自动固定证书指纹，也可以切换到 pinned 模式填写指纹。")}</span></div>
+    </div>
+    <div class="satellite-list-head"><strong>${t("卫星节点")}</strong><button class="button ghost" type="button" onclick="addSatellitePanel()">＋ ${t("新增卫星")}</button></div>
+    <div id="satelliteList" class="satellite-list">${panels || `<p class="form-hint">${t("还没有配置卫星节点")}</p>`}</div>
     <button class="button" onclick="closeModal()">${t("关闭")}</button>
   </div>`, false, "compact");
 }
 
-function remotePanelHtml(remote, isNew) {
-  const r = remote || {alias:"", username:"", host:"", port:22, workdir:""};
-  const status = remote?.status || {};
-  const statusHtml = isNew ? `<span class="remote-status">${t("未测试")}</span>` : `<span class="remote-status ${status.reachable ? "ok" : "bad"}">${status.reachable ? t("在线") : t("离线")}</span>`;
-  const buttons = isNew
-    ? `<button class="button ghost" type="button" onclick="testRemotePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveRemotePanel(this)">${t("确认")}</button><button class="button ghost" type="button" onclick="cancelRemotePanel(this)">${t("取消")}</button>`
-    : `<button class="button ghost" type="button" onclick="testRemotePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveRemotePanel(this)">${t("保存")}</button><button class="button danger" type="button" onclick="deleteRemotePanel(this)">${t("删除")}</button>`;
-  return `<div class="remote-panel${isNew ? " remote-panel-new" : ""}">
-    <div class="remote-panel-head"><input class="remote-alias" value="${esc(r.alias)}" placeholder="${t("别名（唯一）")}">${statusHtml}</div>
-    <div class="remote-form-grid">
-      <label>${t("用户名")}<input class="remote-username" value="${esc(r.username)}" placeholder="root"></label>
-      <label>${t("主机")}<input class="remote-host" value="${esc(r.host)}" placeholder="192.168.1.10"></label>
-      <label>${t("端口")}<input class="remote-port" type="number" min="1" max="65535" value="${esc(r.port)}"></label>
-      <label class="remote-wide">${t("远程工作目录")}<input class="remote-workdir" value="${esc(r.workdir)}" placeholder="${t("留空使用远程 HOME")}"></label>
-    </div>
-    <div class="remote-panel-actions">${buttons}</div>
-  </div>`;
-}
-
-function addRemotePanel() {
-  const list = document.getElementById("remoteList");
+function addSatellitePanel() {
+  const list = document.getElementById("satelliteList");
   const hint = list.querySelector(".form-hint");
   if (hint) hint.remove();
   const temp = document.createElement("div");
-  temp.innerHTML = remotePanelHtml(null, true);
+  temp.innerHTML = satellitePanelHtml(null, true);
   list.appendChild(temp.firstElementChild);
 }
 
-function cancelRemotePanel(button) { button.closest(".remote-panel").remove(); }
+function cancelSatellitePanel(button) { button.closest(".satellite-panel").remove(); }
 
-function readRemotePanel(panel) {
+function readSatellitePanel(panel) {
   return {
-    alias: panel.querySelector(".remote-alias").value.trim(),
-    username: panel.querySelector(".remote-username").value.trim(),
-    host: panel.querySelector(".remote-host").value.trim(),
-    port: panel.querySelector(".remote-port").value.trim(),
-    workdir: panel.querySelector(".remote-workdir").value.trim(),
+    alias: panel.querySelector(".satellite-alias").value.trim(),
+    name: panel.querySelector(".satellite-name").value.trim(),
+    mode: panel.querySelector(".satellite-mode").value,
+    url: panel.querySelector(".satellite-url").value.trim(),
+    token: panel.querySelector(".satellite-token").value.trim(),
+    host_key_policy: panel.querySelector(".satellite-policy").value,
+    cert_fingerprint: panel.querySelector(".satellite-fingerprint").value.trim(),
   };
 }
 
-function markRemoteFieldErrors(panel, errors) {
-  panel.querySelectorAll(".remote-field-error").forEach(element => element.classList.remove("remote-field-error"));
-  const map = {alias:".remote-alias", username:".remote-username", host:".remote-host", port:".remote-port", workdir:".remote-workdir"};
+function satellitePayload(values) {
+  return {
+    name: values.name,
+    mode: values.mode,
+    url: values.url,
+    token: values.token,
+    host_key_policy: values.host_key_policy,
+    cert_fingerprint: values.cert_fingerprint,
+    generate_token: false,
+  };
+}
+
+function markSatelliteFieldErrors(panel, errors) {
+  panel.querySelectorAll(".satellite-field-error").forEach(element => element.classList.remove("satellite-field-error"));
+  const map = {alias:".satellite-alias", name:".satellite-name", mode:".satellite-mode", url:".satellite-url", host_key_policy:".satellite-policy", cert_fingerprint:".satellite-fingerprint"};
   for (const [field, selector] of Object.entries(map)) {
-    if (errors?.[field]) { const input = panel.querySelector(selector); if (input) input.classList.add("remote-field-error"); }
+    if (errors?.[field]) { const input = panel.querySelector(selector); if (input) input.classList.add("satellite-field-error"); }
   }
 }
 
-async function saveRemotePanel(button) {
-  const panel = button.closest(".remote-panel");
-  const data = readRemotePanel(panel);
-  const isNew = panel.classList.contains("remote-panel-new");
-  if (!data.alias) { toast(t("别名不能为空"), true); return; }
+async function saveSatellitePanel(button) {
+  const panel = button.closest(".satellite-panel");
+  const values = readSatellitePanel(panel);
+  if (!values.alias) { toast(t("别名不能为空"), true); return; }
   try {
-    await api(`/api/remotes/${encodeURIComponent(data.alias)}`, {method:"PUT", body:JSON.stringify(data)});
-    toast(t("远程配置已保存"));
-    if (isNew && panel.dataset.tested === "1") {
-      try { await api("/api/remotes/test", {method:"POST", body:JSON.stringify(data)}); } catch(_) {}
-    }
-    await openRemoteSettings();
-  } catch(e) { markRemoteFieldErrors(panel, e.data?.field_errors); toast(e.message, true); }
+    const result = await api(`/api/satellites/${encodeURIComponent(values.alias)}`, {method:"PUT", body:JSON.stringify(satellitePayload(values))});
+    toast(result.token ? t("卫星配置已保存，并已生成新的共享令牌") : t("卫星配置已保存"));
+    await openSatelliteSettings();
+  } catch(e) { markSatelliteFieldErrors(panel, e.data?.field_errors); toast(e.message, true); }
 }
 
-async function testRemotePanel(button) {
-  const panel = button.closest(".remote-panel");
-  const data = readRemotePanel(panel);
-  if (!data.alias) { toast(t("请先填写别名"), true); return; }
-  const badge = panel.querySelector(".remote-status");
+async function testSatellitePanel(button) {
+  const panel = button.closest(".satellite-panel");
+  const values = readSatellitePanel(panel);
+  if (!values.alias) { toast(t("请先填写别名"), true); return; }
+  const badge = panel.querySelector(".satellite-status");
   const original = button.textContent;
   button.disabled = true; button.textContent = t("检查中…");
   try {
-    const result = await api("/api/remotes/test", {method:"POST", body:JSON.stringify(data)});
-    if (result.reachable) { toast(t("连接成功")); panel.dataset.tested = "1"; }
-    else { toast(t("连接失败：{error}", {error: result.error_message || ""}), true); delete panel.dataset.tested; }
-    if (badge) { badge.className = "remote-status " + (result.reachable ? "ok" : "bad"); badge.textContent = result.reachable ? t("在线") : t("离线"); }
+    if (panel.classList.contains("satellite-panel-new")) {
+      await api(`/api/satellites/${encodeURIComponent(values.alias)}`, {method:"PUT", body:JSON.stringify(satellitePayload(values))});
+    }
+    const result = await api(`/api/satellites/${encodeURIComponent(values.alias)}/test`, {method:"POST", body:"{}"});
+    if (result.reachable) { toast(t("连接成功（{mode}）", {mode: result.mode})); }
+    else { toast(t("连接失败：{error}", {error: result.error_message || ""}), true); }
+    if (badge) { badge.className = "satellite-status " + (result.reachable ? "online" : "offline"); badge.textContent = result.reachable ? t("在线") : t("离线"); }
   } catch(e) { toast(e.message, true); }
   finally { button.disabled = false; button.textContent = original; }
 }
 
-async function deleteRemotePanel(button) {
-  const panel = button.closest(".remote-panel");
-  const alias = readRemotePanel(panel).alias;
-  if (!await confirmDelete(t("删除远程配置“{alias}”？",{alias}), t("删除后无法恢复。"))) return;
+async function deleteSatellitePanel(button) {
+  const panel = button.closest(".satellite-panel");
+  const alias = readSatellitePanel(panel).alias;
+  if (!await confirmDelete(t("删除卫星节点“{alias}”？",{alias}), t("删除后无法恢复。"))) return;
   try {
-    await api(`/api/remotes/${encodeURIComponent(alias)}`, {method:"DELETE"});
-    toast(t("已删除远程配置 {alias}",{alias}));
-    await openRemoteSettings();
+    await api(`/api/satellites/${encodeURIComponent(alias)}`, {method:"DELETE"});
+    toast(t("已删除卫星节点 {alias}",{alias}));
+    await openSatelliteSettings();
   } catch(e) { toast(e.message, true); }
 }
 
-async function saveRemoteSettings() {
-  const payload = {
-    ssh_path: document.getElementById("remoteSshPath").value.trim(),
-    key_path: document.getElementById("remoteKeyPath").value.trim(),
-    host_key_policy: document.getElementById("remoteHostKeyPolicy").value,
-    connect_timeout: Number(document.getElementById("remoteConnectTimeout").value),
-  };
-  try {
-    await api("/api/remotes/settings", {method:"PUT", body:JSON.stringify(payload)});
-    toast(t("全局设置已保存"));
-    await openRemoteSettings();
-  } catch(e) {
-    for (const id of ["remoteSshPath","remoteKeyPath","remoteHostKeyPolicy","remoteConnectTimeout"]) document.getElementById(id)?.classList.remove("remote-field-error");
-    const map = {ssh_path:"remoteSshPath", key_path:"remoteKeyPath", host_key_policy:"remoteHostKeyPolicy", connect_timeout:"remoteConnectTimeout"};
-    for (const [field, id] of Object.entries(map)) if (e.data?.field_errors?.[field]) document.getElementById(id)?.classList.add("remote-field-error");
-    toast(e.message, true);
-  }
+function downloadSatelliteConfig(button) {
+  const panel = button.closest(".satellite-panel");
+  const alias = readSatellitePanel(panel).alias;
+  if (!alias) { toast(t("请先填写别名"), true); return; }
+  window.location.href = `/api/satellites/${encodeURIComponent(alias)}/config`;
 }
 
 function runnerOptions(selected) {
   const options = [`<option value="local"${selected==="local"?" selected":""}>${t("本机")}</option>`];
-  for (const remote of remoteConfigs) options.push(`<option value="${esc(remote.alias)}"${selected===remote.alias?" selected":""}>${esc(remote.alias)}</option>`);
+  for (const satellite of satelliteConfigs) options.push(`<option value="${esc(satellite.alias)}"${selected===satellite.alias?" selected":""}>${esc(satellite.alias)}</option>`);
   return options.join("");
 }
 function runnerTag(runner) {
@@ -1141,7 +1147,7 @@ async function loadSystemStatus() {
     const data = await api("/api/system/overview", {signal: controller.signal});
     resourceSnapshot = data.resources;
     renderResources(data.resources);
-    renderRemoteStatus(data.remotes);
+    renderSatelliteStatus(data.satellites);
   } catch (_) {
     resourceSnapshot = null;
     renderResources(null);

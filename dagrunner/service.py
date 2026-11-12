@@ -15,7 +15,6 @@ from .database import StateDatabase
 from .logger import TaskLogManager
 from .pool import DaemonPool
 from .notifier import Notifier, NullNotifier
-from .remote import RemoteTaskExecutor
 from .runner import AlreadyRunningError, WorkflowRunner, new_run_id, workflow_lock
 from .workflow import Workflow, WorkflowError
 
@@ -145,11 +144,13 @@ class ExecutionService:
         logs: TaskLogManager,
         max_workers: int = 4,
         notifier: Notifier | None = None,
+        satellite_manager=None,
     ):
         self.database = database
         self.registry = registry
         self.logs = logs
         self.notifier = notifier or NullNotifier()
+        self.satellite_manager = satellite_manager
         self.pool = DaemonPool(max_workers=max_workers, thread_name_prefix="dag-run")
         self._active: dict[str, ActiveRun] = {}
         self._lock = Lock()
@@ -215,19 +216,24 @@ class ExecutionService:
         resume_run_id: str | None,
         runner_alias: str = "local",
     ) -> tuple[str, str]:
-        remote_executor = None
+        satellite_executor = None
         if runner_alias and runner_alias != "local":
-            config = self.database.get_remote(runner_alias)
-            if config is None:
-                raise WorkflowError(f"remote {runner_alias!r} not found")
-            remote_executor = RemoteTaskExecutor(config)
+            if self.satellite_manager is None:
+                raise WorkflowError("卫星服务未启用，无法在卫星上运行")
+            if not self.database.is_satellite(runner_alias):
+                raise WorkflowError(f"卫星不存在：{runner_alias!r}")
+            from .satellite_executor import SatelliteTaskExecutor
+
+            satellite_executor = SatelliteTaskExecutor(
+                self.satellite_manager, runner_alias
+            )
         lock_path = self.database.path.parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             return WorkflowRunner(
                 self.database,
                 self.logs,
                 notifier=self.notifier,
-                remote_executor=remote_executor,
+                satellite_executor=satellite_executor,
             ).run(
                 workflow,
                 from_task,
