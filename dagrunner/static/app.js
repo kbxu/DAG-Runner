@@ -60,8 +60,8 @@ function normalizeYamlNewlines(value) {
 }
 function namedId(name, id) { return name && name !== id ? (currentLanguage === "en" ? `${name} (${id})` : `${name}（${id}）`) : id; }
 function taskNamedId(workflow, taskId) { const task = workflow?.tasks.find(item => item.name === taskId); return namedId(task?.description, taskId); }
-const usefulTopKeys = new Set(["description", "setup", "timeout", "notification", "tasks"]);
-const usefulTaskKeys = new Set(["type", "description", "shell", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled"]);
+const usefulTopKeys = new Set(["description", "runner", "setup", "timeout", "notification", "tasks"]);
+const usefulTaskKeys = new Set(["type", "description", "shell", "command", "depends", "condition", "success", "failure", "args", "cwd", "timeout", "enabled", "runner"]);
 function yamlEditor(id, value, includeSchedule=false, readOnly=false) {
   const source=normalizeYamlNewlines(value);
   return `<div class="yaml-editor"><div class="yaml-gutter" id="${id}Gutter" aria-hidden="true">${yamlGutter(source)}</div><div class="yaml-code"><pre id="${id}Highlight" aria-hidden="true">${highlightUsefulYaml(source,includeSchedule)}\n</pre><textarea id="${id}" data-include-schedule="${includeSchedule}" spellcheck="false" ${readOnly ? "readonly" : ""} oninput="syncYamlHighlight('${id}')" onkeydown="yamlEditorKeydown(event,'${id}')" onscroll="syncYamlScroll('${id}')">${esc(source)}</textarea></div></div>`;
@@ -327,7 +327,7 @@ function renderWorkflows() {
       const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
       const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
       return `<tr>
-        <td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button>${runnerTag(w.runner)}</div><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
+        <td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button>${runnerTag(w.runner, w.runner_locations)}</div><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
         <td>${scheduleSummary(s)}</td>
         <td>${fmt(w.last_run_time)}</td>
         <td>${fmt(s.next_run_time)}</td>
@@ -424,12 +424,12 @@ async function loadRuns(resetPage=false) {
       if (r.status === "RUNNING") actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">${t("停止")}</button>`);
       else {
         actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">${t("重跑")}</button>`);
-        if (r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" onclick="runAction('${r.run_id}','resume')">${t("失败续跑")}</button>`);
+        if (r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" title="${esc(t("按最新配置续跑：从上次失败处继续，已成功的任务不重跑，运行位置以当前配置为准"))}" onclick="runAction('${r.run_id}','resume')">${t("失败续跑")}</button>`);
         actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">${t("删除")}</button>`);
       }
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
-      return `<tr><td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
     renderRunStats(data.stats);
@@ -534,11 +534,20 @@ async function saveNotifierSettings() {
 }
 
 let satelliteConfigs = [];
+let satelliteServiceEnabled = true;
+let satelliteEditing = null;
 
-function renderSatelliteStatus(satellites) {
+function renderSatelliteStatus(satellites, enabled) {
   satelliteConfigs = satellites || [];
+  satelliteServiceEnabled = enabled !== false;
   const dot = document.getElementById("satelliteStatusDot");
+  const button = document.getElementById("satelliteSettingsButton");
+  if (button) {
+    button.disabled = !satelliteServiceEnabled;
+    button.title = satelliteServiceEnabled ? "" : t("卫星服务未启用：请在主程序配置中把 satellite.enabled 设为 true，然后重启主程序");
+  }
   if (!dot) return;
+  if (!satelliteServiceEnabled) { dot.className = "satellite-dot none"; dot.title = t("卫星服务未启用"); return; }
   if (!satelliteConfigs.length) { dot.className = "satellite-dot none"; dot.title = t("未配置卫星"); return; }
   const online = satelliteConfigs.filter(s => s.status?.status === "online").length;
   dot.className = "satellite-dot " + (online === satelliteConfigs.length ? "ok" : online === 0 ? "bad" : "warn");
@@ -546,9 +555,13 @@ function renderSatelliteStatus(satellites) {
 }
 
 async function openSatelliteSettings() {
+  const button = document.getElementById("satelliteSettingsButton");
+  if (button && button.disabled) return;
   try {
     const data = await api("/api/satellites");
     satelliteConfigs = data.satellites || [];
+    satelliteServiceEnabled = data.enabled !== false;
+    satelliteEditing = null;
     renderSatelliteSettings();
   } catch(e) { toast(e.message, true); }
 }
@@ -560,14 +573,37 @@ function satelliteStatusBadge(satellite) {
   return `<span class="satellite-status ${state}">${label}</span>`;
 }
 
+function satelliteRowHtml(satellite) {
+  const status = satellite.status || {};
+  const meta = [
+    satellite.mode || "",
+    status.platform || "",
+    status.hostname || "",
+    status.agent_version || "",
+    status.last_seen ? String(status.last_seen).replace("T", " ") : "",
+  ].filter(Boolean).join(" · ");
+  const disabled = satelliteEditing !== null ? "disabled" : "";
+  return `<div class="satellite-row" data-alias="${esc(satellite.alias)}">
+    <span class="satellite-row-alias">${esc(satellite.alias)}</span>
+    ${satelliteStatusBadge(satellite)}
+    <span class="satellite-row-meta" title="${esc(meta)}">${esc(meta)}</span>
+    <span class="satellite-row-actions">
+      <button class="button ghost" type="button" onclick='editSatellitePanel(${jsArg(satellite.alias)})' ${disabled}>${t("编辑")}</button>
+      <button class="button ghost" type="button" onclick='testSatelliteByAlias(${jsArg(satellite.alias)})' ${disabled}>${t("检查连通")}</button>
+      <button class="button ghost" type="button" onclick='downloadSatelliteConfigByAlias(${jsArg(satellite.alias)})' ${disabled}>${t("下载配置")}</button>
+      <button class="button danger" type="button" onclick='deleteSatellitePanelByAlias(${jsArg(satellite.alias)})' ${disabled}>${t("删除")}</button>
+    </span>
+  </div>`;
+}
+
 function satellitePanelHtml(satellite, isNew) {
   const s = satellite || {alias:"", name:"", mode:"auto", url:"", host_key_policy:"accept-new", cert_fingerprint:"", has_token:false, status:{}};
   const status = s.status || {};
   const badge = isNew ? `<span class="satellite-status">${t("未测试")}</span>` : satelliteStatusBadge(s);
   const meta = isNew ? "" : `<span class="satellite-meta">${esc(status.platform || "")}${status.hostname ? " · " + esc(status.hostname) : ""}${status.agent_version ? " · " + esc(status.agent_version) : ""}${status.last_seen ? " · " + esc(status.last_seen) : ""}</span>`;
   const buttons = isNew
-    ? `<button class="button ghost" type="button" onclick="testSatellitePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveSatellitePanel(this)">${t("确认")}</button><button class="button ghost" type="button" onclick="cancelSatellitePanel(this)">${t("取消")}</button>`
-    : `<button class="button ghost" type="button" onclick="testSatellitePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveSatellitePanel(this)">${t("保存")}</button><button class="button ghost" type="button" onclick="downloadSatelliteConfig(this)">${t("下载配置")}</button><button class="button danger" type="button" onclick="deleteSatellitePanel(this)">${t("删除")}</button>`;
+    ? `<button class="button ghost" type="button" onclick="testSatellitePanel(this)">${t("检查连通")}</button><button class="button" type="button" onclick="saveSatellitePanel(this)">${t("确认")}</button><button class="button ghost" type="button" onclick="cancelSatellitePanel()">${t("取消")}</button>`
+    : `<button class="button" type="button" onclick="saveSatellitePanel(this)">${t("保存")}</button><button class="button ghost" type="button" onclick="cancelSatellitePanel()">${t("取消")}</button>`;
   return `<div class="satellite-panel${isNew ? " satellite-panel-new" : ""}">
     <div class="satellite-panel-head"><input class="satellite-alias" value="${esc(s.alias)}" placeholder="${t("别名（唯一）")}" ${isNew ? "" : "readonly"}>${badge}${meta}</div>
     <div class="satellite-form-grid">
@@ -590,27 +626,43 @@ function satellitePanelHtml(satellite, isNew) {
 }
 
 function renderSatelliteSettings() {
-  const panels = satelliteConfigs.map(satellite => satellitePanelHtml(satellite, false)).join("");
+  const editing = satelliteEditing;
+  const rows = satelliteConfigs.filter(item => item.alias !== editing).map(satelliteRowHtml).join("");
+  let editingPanel = "";
+  if (editing === "__new__") editingPanel = satellitePanelHtml(null, true);
+  else if (editing) {
+    const found = satelliteConfigs.find(item => item.alias === editing);
+    if (found) editingPanel = satellitePanelHtml(found, false);
+  }
+  const empty = !satelliteConfigs.length && editing !== "__new__"
+    ? `<p class="form-hint">${t("还没有配置卫星节点")}</p>` : "";
+  const locked = editing !== null;
   openModal(t("卫星节点管理"), `<div class="satellite-editor">
     <div class="satellite-global">
       <div class="satellite-global-head"><strong>${t("加密通信")}</strong><span class="form-hint">${t("主程序与卫星版之间使用 HTTPS 加密通信，并通过共享令牌做挑战-响应认证；首次连接自动固定证书指纹，也可以切换到 pinned 模式填写指纹。")}</span></div>
     </div>
-    <div class="satellite-list-head"><strong>${t("卫星节点")}</strong><button class="button ghost" type="button" onclick="addSatellitePanel()">＋ ${t("新增卫星")}</button></div>
-    <div id="satelliteList" class="satellite-list">${panels || `<p class="form-hint">${t("还没有配置卫星节点")}</p>`}</div>
+    <div class="satellite-list-head"><strong>${t("卫星节点")}</strong><button class="button ghost" type="button" onclick="addSatellitePanel()" ${locked ? "disabled" : ""}>＋ ${t("新增卫星")}</button></div>
+    <div id="satelliteList" class="satellite-list">${rows}${editingPanel}${empty}</div>
     <button class="button" onclick="closeModal()">${t("关闭")}</button>
   </div>`, false, "compact");
 }
 
 function addSatellitePanel() {
-  const list = document.getElementById("satelliteList");
-  const hint = list.querySelector(".form-hint");
-  if (hint) hint.remove();
-  const temp = document.createElement("div");
-  temp.innerHTML = satellitePanelHtml(null, true);
-  list.appendChild(temp.firstElementChild);
+  if (satelliteEditing !== null) { toast(t("请先保存或取消当前编辑"), true); return; }
+  satelliteEditing = "__new__";
+  renderSatelliteSettings();
 }
 
-function cancelSatellitePanel(button) { button.closest(".satellite-panel").remove(); }
+function editSatellitePanel(alias) {
+  if (satelliteEditing !== null && satelliteEditing !== alias) { toast(t("请先保存或取消当前编辑"), true); return; }
+  satelliteEditing = alias;
+  renderSatelliteSettings();
+}
+
+function cancelSatellitePanel() {
+  satelliteEditing = null;
+  renderSatelliteSettings();
+}
 
 function readSatellitePanel(panel) {
   return {
@@ -651,6 +703,7 @@ async function saveSatellitePanel(button) {
   try {
     const result = await api(`/api/satellites/${encodeURIComponent(values.alias)}`, {method:"PUT", body:JSON.stringify(satellitePayload(values))});
     toast(result.token ? t("卫星配置已保存，并已生成新的共享令牌") : t("卫星配置已保存"));
+    satelliteEditing = null;
     await openSatelliteSettings();
   } catch(e) { markSatelliteFieldErrors(panel, e.data?.field_errors); toast(e.message, true); }
 }
@@ -663,9 +716,8 @@ async function testSatellitePanel(button) {
   const original = button.textContent;
   button.disabled = true; button.textContent = t("检查中…");
   try {
-    if (panel.classList.contains("satellite-panel-new")) {
-      await api(`/api/satellites/${encodeURIComponent(values.alias)}`, {method:"PUT", body:JSON.stringify(satellitePayload(values))});
-    }
+    // Persist first so the check reflects exactly what the form shows.
+    await api(`/api/satellites/${encodeURIComponent(values.alias)}`, {method:"PUT", body:JSON.stringify(satellitePayload(values))});
     const result = await api(`/api/satellites/${encodeURIComponent(values.alias)}/test`, {method:"POST", body:"{}"});
     if (result.reachable) { toast(t("连接成功（{mode}）", {mode: result.mode})); }
     else { toast(t("连接失败：{error}", {error: result.error_message || ""}), true); }
@@ -674,22 +726,51 @@ async function testSatellitePanel(button) {
   finally { button.disabled = false; button.textContent = original; }
 }
 
-async function deleteSatellitePanel(button) {
-  const panel = button.closest(".satellite-panel");
-  const alias = readSatellitePanel(panel).alias;
-  if (!await confirmDelete(t("删除卫星节点“{alias}”？",{alias}), t("删除后无法恢复。"))) return;
+async function testSatelliteByAlias(alias) {
   try {
-    await api(`/api/satellites/${encodeURIComponent(alias)}`, {method:"DELETE"});
-    toast(t("已删除卫星节点 {alias}",{alias}));
+    const result = await api(`/api/satellites/${encodeURIComponent(alias)}/test`, {method:"POST", body:"{}"});
+    if (result.reachable) { toast(t("连接成功（{mode}）", {mode: result.mode})); }
+    else { toast(t("连接失败：{error}", {error: result.error_message || ""}), true); }
     await openSatelliteSettings();
   } catch(e) { toast(e.message, true); }
 }
 
-function downloadSatelliteConfig(button) {
-  const panel = button.closest(".satellite-panel");
-  const alias = readSatellitePanel(panel).alias;
-  if (!alias) { toast(t("请先填写别名"), true); return; }
+async function deleteSatellitePanelByAlias(alias) {
+  if (!await confirmDelete(t("删除卫星节点“{alias}”？",{alias}), t("删除后无法恢复。"))) return;
+  try {
+    await api(`/api/satellites/${encodeURIComponent(alias)}`, {method:"DELETE"});
+    toast(t("已删除卫星节点 {alias}",{alias}));
+    satelliteEditing = null;
+    await openSatelliteSettings();
+  } catch(e) { toast(e.message, true); }
+}
+
+function downloadSatelliteConfigByAlias(alias) {
   window.location.href = `/api/satellites/${encodeURIComponent(alias)}/config`;
+}
+
+function setTopLevelRunner(definition, runner) {
+  const lines = String(definition ?? "").split(/\r?\n/);
+  const out = [];
+  let replaced = false;
+  for (const line of lines) {
+    if (!replaced && /^runner\s*:/.test(line)) {
+      replaced = true;
+      if (runner && runner !== "local") out.push(`runner: ${runner}`);
+      continue;
+    }
+    out.push(line);
+  }
+  if (!replaced && runner && runner !== "local") out.unshift(`runner: ${runner}`);
+  return out.join("\n");
+}
+
+function onRunnerSelectChange(editorId, runner) {
+  const textarea = document.getElementById(editorId);
+  if (!textarea) return;
+  textarea.value = setTopLevelRunner(textarea.value, runner);
+  syncYamlHighlight(editorId);
+  queueWorkflowPreview(editorId, 0);
 }
 
 function runnerOptions(selected) {
@@ -697,8 +778,16 @@ function runnerOptions(selected) {
   for (const satellite of satelliteConfigs) options.push(`<option value="${esc(satellite.alias)}"${selected===satellite.alias?" selected":""}>${esc(satellite.alias)}</option>`);
   return options.join("");
 }
-function runnerTag(runner) {
-  return runner && runner !== "local" ? `<span class="runner-tag">${esc(runner)}</span>` : "";
+function runnerTag(runner, locations) {
+  const list = locations && locations.length ? locations : [{alias: runner || "local", count: null}];
+  const satellites = list.filter(item => item.alias && item.alias !== "local");
+  const hasLocal = list.some(item => item.alias === "local" || !item.alias);
+  let label = "";
+  if (satellites.length === 1 && !hasLocal) label = satellites[0].alias;
+  else if (satellites.length > 0) label = "mixed";
+  if (!label) return "";
+  const parts = list.map(item => `${item.alias === "local" || !item.alias ? t("本机") : esc(item.alias)}${item.count == null ? "" : ` (${item.count})`}`);
+  return `<span class="runner-tag" title="${esc(parts.join(", "))}">${esc(label)}</span>`;
 }
 
 let pendingImportFilename = "workflow.yaml";
@@ -720,7 +809,7 @@ function openWorkflowImportEditor(title, definition, nextId, submitLabel, source
   const split = splitWorkflowName(definition);
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
-  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select">${runnerOptions("local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select" onchange="onRunnerSelectChange('importDefinition', this.value)">${runnerOptions("local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
 }
 async function openNewWorkflow() {
   pendingImportFilename = "dagr_example_pipeline.yaml";
@@ -781,7 +870,7 @@ async function editWorkflow(name) {
   try {
     const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
     const split=splitWorkflowName(definition);
-    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select">${runnerOptions(workflow.runner)}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
+    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select" onchange="onRunnerSelectChange('workflowDefinition', this.value)">${runnerOptions(workflow.runner)}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
   } catch(e) { toast(e.message,true); }
 }
 async function saveWorkflow(name) {
@@ -877,11 +966,17 @@ function buildDagSvg(tasks, workflowName, showStatuses=false, preview=false, dir
     if (branch) edges.push(`<text class="dag-branch-label" x="${mid}" y="${(y1+y2)/2-8}" text-anchor="middle">${branch}</text>`);
   }));
   const nodes=tasks.map(task => {
-    const p=positions.get(task.name), title=(task.description || task.name).slice(0,22), taskId=task.name.slice(0,27);
+    const p=positions.get(task.name), taskId=task.name.slice(0,27);
+    const runnerLabel=task.runner && task.runner !== "local" ? task.runner : "";
+    const runnerText=runnerLabel.length > 10 ? runnerLabel.slice(0,7)+"..." : runnerLabel;
+    const pillWidth=runnerText ? Math.ceil(runnerText.length*6.4)+14 : 0;
+    const title=(task.description || task.name).slice(0, runnerText ? 12 : 22);
     const status=showStatuses ? (task.status || "PENDING") : "";
     const click=viewer ? `data-task="${esc(task.name)}" onclick='selectViewerTask(${jsArg(task.name)})'` : preview ? `data-task="${esc(task.name)}" onclick='selectPreviewTask(${jsArg(task.name)})'` : showStatuses ? "" : `onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"`;
     const statusText=task.type === "condition" && task.condition_result ? `→ ${task.condition_result.toUpperCase()}` : status;
-    return `<g class="dag-node ${task.type === "condition" ? "dag-condition" : ""} ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${statusText ? `<text class="dag-node-status" x="176" y="23" text-anchor="end">${esc(statusText)}</text>` : ""}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${statusText ? ` · ${esc(statusText)}` : ""}</title></g>`;
+    const statusX=185-pillWidth-(pillWidth ? 6 : 0);
+    const pill=runnerText ? `<rect class="dag-node-runner" x="${185-pillWidth}" y="12" width="${pillWidth}" height="15" rx="7"></rect><text class="dag-node-runner-text" x="${185-pillWidth/2}" y="23" text-anchor="middle">${esc(runnerText)}</text>` : "";
+    return `<g class="dag-node ${task.type === "condition" ? "dag-condition" : ""} ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${pill}${statusText ? `<text class="dag-node-status" x="${statusX}" y="23" text-anchor="end">${esc(statusText)}</text>` : ""}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${runnerLabel ? ` · ${esc(runnerLabel)}` : ""}${statusText ? ` · ${esc(statusText)}` : ""}</title></g>`;
   }).join("");
   return `<svg class="dag-canvas" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(workflowName)} DAG"><defs><marker id="dagArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>${edges.join("")}${nodes}</svg>`;
 }
@@ -1119,6 +1214,7 @@ window.addEventListener("dagrunner-language-change", () => {
   const previousState = serviceState;
   serviceState = "";
   setServiceStatus(previousState);
+  renderSatelliteStatus(satelliteConfigs, satelliteServiceEnabled);
   renderWorkflows();
   loadRuns();
 });
@@ -1147,7 +1243,7 @@ async function loadSystemStatus() {
     const data = await api("/api/system/overview", {signal: controller.signal});
     resourceSnapshot = data.resources;
     renderResources(data.resources);
-    renderSatelliteStatus(data.satellites);
+    renderSatelliteStatus(data.satellites, data.satellite_enabled);
   } catch (_) {
     resourceSnapshot = null;
     renderResources(null);

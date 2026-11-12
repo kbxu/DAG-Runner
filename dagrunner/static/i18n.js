@@ -228,6 +228,10 @@ const I18N_EN = {
   "新增卫星": "Add satellite",
   "还没有配置卫星节点": "No satellite nodes configured yet",
   "未配置卫星": "No satellites configured",
+  "卫星服务未启用": "Satellite service disabled",
+  "请先保存或取消当前编辑": "Save or cancel the current edit first",
+  "按最新配置续跑：从上次失败处继续，已成功的任务不重跑，运行位置以当前配置为准": "Resume with the latest configuration: continue from the last failure, skip tasks that already succeeded, and run on the locations defined by the current configuration.",
+  "卫星服务未启用：请在主程序配置中把 satellite.enabled 设为 true，然后重启主程序": "Satellite service is disabled. Set satellite.enabled: true in the master config, then restart the master.",
   "{ok}/{total} 台卫星在线": "{ok}/{total} satellites online",
   "关闭": "Close",
   "别名（唯一）": "Alias (unique)",
@@ -266,6 +270,7 @@ const I18N_EN = {
   "删除后无法恢复。": "This cannot be undone.",
   "已删除卫星节点 {alias}": "Deleted satellite node {alias}",
   "本机": "Local",
+  "mixed": "mixed",
   "运行位置": "Run location"
 };
 

@@ -16,11 +16,21 @@ class SatelliteTaskExecutor:
     def __init__(self, manager: SatelliteManager, alias: str):
         self.manager = manager
         self.alias = alias
+        self._platform: str | None = None
 
     @property
     def platform(self) -> str:
+        if self._platform is None:
+            self._platform = self._detect_platform()
+        return self._platform
+
+    def _detect_platform(self) -> str:
         config = self.manager.database.get_satellite(self.alias)
-        return "windows" if config is not None and config.platform == "windows" else "linux"
+        stored = (config.platform if config else "") or ""
+        if stored:
+            return "windows" if stored == "windows" else "linux"
+        detected = self.manager.refresh_satellite_platform(self.alias)
+        return "windows" if detected == "windows" else "linux"
 
     def execute(
         self,

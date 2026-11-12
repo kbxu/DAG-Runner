@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from .database import StateDatabase
+from .executor import TaskExecutor
 from .logger import TaskLogManager
 from .pool import DaemonPool
 from .notifier import Notifier, NullNotifier
@@ -173,7 +174,7 @@ class ExecutionService:
                 workflow.descendants(from_task)  # Fail before scheduling the background job.
         elif only_task:
             raise ServiceError("only_task 需要 from_task")
-        runner_alias = self._runner_alias(workflow_name)
+        runner_alias = workflow.runner or self._runner_alias(workflow_name)
         run_id = new_run_id()
         active = ActiveRun(workflow_name=workflow_name, cancel_event=Event())
         with self._lock:
@@ -205,6 +206,18 @@ class ExecutionService:
             return "local"
         return stored["runner"] or "local"
 
+    def _resolve_executor(self, alias: str) -> TaskExecutor:
+        """Return the executor for a run location (``local`` or a satellite)."""
+        if alias in ("", "local"):
+            return TaskExecutor()
+        if self.satellite_manager is None:
+            raise WorkflowError("卫星服务未启用，无法在卫星上运行")
+        if not self.database.is_satellite(alias):
+            raise WorkflowError(f"卫星不存在：{alias!r}")
+        from .satellite_executor import SatelliteTaskExecutor
+
+        return SatelliteTaskExecutor(self.satellite_manager, alias)
+
     def _run(
         self,
         workflow: Workflow,
@@ -216,24 +229,13 @@ class ExecutionService:
         resume_run_id: str | None,
         runner_alias: str = "local",
     ) -> tuple[str, str]:
-        satellite_executor = None
-        if runner_alias and runner_alias != "local":
-            if self.satellite_manager is None:
-                raise WorkflowError("卫星服务未启用，无法在卫星上运行")
-            if not self.database.is_satellite(runner_alias):
-                raise WorkflowError(f"卫星不存在：{runner_alias!r}")
-            from .satellite_executor import SatelliteTaskExecutor
-
-            satellite_executor = SatelliteTaskExecutor(
-                self.satellite_manager, runner_alias
-            )
         lock_path = self.database.path.parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             return WorkflowRunner(
                 self.database,
                 self.logs,
                 notifier=self.notifier,
-                satellite_executor=satellite_executor,
+                executor_resolver=self._resolve_executor,
             ).run(
                 workflow,
                 from_task,

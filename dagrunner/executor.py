@@ -18,6 +18,10 @@ from .workflow import Task
 
 
 class TaskExecutor:
+    @property
+    def platform(self) -> str:
+        return "windows" if os.name == "nt" else "linux"
+
     def execute(
         self,
         task: Task,

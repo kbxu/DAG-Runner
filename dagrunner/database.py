@@ -222,6 +222,9 @@ class StateDatabase:
                 connection, "workflow_runs", "runner", "TEXT NOT NULL DEFAULT 'local'"
             )
             self._ensure_column(
+                connection, "workflow_runs", "runner_locations", "TEXT"
+            )
+            self._ensure_column(
                 connection, "workflows", "runner", "TEXT NOT NULL DEFAULT 'local'"
             )
             self._ensure_column(
@@ -456,14 +459,15 @@ class StateDatabase:
         task_metadata: dict[str, dict[str, object]] | None = None,
         scope: Sequence[str] | None = None,
         runner: str = "local",
+        runner_locations: Sequence[dict[str, object]] | None = None,
     ) -> None:
         now = local_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO workflow_runs
                    (run_id, workflow_name, status, start_time, resumed_from_run_id, from_task,
-                    trigger_type, scope, runner)
-                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)""",
+                    trigger_type, scope, runner, runner_locations)
+                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id,
                     workflow_name,
@@ -473,6 +477,9 @@ class StateDatabase:
                     trigger_type,
                     json.dumps(list(scope), ensure_ascii=False) if scope is not None else None,
                     runner or "local",
+                    json.dumps(list(runner_locations), ensure_ascii=False)
+                    if runner_locations is not None
+                    else None,
                 ),
             )
             metadata = task_metadata or {}

@@ -207,6 +207,7 @@ class Task:
     success: tuple[str, ...] = ()
     failure: tuple[str, ...] = ()
     shell: str | None = None
+    runner: str | None = None
 
     @property
     def is_condition(self) -> bool:
@@ -250,6 +251,7 @@ class Workflow:
     description: str = ""
     timeout: int | None = None
     email_notification: EmailNotification = field(default_factory=EmailNotification)
+    runner: str | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "Workflow":
@@ -377,6 +379,7 @@ class Workflow:
                 success=success,
                 failure=failure,
                 shell=shell,
+                runner=_optional_runner(raw.get("runner"), task_name),
             )
 
         workflow = cls(
@@ -388,6 +391,7 @@ class Workflow:
             description=display_name,
             timeout=workflow_timeout,
             email_notification=_email_notification_value(data.get("notification")),
+            runner=_optional_runner(data.get("runner"), "workflow"),
         )
         workflow.topological_order()  # Validate references and cycles now.
         return workflow
@@ -473,6 +477,19 @@ class Workflow:
             return self.setup
         return self.setup.get(platform_name, self.setup.get("default", ""))
 
+    def task_runner(self, task: Task) -> str:
+        """Resolve the runner for a task: task override, else workflow default."""
+        return task.runner or self.runner or "local"
+
+    def runner_locations(self) -> list[tuple[str, int]]:
+        """Count how many tasks run on each location, satellites first."""
+        counts: dict[str, int] = {}
+        for task in self.tasks.values():
+            alias = self.task_runner(task)
+            counts[alias] = counts.get(alias, 0) + 1
+        ordered = sorted(counts, key=lambda alias: (alias == "local", alias))
+        return [(alias, counts[alias]) for alias in ordered]
+
 
 def _string_tuple(value: Any, task_name: str, field_name: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
@@ -485,6 +502,16 @@ def _optional_string(value: Any, task_name: str, field_name: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise WorkflowError(f"task {task_name!r} {field_name} must be a string")
+    return value
+
+
+def _optional_runner(value: Any, owner: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+        raise WorkflowError(
+            f"{owner} runner may contain only letters, digits, _, . and -"
+        )
     return value
 
 

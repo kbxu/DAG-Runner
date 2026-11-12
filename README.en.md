@@ -218,8 +218,9 @@ satellite:
   enabled: true
   host: 0.0.0.0
   port: 7120
-  cert: var/satellite/cert.pem
-  key: var/satellite/key.pem
+  # Master-side certificate, generated on first start
+  cert: var/master-certs/cert.pem
+  key: var/master-certs/key.pem
   # Address satellites use to reach the master; derived from the web Host when empty
   public_url: ""
 ```
@@ -234,7 +235,32 @@ After signing in, click the **Satellite** button at the top, add a node with an 
 python -m dagrunner.satellite --config var/satellite.yaml
 ```
 
+Master and satellite certificates live in separate directories: `var/master-certs/` for the master and `var/satellite-certs/` for the agent (its `known_master.json` trust record lives there too). To migrate a satellite, copy the whole `var/satellite-certs/` directory to the new machine; no certificate re-issuance is needed.
+
 Set a workflow's run location to the satellite alias to execute its tasks on that machine; logs stream back to the master in near real time. The default `auto` mode prefers the reverse channel and falls back to listening for forward connections, switching automatically when the network changes.
+
+### 4. Assign run locations (workflow level / task level)
+
+The run location can be written in the workflow YAML at two levels, and **the task level wins**:
+
+```yaml
+runner: sat-01          # workflow default; local when omitted
+tasks:
+  extract:
+    command: python extract.py
+  report:               # no runner: follows the workflow default (sat-01)
+    command: python report.py
+  notify:
+    command: python notify.py
+    runner: local       # override: always run on the local machine
+```
+
+- Neither level set → everything runs locally.
+- Workflow set, task not set → the task follows the workflow.
+- Task set → the task wins.
+- If a satellite is unreachable or unknown, the affected task fails with the reason in its log and error message.
+
+The "Run location" dropdown in the web editor maps to the workflow-level `runner` (written to the top level of the YAML on save). In the DAG view, nodes that run on a satellite are labelled with its alias in the top-right corner. The tag beside the title in the workflow list and run records summarises the locations: empty when everything is local, the alias when a single satellite is used, and `mixed` otherwise (hover for the per-location task counts).
 
 ## Project structure
 

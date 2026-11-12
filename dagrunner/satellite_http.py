@@ -42,6 +42,7 @@ class SatelliteClient:
         alias: str,
         ssl_context=None,
         timeout: float = 15,
+        stream_timeout: float = 60,
         trust=None,
         nonce_ttl: int = 120,
         register_body: dict | None = None,
@@ -58,6 +59,7 @@ class SatelliteClient:
         self.alias = alias
         self.ssl_context = ssl_context or client_ssl_context()
         self.timeout = timeout
+        self.stream_timeout = stream_timeout
         self.trust = trust
         self._nonce_store = NonceStore(ttl_seconds=nonce_ttl)
         self._register_body = register_body or {}
@@ -218,7 +220,7 @@ class SatelliteClient:
             self.host,
             self.port,
             context=self.ssl_context,
-            timeout=timeout if timeout is not None else self.timeout,
+            timeout=timeout if timeout is not None else self.stream_timeout,
         )
         connection.connect()
         if self.trust is not None:

@@ -10,6 +10,9 @@ from pathlib import Path
 
 from dagrunner.auth import client_password_hash, store_password
 from dagrunner.database import StateDatabase
+from dagrunner.executor import TaskExecutor
+from dagrunner.logger import TaskLogManager
+from dagrunner.runner import WorkflowRunner
 from dagrunner.satellite_agent import (
     SatelliteAgent,
     SatelliteAgentConfig,
@@ -28,11 +31,13 @@ from dagrunner.satellite_crypto import (
     verify_auth,
 )
 from dagrunner.satellite_executor import SatelliteTaskExecutor
+from dagrunner.satellite_http import SatelliteClient
 from dagrunner.satellite_master import SatelliteManager, create_satellite_master_app
 from dagrunner.satellite_server import serve_ssl
 from dagrunner.satellite_protocol import (
     JOB_FAILED,
     JOB_SUCCESS,
+    PATH_STREAM,
     JobSpec,
     ProtocolError,
     SatelliteConfig,
@@ -40,7 +45,7 @@ from dagrunner.satellite_protocol import (
     new_job_id,
 )
 from dagrunner.webapp import create_app
-from dagrunner.workflow import Task
+from dagrunner.workflow import Task, Workflow, WorkflowError
 
 
 TOKEN = "unit-test-token-0123456789"
@@ -72,6 +77,23 @@ class _Server:
 
 
 class SatelliteCryptoTests(unittest.TestCase):
+    def test_example_configs_use_distinct_cert_paths(self) -> None:
+        import yaml
+
+        root = Path(__file__).resolve().parent.parent
+        master = yaml.safe_load(
+            (root / "var" / "config.example.yaml").read_text(encoding="utf-8")
+        )
+        agent = yaml.safe_load(
+            (root / "var" / "satellite.example.yaml").read_text(encoding="utf-8")
+        )
+        self.assertNotEqual(
+            master["satellite"]["cert"], agent["satellite"]["cert"]
+        )
+        self.assertNotEqual(
+            master["satellite"]["key"], agent["satellite"]["key"]
+        )
+
     def test_certificate_generation_is_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -378,6 +400,122 @@ class SatelliteEndToEndTests(unittest.TestCase):
         # One registration challenge is enough; polling must reuse the session.
         self.assertLessEqual(nonces["count"], 2)
 
+    def _executor_resolver(self):
+        def resolver(alias):
+            if alias in ("", "local"):
+                return TaskExecutor()
+            if not self.database.is_satellite(alias):
+                raise WorkflowError(f"卫星不存在：{alias!r}")
+            return SatelliteTaskExecutor(self.manager, alias)
+
+        return resolver
+
+    def _run_workflow(self, definition, *, runner="local"):
+        row = self.database.create_workflow("wf", definition)
+        key = row["workflow_key"]
+        workflow = Workflow.from_yaml(definition, name_override=key)
+        run_id, status = WorkflowRunner(
+            self.database,
+            TaskLogManager(self.root / "logs"),
+            executor_resolver=self._executor_resolver(),
+        ).run(workflow, runner_alias=runner)
+        return key, run_id, status
+
+    def test_workflow_runs_tasks_on_different_runners(self) -> None:
+        self._start_agent("forward")
+        port = self.agent_servers[-1].port
+        self._register_satellite(mode="forward", url=f"https://127.0.0.1:{port}")
+        definition = (
+            "description: mixed\n"
+            "runner: sat-01\n"
+            "tasks:\n"
+            "  local_task:\n"
+            "    command: echo local-ok\n"
+            "    runner: local\n"
+            "  sat_task:\n"
+            "    command: echo sat-ok\n"
+        )
+        key, run_id, status = self._run_workflow(definition)
+        self.assertEqual(status, "SUCCESS")
+        root = self.root / "logs" / key / run_id
+        local_log = (root / "local_task.log").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        sat_log = (root / "sat_task.log").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn("local-ok", local_log)
+        self.assertIn("sat-ok", sat_log)
+
+    def test_task_on_missing_satellite_fails_with_error(self) -> None:
+        definition = (
+            "description: missing\n"
+            "tasks:\n"
+            "  a:\n"
+            "    command: echo a\n"
+            "    runner: ghost\n"
+        )
+        _, run_id, status = self._run_workflow(definition)
+        self.assertEqual(status, "FAILED")
+        task = self.database.task_states(run_id)["a"]
+        self.assertEqual(task["status"], "FAILED")
+        self.assertIn("卫星不存在", task["error_message"] or "")
+
+    def test_task_runner_selects_platform_setup(self) -> None:
+        self._start_agent("forward")
+        port = self.agent_servers[-1].port
+        self._register_satellite(mode="forward", url=f"https://127.0.0.1:{port}")
+        definition = (
+            "description: setup\n"
+            "runner: sat-01\n"
+            "setup:\n  linux: echo LINUX-SETUP\n  windows: echo WINDOWS-SETUP\n"
+            "tasks:\n"
+            "  a:\n"
+            "    command: echo a\n"
+        )
+        key, run_id, status = self._run_workflow(definition)
+        self.assertEqual(status, "SUCCESS")
+        text = (self.root / "logs" / key / run_id / "a.log").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        expected = "WINDOWS-SETUP" if os.name == "nt" else "LINUX-SETUP"
+        self.assertIn(expected, text)
+
+    def test_reverse_stream_flushes_headers_immediately(self) -> None:
+        self._start_agent("reverse")
+        self._register_satellite(mode="reverse")
+        self.assertTrue(
+            self._wait_for(lambda: self.manager._get_stream("sat-01") is not None)
+        )
+        client = SatelliteClient(
+            f"https://127.0.0.1:{self.master.port}",
+            token=TOKEN,
+            alias="sat-01",
+            timeout=10,
+            trust=lambda fp: True,
+        )
+        client.register(json_body={"alias": "sat-01", "platform": "linux"})
+        started = time.monotonic()
+        connection, response = client.open_stream(PATH_STREAM)
+        line = response.readline()
+        elapsed = time.monotonic() - started
+        connection.close()
+        self.assertIn(b"event: ping", line)
+        self.assertLess(elapsed, 2.0)
+
+    def test_superseded_stream_does_not_mark_satellite_offline(self) -> None:
+        self._start_agent("reverse")
+        self._register_satellite(mode="reverse")
+        self.assertTrue(
+            self._wait_for(lambda: self.manager._get_stream("sat-01") is not None)
+        )
+        old_state = self.manager._get_stream("sat-01")
+        new_state = self.manager._register_stream("sat-01")
+        self.manager._drop_stream("sat-01", old_state)
+        self.assertEqual(self.database.get_satellite("sat-01").status, "online")
+        self.manager._drop_stream("sat-01", new_state)
+        self.assertEqual(self.database.get_satellite("sat-01").status, "offline")
+
     def test_reverse_mode_accepts_pinned_fingerprint(self) -> None:
         fingerprint = certificate_fingerprint(self.master_cert)
         self._start_agent("reverse", master_cert_fingerprint=fingerprint)
@@ -404,6 +542,55 @@ class SatelliteEndToEndTests(unittest.TestCase):
         )
         executor = SatelliteTaskExecutor(self.manager, "sat-01")
         self.assertEqual(executor.platform, "windows" if os.name == "nt" else "linux")
+
+
+class RunnerAssignmentTests(unittest.TestCase):
+    def test_task_runner_overrides_workflow_default(self) -> None:
+        workflow = Workflow.from_yaml(
+            "description: wf\nrunner: sat-01\ntasks:\n"
+            "  a:\n    command: echo a\n"
+            "  b:\n    command: echo b\n    runner: sat-02\n",
+            name_override="wf",
+        )
+        self.assertEqual(workflow.runner, "sat-01")
+        self.assertEqual(workflow.task_runner(workflow.tasks["a"]), "sat-01")
+        self.assertEqual(workflow.task_runner(workflow.tasks["b"]), "sat-02")
+
+    def test_runner_defaults_to_local(self) -> None:
+        workflow = Workflow.from_yaml(
+            "description: wf\ntasks:\n  a:\n    command: echo a\n",
+            name_override="wf",
+        )
+        self.assertIsNone(workflow.runner)
+        self.assertEqual(workflow.task_runner(workflow.tasks["a"]), "local")
+        self.assertEqual(workflow.runner_locations(), [("local", 1)])
+
+    def test_runner_locations_summary(self) -> None:
+        workflow = Workflow.from_yaml(
+            "description: wf\nrunner: sat-01\ntasks:\n"
+            "  a:\n    command: echo a\n"
+            "  b:\n    command: echo b\n    runner: sat-02\n"
+            "  c:\n    command: echo c\n    runner: local\n",
+            name_override="wf",
+        )
+        self.assertEqual(
+            workflow.runner_locations(),
+            [("sat-01", 1), ("sat-02", 1), ("local", 1)],
+        )
+
+    def test_invalid_runner_rejected(self) -> None:
+        with self.assertRaises(WorkflowError):
+            Workflow.from_yaml(
+                "description: wf\nrunner: bad alias\ntasks:\n"
+                "  a:\n    command: echo a\n",
+                name_override="wf",
+            )
+        with self.assertRaises(WorkflowError):
+            Workflow.from_yaml(
+                "description: wf\ntasks:\n  a:\n    command: echo a\n"
+                "    runner: bad alias\n",
+                name_override="wf",
+            )
 
 
 class SatelliteManagementApiTests(unittest.TestCase):
@@ -439,6 +626,79 @@ class SatelliteManagementApiTests(unittest.TestCase):
     def test_list_satellites_empty(self) -> None:
         payload = self.client.get("/api/satellites").get_json()
         self.assertEqual(payload["satellites"], [])
+
+    def test_satellite_service_flag_disabled(self) -> None:
+        payload = self.client.get("/api/satellites").get_json()
+        self.assertFalse(payload["enabled"])
+        overview = self.client.get("/api/system/overview").get_json()
+        self.assertFalse(overview["satellite_enabled"])
+
+    def test_run_records_runner_locations(self) -> None:
+        definition = (
+            "description: wf\ntasks:\n  a:\n    command: echo a\n"
+            "  b:\n    command: echo b\n"
+        )
+        key = self.database.create_workflow("wf", definition)["workflow_key"]
+        workflow = Workflow.from_yaml(definition, name_override=key)
+        run_id, status = WorkflowRunner(
+            self.database, TaskLogManager(self.root / "logs")
+        ).run(workflow, runner_alias="local")
+        self.assertEqual(status, "SUCCESS")
+        runs = self.client.get("/api/runs").get_json()["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["runner"], "local")
+        self.assertEqual(
+            runs[0]["runner_locations"], [{"alias": "local", "count": 2}]
+        )
+
+    def test_run_label_uses_recorded_locations_not_latest(self) -> None:
+        definition = "description: wf\ntasks:\n  a:\n    command: echo a\n"
+        key = self.database.create_workflow("wf", definition)["workflow_key"]
+        workflow = Workflow.from_yaml(definition, name_override=key)
+        WorkflowRunner(self.database, TaskLogManager(self.root / "logs")).run(
+            workflow, runner_alias="local"
+        )
+        self.client.put(
+            "/api/satellites/sat-01",
+            json={"mode": "forward", "url": "https://10.0.0.2:7121"},
+        )
+        self.client.put(
+            f"/api/workflows/{key}",
+            json={
+                "definition": "description: wf\nrunner: sat-01\ntasks:\n"
+                "  a:\n    command: echo a\n",
+                "name": "wf",
+                "runner": "sat-01",
+            },
+        )
+        runs = self.client.get("/api/runs").get_json()["runs"]
+        self.assertEqual(runs[0]["runner"], "local")
+        self.assertEqual(
+            runs[0]["runner_locations"], [{"alias": "local", "count": 1}]
+        )
+
+    def test_satellite_service_flag_enabled(self) -> None:
+        app = create_app(
+            database_path=self.root / "scheduler.db",
+            logs_path=self.root / "logs",
+            start_scheduler=False,
+            allow_insecure_remote_login=True,
+            satellite_manager=object(),
+        )
+        client = app.test_client()
+        client.post(
+            "/api/auth/login",
+            json={
+                "username": "tester",
+                "password_hash": client_password_hash("test-password-1234"),
+            },
+        )
+        payload = client.get("/api/satellites").get_json()
+        self.assertTrue(payload["enabled"])
+        overview = client.get("/api/system/overview").get_json()
+        self.assertTrue(overview["satellite_enabled"])
+        app.extensions["schedule_service"].shutdown()
+        app.extensions["execution_service"].shutdown()
 
     def test_upsert_generates_token(self) -> None:
         response = self.client.put(
@@ -499,6 +759,65 @@ class SatelliteManagementApiTests(unittest.TestCase):
         self.assertIn("alias: sat-01", text)
         self.assertIn("master_url: https://master.example.com:7120", text)
         self.assertIn("token:", text)
+
+    def test_workflow_payload_includes_runner_locations(self) -> None:
+        self.database.create_workflow(
+            "wf",
+            "description: wf\nrunner: sat-01\ntasks:\n"
+            "  a:\n    command: echo a\n"
+            "  b:\n    command: echo b\n    runner: local\n",
+        )
+        workflows = self.client.get("/api/workflows").get_json()["workflows"]
+        self.assertEqual(len(workflows), 1)
+        self.assertEqual(workflows[0]["runner"], "sat-01")
+        self.assertEqual(
+            workflows[0]["runner_locations"],
+            [{"alias": "sat-01", "count": 1}, {"alias": "local", "count": 1}],
+        )
+        self.assertEqual(workflows[0]["tasks"][0]["runner"], "sat-01")
+        self.assertEqual(workflows[0]["tasks"][1]["runner"], "local")
+
+    def test_edit_workflow_applies_runner_to_yaml(self) -> None:
+        self.client.put(
+            "/api/satellites/sat-01",
+            json={"mode": "forward", "url": "https://10.0.0.2:7121"},
+        )
+        row = self.database.create_workflow(
+            "wf", "description: wf\ntasks:\n  a:\n    command: echo a\n"
+        )
+        key = row["workflow_key"]
+        response = self.client.put(
+            f"/api/workflows/{key}",
+            json={
+                "definition": "description: wf\ntasks:\n  a:\n    command: echo a\n",
+                "name": "wf",
+                "runner": "sat-01",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        stored = self.database.get_workflow(key)
+        self.assertIn("runner: sat-01", stored["definition"])
+        self.assertEqual(stored["runner"], "sat-01")
+
+    def test_edit_workflow_local_runner_removes_yaml_key(self) -> None:
+        row = self.database.create_workflow(
+            "wf",
+            "description: wf\nrunner: sat-01\ntasks:\n  a:\n    command: echo a\n",
+        )
+        key = row["workflow_key"]
+        response = self.client.put(
+            f"/api/workflows/{key}",
+            json={
+                "definition": "description: wf\nrunner: sat-01\ntasks:\n"
+                "  a:\n    command: echo a\n",
+                "name": "wf",
+                "runner": "local",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        stored = self.database.get_workflow(key)
+        self.assertNotIn("runner:", stored["definition"])
+        self.assertEqual(stored["runner"], "local")
 
     def test_test_endpoint_reports_unreachable(self) -> None:
         self.client.put(

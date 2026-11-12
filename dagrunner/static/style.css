@@ -333,6 +333,8 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .dag-node-title { fill: #17324d; font: 700 12px Inter, "Microsoft YaHei", "Segoe UI", sans-serif; }
 .dag-node-id { fill: #667085; font: 400 10.5px "Cascadia Code", Consolas, monospace; }
 .dag-node-status { font: 750 9px Inter, "Segoe UI", sans-serif; }
+.dag-node-runner { fill: #eef4ff; stroke: #c7d7fe; }
+.dag-node-runner-text { fill: #3538cd; font: 700 9px Inter, "Segoe UI", sans-serif; }
 .dag-run-node { cursor: default; }
 .dag-status-running rect, .status-running { fill: #eff8ff; stroke: #2e90fa; }
 .dag-status-running circle { fill: #2e90fa; }
@@ -370,6 +372,10 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .satellite-form-grid .satellite-wide { grid-column: 1 / -1; }
 .satellite-list-head { display: flex; align-items: center; justify-content: space-between; }
 .satellite-list { display: grid; gap: 10px; }
+.satellite-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfd; flex-wrap: wrap; }
+.satellite-row-alias { font-family: "Cascadia Code", Consolas, monospace; font-weight: 700; color: #17324d; }
+.satellite-row-meta { flex: 1; min-width: 140px; color: #667085; font-size: 11px; }
+.satellite-row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .satellite-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfd; }
 .satellite-panel-new { border-style: dashed; }
 .satellite-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

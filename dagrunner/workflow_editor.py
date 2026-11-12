@@ -68,6 +68,7 @@ def preview_definition(definition, workflow_name=None):
     except (yaml.YAMLError, RecursionError) as exc:
         raise WorkflowError(f"无法解析工作流 YAML：{exc}") from exc
     return {
+        "runner": workflow.runner or "local",
         "tasks": [
             {
                 "name": task.name,
@@ -78,9 +79,10 @@ def preview_definition(definition, workflow_name=None):
                 "command": task.command,
                 "success": list(task.success),
                 "failure": list(task.failure),
+                "runner": workflow.task_runner(task),
             }
             for task in workflow.tasks.values()
-        ]
+        ],
     }
 
 

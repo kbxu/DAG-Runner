@@ -234,8 +234,9 @@ satellite:
   enabled: true
   host: 0.0.0.0
   port: 7120
-  cert: var/satellite/cert.pem
-  key: var/satellite/key.pem
+  # 主程序侧证书，首次启动自动生成
+  cert: var/master-certs/cert.pem
+  key: var/master-certs/key.pem
   # 卫星版回连主程序的地址，留空按 Web 请求 Host 推导
   public_url: ""
 ```
@@ -250,7 +251,32 @@ satellite:
 python -m dagrunner.satellite --config var/satellite.yaml
 ```
 
+主程序与卫星版的证书分目录存放，互不干扰：主程序在 `var/master-certs/`，卫星版在 `var/satellite-certs/`（卫星的信任记录 `known_master.json` 也在这里）。迁移卫星时把 `var/satellite-certs/` 整个目录拷到新机器即可，不用重新签发证书。
+
 把工作流的「运行位置」设置为该卫星别名，任务就会在卫星机器上执行，日志实时回传到主程序。卫星版默认 `auto` 模式：能连上主程序就用反向模式，连不上就监听前向连接，网络恢复后自动切换。
+
+### 4. 指定运行位置（workflow 级 / task 级）
+
+运行位置可以写在 workflow YAML 里，支持两级，**task 级优先**：
+
+```yaml
+runner: sat-01          # workflow 级默认；不写就是本机
+tasks:
+  extract:
+    command: python extract.py
+  report:               # 不写 runner，跟随 workflow 默认（sat-01）
+    command: python report.py
+  notify:
+    command: python notify.py
+    runner: local       # 覆盖 workflow 默认，强制在本机执行
+```
+
+- 都不写 → 全部在本机执行。
+- workflow 写了、task 没写 → 跟随 workflow。
+- task 写了 → 以 task 为准。
+- 卫星不可达或不存在时，对应任务直接失败并在日志/错误信息里说明原因。
+
+Web 控制台编辑工作流时的「运行位置」下拉框对应 workflow 级 `runner`（保存时写入 YAML 顶层）。DAG 视图中，在卫星上运行的节点右上角会标注卫星别名；工作流列表和运行记录标题旁的标签会汇总运行地点：全部本机留空、单一卫星显示别名、混合显示 `mixed`（hover 可查看各地点的任务数）。
 
 ## 项目结构
 

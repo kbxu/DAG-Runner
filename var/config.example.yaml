@@ -20,8 +20,9 @@ satellite:
   port: 7120
   threads: 16
   # 首次启动自动生成自签名证书
-  cert: var/satellite/cert.pem
-  key: var/satellite/key.pem
+  # 主程序侧证书（首次启动自动生成）
+  cert: var/master-certs/cert.pem
+  key: var/master-certs/key.pem
   # 卫星版回连主程序时使用的地址；留空则按 Web 请求的 Host 推导
   public_url: ""
   timeout: 15

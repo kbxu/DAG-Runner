@@ -76,6 +76,13 @@ from .scripting import (
 TERMINAL = {JOB_SUCCESS, JOB_FAILED, JOB_CANCELLED, JOB_ERROR}
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
+
+
 @dataclass
 class SatelliteAgentConfig:
     alias: str
@@ -84,8 +91,8 @@ class SatelliteAgentConfig:
     mode: str = "auto"
     listen_host: str = "0.0.0.0"
     listen_port: int = 7121
-    cert: str = "var/satellite/cert.pem"
-    key: str = "var/satellite/key.pem"
+    cert: str = "var/satellite-certs/cert.pem"
+    key: str = "var/satellite-certs/key.pem"
     host_key_policy: str = "accept-new"
     master_cert_fingerprint: str = ""
     workdir: str = ""
@@ -145,6 +152,7 @@ class SatelliteAgent:
                 token=self.config.token,
                 alias=self.config.alias,
                 timeout=self.config.timeout,
+                stream_timeout=60,
                 trust=self._trust,
             )
         return self._client
@@ -280,9 +288,11 @@ class SatelliteAgent:
         while not self._stop.is_set():
             try:
                 line = response.readline()
-            except (socket.timeout, TimeoutError):
-                continue
-            except OSError:
+            except OSError as exc:
+                # A read timeout is not a dead stream: the master sends pings
+                # every few seconds. Anything else means the stream is gone.
+                if _is_timeout_error(exc):
+                    continue
                 break
             if not line:
                 break
@@ -562,6 +572,9 @@ def create_satellite_agent_app(agent: SatelliteAgent) -> Flask:
                 "ok": True,
                 "session_token": agent.session_store.create(alias),
                 "agent": agent.config.alias,
+                "platform": "windows" if os.name == "nt" else "linux",
+                "hostname": socket.gethostname(),
+                "agent_version": AGENT_VERSION,
             }
         )
 

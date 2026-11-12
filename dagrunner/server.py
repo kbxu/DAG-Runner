@@ -53,8 +53,8 @@ def _start_satellite_service(config: dict, database_path: Path):
         timeout=float(satellite_config.get("timeout", 15)),
         poll_interval=float(satellite_config.get("poll_interval", 1.0)),
     )
-    cert = Path(satellite_config.get("cert", "var/satellite/cert.pem"))
-    key = Path(satellite_config.get("key", "var/satellite/key.pem"))
+    cert = Path(satellite_config.get("cert", "var/master-certs/cert.pem"))
+    key = Path(satellite_config.get("key", "var/master-certs/key.pem"))
     ensure_certificate(cert, key, common_name="dagrunner-satellite-master")
     app = create_satellite_master_app(manager)
     host = str(satellite_config.get("host", "0.0.0.0"))

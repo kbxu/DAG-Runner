@@ -64,6 +64,30 @@ def _log_download_filename(task, fallback_time=None) -> str:
     return f"{name}_{stamp}.txt"
 
 
+def _runner_locations(workflow) -> list[dict]:
+    """Summarise where a workflow's tasks run, satellites first."""
+    return [
+        {"alias": alias, "count": count}
+        for alias, count in workflow.runner_locations()
+    ]
+
+
+def _apply_runner_to_definition(definition: str, runner: str) -> str:
+    """Set the top-level workflow ``runner`` in the YAML text."""
+    output: list[str] = []
+    replaced = False
+    for line in definition.splitlines():
+        if not replaced and re.match(r"^runner\s*:", line):
+            replaced = True
+            if runner != "local":
+                output.append(f"runner: {runner}")
+            continue
+        output.append(line)
+    if not replaced and runner != "local":
+        output.insert(0, f"runner: {runner}")
+    return "\n".join(output) + "\n"
+
+
 def _satellites_payload(database: StateDatabase) -> list[dict]:
     jobs_by_alias: dict[str, list] = {}
     for job in database.list_satellite_jobs(limit=200):
@@ -399,7 +423,12 @@ def create_app(
 
     @app.get("/api/satellites")
     def list_satellites():
-        return jsonify({"satellites": _satellites_payload(database)})
+        return jsonify(
+            {
+                "satellites": _satellites_payload(database),
+                "enabled": satellite_manager is not None,
+            }
+        )
 
     @app.put("/api/satellites/<alias>")
     def upsert_satellite(alias: str):
@@ -477,8 +506,8 @@ def create_app(
             f"  mode: {config.mode}",
             "  listen_host: 0.0.0.0",
             "  listen_port: 7121",
-            "  cert: var/satellite/cert.pem",
-            "  key: var/satellite/key.pem",
+            "  cert: var/satellite-certs/cert.pem",
+            "  key: var/satellite-certs/key.pem",
             f"  host_key_policy: {config.host_key_policy}",
             f'  master_cert_fingerprint: "{satellite_fingerprint}"',
             '  workdir: ""',
@@ -502,6 +531,7 @@ def create_app(
         return jsonify(
             resources=_system_resources_payload(database_path),
             satellites=_satellites_payload(database),
+            satellite_enabled=satellite_manager is not None,
         )
 
     @app.get("/api/workflows")
@@ -543,7 +573,8 @@ def create_app(
                 {
                     "name": name,
                     "db_id": registry.rows[name]["id"],
-                    "runner": registry.rows[name]["runner"] or "local",
+                    "runner": workflow.runner or registry.rows[name]["runner"] or "local",
+                    "runner_locations": _runner_locations(workflow),
                     "description": workflow.description,
                     "last_run_time": last_run_times.get(name),
                     "task_count": len(workflow.tasks),
@@ -563,6 +594,7 @@ def create_app(
                             "type": task.task_type,
                             "success": list(task.success),
                             "failure": list(task.failure),
+                            "runner": workflow.task_runner(task),
                         }
                         for task in workflow.tasks.values()
                     ],
@@ -605,6 +637,7 @@ def create_app(
         runner = str(request.form.get("runner", "local") or "local").strip() or "local"
         if runner != "local" and not database.is_satellite(runner):
             raise ServiceError(f"运行位置不存在：{runner}")
+        definition = _apply_runner_to_definition(definition, runner)
         try:
             row = database.create_workflow(display_name, definition, requested_id)
         except ValueError as exc:
@@ -709,12 +742,15 @@ def create_app(
             "name": workflow_name,
             "description": workflow.description,
             "definition": definition,
+            "runner": workflow.runner or "local",
+            "runner_locations": _runner_locations(workflow),
             "tasks": [
                 {
                     "name": task.name, "description": task.description,
                     "depends": list(task.depends), "enabled": task.enabled,
                     "type": task.task_type, "success": list(task.success),
                     "failure": list(task.failure),
+                    "runner": workflow.task_runner(task),
                     "code": dump_workflow_yaml({task.name: raw["tasks"][task.name]}),
                 }
                 for task in workflow.tasks.values()
@@ -748,6 +784,7 @@ def create_app(
         )
         if runner != "local" and not database.is_satellite(runner):
             raise ServiceError(f"运行位置不存在：{runner}")
+        definition = _apply_runner_to_definition(definition, runner)
         database.update_workflow(workflow_name, display_name, definition)
         database.update_schedule_description(workflow_name, display_name)
         database.set_workflow_runner(workflow_name, runner)
@@ -864,6 +901,13 @@ def create_app(
             item["workflow_description"] = (
                 row["workflow_description"] or row["workflow_name"]
             )
+            # The run label reflects the environment recorded when the run
+            # started, not the workflow's current configuration.
+            item["runner"] = row["runner"] or "local"
+            stored_locations = row["runner_locations"]
+            item["runner_locations"] = (
+                json.loads(stored_locations) if stored_locations else []
+            )
             run_rows.append(item)
         return jsonify(
             {
@@ -917,12 +961,16 @@ def create_app(
                 else list(definition.depends) if definition else []
             )
             task["task_description"] = description or row["task_name"]
+            task["runner"] = (
+                workflow.task_runner(definition) if definition else "local"
+            )
             tasks.append(task)
             graph_tasks.append(
                 {
                     "name": row["task_name"],
                     "description": description,
                     "depends": depends,
+                    "runner": task["runner"],
                     "enabled": definition.enabled if definition else True,
                     "status": row["status"],
                     "type": row["task_type"] if snapshot else (

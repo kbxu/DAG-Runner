@@ -37,7 +37,7 @@ class WorkflowRunner:
         executor: TaskExecutor | None = None,
         notifier: Notifier | None = None,
         max_parallel_tasks: int = 4,
-        satellite_executor: TaskExecutor | None = None,
+        executor_resolver=None,
     ):
         if max_parallel_tasks <= 0:
             raise ValueError("max_parallel_tasks must be positive")
@@ -46,8 +46,10 @@ class WorkflowRunner:
         self.executor = executor or TaskExecutor()
         self.notifier = notifier or NullNotifier()
         self.max_parallel_tasks = max_parallel_tasks
-        self.satellite_executor = satellite_executor
+        self.executor_resolver = executor_resolver or (lambda alias: self.executor)
         self._runner_alias = "local"
+        self._default_runner = "local"
+        self._executors: dict[str, TaskExecutor] = {}
 
     def run(
         self,
@@ -62,6 +64,8 @@ class WorkflowRunner:
         runner_alias: str = "local",
     ) -> tuple[str, str]:
         self._runner_alias = runner_alias or "local"
+        self._default_runner = self._runner_alias
+        self._executors = {}
         if from_task and resume_run_id:
             raise WorkflowError("from_task and resume_run_id cannot be used together")
         if only_task and not from_task:
@@ -105,6 +109,10 @@ class WorkflowRunner:
                 }
                 for name in order
             },
+            runner_locations=[
+                {"alias": alias, "count": count}
+                for alias, count in workflow.runner_locations()
+            ],
         )
         states = {name: "PENDING" for name in order}
         handled_failures: set[str] = set()
@@ -194,6 +202,12 @@ class WorkflowRunner:
             if workflow_timeout_timer is not None:
                 workflow_timeout_timer.cancel()
 
+    def _executor_for(self, alias: str) -> TaskExecutor:
+        """Resolve (and cache) the executor for a run location."""
+        if alias not in self._executors:
+            self._executors[alias] = self.executor_resolver(alias)
+        return self._executors[alias]
+
     def _run_tasks(
         self,
         workflow: Workflow,
@@ -208,16 +222,6 @@ class WorkflowRunner:
         reused: set[str] | None = None,
     ) -> None:
         reused = reused or set()
-        use_satellite = (
-            self._runner_alias not in ("", "local")
-            and self.satellite_executor is not None
-        )
-        executor = self.satellite_executor if use_satellite else self.executor
-        workflow_setup = (
-            workflow.setup_for_platform(_executor_platform(self.satellite_executor))
-            if use_satellite
-            else workflow.setup_for_current_platform()
-        )
         order_index = {name: index for index, name in enumerate(order)}
         running: dict[Future, tuple[str, Path]] = {}
         pool = DaemonPool(
@@ -292,6 +296,17 @@ class WorkflowRunner:
                             raise RuntimeError(
                                 f"command task {task_name!r} has no command"
                             )
+                        try:
+                            executor = self._executor_for(
+                                workflow.task_runner(task)
+                            )
+                        except WorkflowError as exc:
+                            message = str(exc)
+                            self.database.set_task_status(
+                                run_id, task_name, "FAILED", error_message=message
+                            )
+                            states[task_name] = "FAILED"
+                            continue
                         log_file = self.logs.path_for(
                             workflow.name, run_id, task_name
                         )
@@ -306,7 +321,9 @@ class WorkflowRunner:
                             executor.execute,
                             task,
                             cwd=workflow.task_cwd(task),
-                            workflow_setup=workflow_setup,
+                            workflow_setup=workflow.setup_for_platform(
+                                _executor_platform(executor)
+                            ),
                             log_file=log_file,
                             cancel_event=cancel_event,
                             workflow_timeout_event=workflow_timeout_event,
@@ -618,17 +635,20 @@ def main(argv: list[str] | None = None) -> int:
             name_override=stored["workflow_key"],
             description_override=stored["name"],
         )
-        runner_alias = stored["runner"] or "local"
-        satellite_executor = None
-        if runner_alias != "local":
-            if not database.is_satellite(runner_alias):
-                raise WorkflowError(f"卫星不存在：{runner_alias!r}")
-            from .satellite_executor import SatelliteTaskExecutor
-            from .satellite_master import SatelliteManager
+        runner_alias = workflow.runner or stored["runner"] or "local"
+        from .satellite_master import SatelliteManager
 
-            satellite_executor = SatelliteTaskExecutor(
-                SatelliteManager(database), runner_alias
-            )
+        manager = SatelliteManager(database)
+
+        def executor_resolver(alias: str) -> TaskExecutor:
+            if alias in ("", "local"):
+                return TaskExecutor()
+            if not database.is_satellite(alias):
+                raise WorkflowError(f"卫星不存在：{alias!r}")
+            from .satellite_executor import SatelliteTaskExecutor
+
+            return SatelliteTaskExecutor(manager, alias)
+
         lock_path = args.db.resolve().parent / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             recovered = database.mark_orphaned(workflow.name)
@@ -641,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
                 database,
                 TaskLogManager(args.logs),
                 notifier=notifier,
-                satellite_executor=satellite_executor,
+                executor_resolver=executor_resolver,
             ).run(workflow, args.from_task, runner_alias=runner_alias)
         print(f"workflow={workflow.name} run_id={run_id} status={status}")
         return 0 if status == "SUCCESS" else 1

@@ -195,6 +195,21 @@ class SatelliteManager:
         exit_code = runtime.exit_code if runtime.exit_code is not None else 1
         return ExecutionResult(exit_code, runtime.error_message)
 
+    def refresh_satellite_platform(self, alias: str) -> str:
+        """Ask a forward-reachable satellite for its platform and remember it."""
+        config = self.database.get_satellite(alias)
+        if config is None or not config.url:
+            return ""
+        try:
+            client = self._forward_client(config)
+            payload = client.request("GET", PATH_HEALTH, auth=False, timeout=self.timeout)
+        except Exception:
+            return ""
+        platform = str(payload.get("platform", "") or "")
+        if platform:
+            self.database.set_satellite_status(alias, "online", platform=platform)
+        return platform
+
     def test_connection(self, alias: str) -> dict:
         """Probe a satellite and report reachability, transport mode and latency."""
         config = self.database.get_satellite(alias)
@@ -284,7 +299,16 @@ class SatelliteManager:
                 f"satellite {runtime.alias!r} has no active channel or URL"
             )
         client = self._forward_client(config)
-        client.register(json_body={"role": "master"})
+        response = client.register(json_body={"role": "master"})
+        platform = str(response.get("platform", "") or "")
+        if platform:
+            self.database.set_satellite_status(
+                config.alias,
+                "online",
+                platform=platform,
+                hostname=str(response.get("hostname", "") or ""),
+                agent_version=str(response.get("agent_version", "") or ""),
+            )
         client.request("POST", PATH_JOBS, json_body=runtime.spec.to_json())
         self._mark_running(runtime)
         threading.Thread(
@@ -446,9 +470,14 @@ class SatelliteManager:
 
     def _drop_stream(self, alias: str, state: _StreamState) -> None:
         with self._streams_lock:
-            if self._streams.get(alias) is state:
+            current = self._streams.get(alias) is state
+            if current:
                 del self._streams[alias]
-        self.database.set_satellite_status(alias, "offline", last_error="stream disconnected")
+        # A superseded stream must not mark a newer connection as offline.
+        if current:
+            self.database.set_satellite_status(
+                alias, "offline", last_error="stream disconnected"
+            )
 
     def _heartbeat(self, alias: str) -> None:
         with self._streams_lock:
@@ -496,13 +525,17 @@ class SatelliteManager:
     def _probe_forward(self, config: SatelliteConfig) -> None:
         try:
             client = self._forward_client(config)
-            client.request("GET", PATH_HEALTH, auth=False, timeout=10)
+            payload = client.request("GET", PATH_HEALTH, auth=False, timeout=10)
         except Exception as exc:
             self.database.set_satellite_status(
                 config.alias, "offline", last_error=str(exc)[:500]
             )
         else:
-            self.database.set_satellite_status(config.alias, "online")
+            self.database.set_satellite_status(
+                config.alias,
+                "online",
+                platform=str(payload.get("platform", "") or ""),
+            )
 
     def _cleanup_jobs(self) -> None:
         cutoff = time.monotonic() - 3600
@@ -609,9 +642,13 @@ def create_satellite_master_app(manager: SatelliteManager) -> Flask:
 
         def generate():
             try:
+                # Flush the response status line immediately; otherwise the
+                # client waits for the first event before it can even read the
+                # headers, which looks like a connection timeout.
+                yield sse_event(SSE_EVENT_PING, {"ts": int(time.time())})
                 while True:
                     try:
-                        frame = state.queue.get(timeout=15)
+                        frame = state.queue.get(timeout=5)
                     except queue.Empty:
                         frame = sse_event(
                             SSE_EVENT_PING, {"ts": int(time.time())}

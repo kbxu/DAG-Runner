@@ -15,8 +15,10 @@ satellite:
   listen_host: 0.0.0.0
   listen_port: 7121
   # 首次启动自动生成自签名证书
-  cert: var/satellite/cert.pem
-  key: var/satellite/key.pem
+  # 卫星版自己的证书（首次启动自动生成，不要与主程序共用）
+  # 迁移卫星时直接拷贝 var/satellite-certs/ 整个目录即可
+  cert: var/satellite-certs/cert.pem
+  key: var/satellite-certs/key.pem
   host_key_policy: accept-new
   # 固定主程序证书指纹（可选，64 位十六进制）；留空使用 accept-new
   master_cert_fingerprint: ""
