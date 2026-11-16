@@ -9,19 +9,27 @@ from pathlib import Path
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+# UTF-32 BOMs must be checked before UTF-16 BOMs: the UTF-32LE BOM starts
+# with the UTF-16LE BOM bytes.
 _BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
     (codecs.BOM_UTF8, "utf-8-sig"),
     (codecs.BOM_UTF16_LE, "utf-16"),
     (codecs.BOM_UTF16_BE, "utf-16"),
-    (codecs.BOM_UTF32_LE, "utf-32"),
-    (codecs.BOM_UTF32_BE, "utf-32"),
 )
 
 
-def _fallback_encodings() -> tuple[str, ...]:
-    encodings: list[str] = []
+def _candidate_encodings() -> tuple[str, ...]:
+    """Encodings worth trying, in tie-break order.
+
+    Chinese ANSI text (GBK/GB18030) is included on every platform because a
+    Windows satellite may produce such logs while the master runs elsewhere.
+    """
+    encodings: list[str] = ["utf-16-le", "utf-16-be"]
     if os.name == "nt":
-        encodings.extend(("mbcs", "cp936", "gbk"))
+        encodings.append("mbcs")
+    encodings.extend(("gb18030", "cp936", "big5"))
     try:
         preferred = locale.getpreferredencoding(False)
     except Exception:
@@ -38,29 +46,105 @@ def _fallback_encodings() -> tuple[str, ...]:
     return tuple(unique)
 
 
-def _decode_bytes(data: bytes) -> str:
+def _plausibility(text: str) -> int:
+    """Score decoded text so real prose beats byte-shifted misdecoding."""
+    score = 0
+    for character in text:
+        code = ord(character)
+        if code in (0x09, 0x0A, 0x0D) or 0x20 <= code < 0x7F:
+            score += 1
+        elif (
+            0x4E00 <= code <= 0x9FFF
+            or 0x3400 <= code <= 0x4DBF
+            or 0xF900 <= code <= 0xFAFF
+        ):
+            score += 4
+        elif 0x3000 <= code <= 0x303F or 0xFF00 <= code <= 0xFFEF:
+            score += 3
+        elif 0x00C0 <= code <= 0x024F:
+            score += 1
+        elif code < 0x20 or 0x7F <= code <= 0x9F:
+            score -= 10
+        elif 0xE000 <= code <= 0xF8FF:
+            score -= 2
+    return score
+
+
+def _looks_like_text(text: str) -> bool:
+    if not text:
+        return True
+    bad = sum(
+        1
+        for character in text
+        if ord(character) == 0
+        or (ord(character) < 0x20 and character not in "\t\r\n")
+    )
+    return bad <= len(text) * 0.02
+
+
+def _sniff_utf16(raw: bytes) -> str | None:
+    """Detect UTF-16 without BOM from the NUL-byte pattern of ASCII text."""
+    length = len(raw)
+    if length < 4 or length % 2:
+        return None
+    zeros_even = raw[0::2].count(0)
+    zeros_odd = raw[1::2].count(0)
+    half = length / 2
+    if zeros_odd >= max(2, half * 0.3) and zeros_even <= zeros_odd * 0.2:
+        return "utf-16-le"
+    if zeros_even >= max(2, half * 0.3) and zeros_odd <= zeros_even * 0.2:
+        return "utf-16-be"
+    return None
+
+
+def decode_bytes(data: bytes, *, strict: bool = False) -> str:
+    """Decode log or upload bytes by BOM first, then by plausibility.
+
+    With ``strict`` set, payloads that do not look like text raise
+    UnicodeDecodeError instead of being replaced character by character.
+    """
+    raw = bytes(data)
     for bom, encoding in _BOMS:
-        if data.startswith(bom):
-            return data.decode(encoding, errors="replace")
+        if raw.startswith(bom):
+            return raw.decode(encoding, errors="replace")
+    sniffed = _sniff_utf16(raw)
+    if sniffed is not None:
+        return raw.decode(sniffed, errors="replace")
+    # Plain UTF-8 is the common case. A clean decode wins immediately, which
+    # keeps ASCII text from being reinterpreted as UTF-16 by the scoring below.
     try:
-        return data.decode("utf-8")
+        utf8_text = raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
-    fallback = _fallback_encodings()
-    lines: list[str] = []
-    for raw_line in data.split(b"\n"):
+    else:
+        if _looks_like_text(utf8_text):
+            return utf8_text
+    best_key: tuple[int, int] | None = None
+    best_text: str | None = None
+    for order, encoding in enumerate(_candidate_encodings()):
         try:
-            lines.append(raw_line.decode("utf-8"))
-        except UnicodeDecodeError:
-            for encoding in fallback:
-                try:
-                    lines.append(raw_line.decode(encoding))
-                    break
-                except (UnicodeDecodeError, LookupError):
-                    continue
-            else:
-                lines.append(raw_line.decode("utf-8", errors="replace"))
-    return "\n".join(lines)
+            text = raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        key = (-_plausibility(text), order)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_text = text
+    if best_text is None:
+        if strict:
+            raise UnicodeDecodeError(
+                "unknown", raw, 0, 1, "cannot detect text encoding"
+            )
+        return raw.decode("utf-8", errors="replace")
+    if strict and not _looks_like_text(best_text):
+        raise UnicodeDecodeError(
+            "unknown", raw, 0, 1, "cannot detect text encoding"
+        )
+    return best_text
+
+
+def _decode_bytes(data: bytes) -> str:
+    return decode_bytes(data)
 
 
 class TaskLogManager:

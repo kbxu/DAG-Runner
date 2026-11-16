@@ -1,5 +1,5 @@
 :root {
-  --list-table-width: 1140px;
+  --list-table-width: 1240px;
   --ink: #17202a;
   --muted: #677281;
   --line: #e4e9ee;
@@ -66,7 +66,7 @@ h2 { margin: 0; font-size: 17px; }
 .run-stat-failed b { color: var(--danger); }
 .table-wrap { overflow-x: auto; }
 .workflow-list-table, .run-list-table { width: var(--list-table-width); min-width: var(--list-table-width); max-width: var(--list-table-width); table-layout: fixed; }
-.workflow-col-name { width: 220px; }
+.workflow-col-name { width: 320px; }
 .workflow-col-schedule { width: 180px; }
 .workflow-col-time { width: 170px; }
 .workflow-col-actions { width: 400px; }
@@ -332,25 +332,19 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .dag-disabled circle { fill: #98a2b3; }
 .dag-node-title { fill: #17324d; font: 700 12px Inter, "Microsoft YaHei", "Segoe UI", sans-serif; }
 .dag-node-id { fill: #667085; font: 400 10.5px "Cascadia Code", Consolas, monospace; }
-.dag-node-status { font: 750 9px Inter, "Segoe UI", sans-serif; }
 .dag-node-runner { fill: #eef4ff; stroke: #c7d7fe; }
 .dag-node-runner-text { fill: #3538cd; font: 700 9px Inter, "Segoe UI", sans-serif; }
 .dag-run-node { cursor: default; }
 .dag-status-running rect, .status-running { fill: #eff8ff; stroke: #2e90fa; }
 .dag-status-running circle { fill: #2e90fa; }
-.dag-status-running .dag-node-status { fill: #175cd3; }
 .dag-status-success rect, .status-success { fill: #ecfdf3; stroke: #12b76a; }
 .dag-status-success circle { fill: #12b76a; }
-.dag-status-success .dag-node-status { fill: #067647; }
 .dag-status-failed rect, .status-failed { fill: #fef3f2; stroke: #f04438; }
 .dag-status-failed circle { fill: #f04438; }
-.dag-status-failed .dag-node-status { fill: #b42318; }
 .dag-status-skipped rect, .status-skipped { fill: #f2f4f7; stroke: #98a2b3; }
 .dag-status-skipped circle { fill: #98a2b3; }
-.dag-status-skipped .dag-node-status { fill: #475467; }
 .dag-status-pending rect, .status-pending { fill: #fffaeb; stroke: #f79009; }
 .dag-status-pending circle { fill: #f79009; }
-.dag-status-pending .dag-node-status { fill: #b54708; }
 .run-dag { margin-bottom: 18px; }
 .dag-detail { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafb; }
 .dag-inline { display: inline; margin-left: 7px; }
@@ -388,6 +382,6 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .satellite-panel-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .satellite-field-error { border-color: var(--danger) !important; }
 .workflow-name-cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.workflow-name-cell .workflow-link { flex: 1 1 auto; min-width: 0; }
+.workflow-name-cell .workflow-link { flex: 0 1 auto; min-width: 0; }
 .runner-tag { flex: 0 0 auto; white-space: nowrap; padding: 1px 6px; color: #3538cd; border-radius: 999px; background: #eef4ff; font-size: 11px; font-weight: 700; }
 @media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .brand { gap: 12px; } .brand-logo { width: 58px; height: 58px; } .live, .signed-in-user { display: none; } main { padding: 0 10px; } .panel-head { align-items: flex-start; gap: 12px; } .panel-actions { flex-wrap: wrap; justify-content: flex-end; } .form-grid, .schedule-editor-head, .schedule-input-row, .channel-form-grid, .satellite-form-grid { grid-template-columns: 1fr; } .channel-form-grid .channel-wide, .satellite-form-grid .satellite-wide { grid-column: auto; } }

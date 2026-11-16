@@ -16,7 +16,7 @@ from flask import Flask, Response, g, jsonify, redirect, render_template, reques
 
 from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
 from .database import StateDatabase
-from .logger import TaskLogManager
+from .logger import TaskLogManager, decode_bytes
 from .notifier import load_email_config, load_notifier, save_email_config
 from .migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
@@ -666,10 +666,11 @@ def create_app(
         if uploaded is None or not uploaded.filename:
             raise ServiceError("请选择工作流文件")
         try:
-            content = uploaded.read().decode("utf-8-sig")
+            preview = _prepare_import_preview(uploaded.filename, uploaded.read())
         except UnicodeDecodeError as exc:
-            raise ServiceError("工作流文件必须使用 UTF-8 编码") from exc
-        preview = _prepare_import_preview(uploaded.filename, content)
+            raise ServiceError(
+                "工作流文件编码无法识别（请使用 UTF-8 或 UTF-16）"
+            ) from exc
         definition, replacements = _unique_import_definition(
             str(preview["definition"]), Path(str(preview["filename"])).stem, registry
         )
@@ -1026,7 +1027,11 @@ def create_app(
         if "download" in request.args:
             run = database.get_run(run_id)
             text = TaskLogManager.read(task["log_file"])
-            response = Response(text, mimetype="text/plain; charset=utf-8")
+            # Prepend a UTF-8 BOM so Windows Notepad reliably detects the
+            # encoding instead of falling back to the local ANSI codepage.
+            if not text.startswith("\ufeff"):
+                text = "\ufeff" + text
+            response = Response(text, mimetype="text/plain")
             response.headers["Content-Disposition"] = (
                 "attachment; filename*=UTF-8''"
                 f"{quote(_log_download_filename(task, run['start_time'] if run else None))}"
@@ -1153,16 +1158,50 @@ def _unique_import_definition(
     return rewritten, replacements
 
 
-def _prepare_import_preview(filename: str, content: str) -> dict[str, object]:
-    """Detect an import source and convert external exports entirely in memory."""
-    stripped = content.strip()
+def _parse_workflow_xml(
+    content: str | bytes, text: str | None = None
+) -> ElementTree.Element | None:
+    """Parse workflow XML, letting expat detect the byte-level encoding."""
+    if isinstance(content, bytes):
+        try:
+            return ElementTree.fromstring(content)
+        except (ElementTree.ParseError, ValueError):
+            if text is None:
+                return None
+        source = text
+    else:
+        source = content
+    stripped = source.lstrip()
+    if not stripped.startswith("<"):
+        return None
+    # ElementTree rejects str input that still carries an encoding declaration.
+    cleaned = re.sub(
+        r"(<\?xml\b[^>]*?)\s+encoding\s*=\s*(['\"])[^'\"]*\2",
+        r"\1",
+        stripped,
+        count=1,
+    )
+    try:
+        return ElementTree.fromstring(cleaned)
+    except (ElementTree.ParseError, ValueError):
+        return None
+
+
+def _prepare_import_preview(filename: str, content: str | bytes) -> dict[str, object]:
+    """Detect an import source and convert external exports entirely in memory.
+
+    ``content`` may be raw upload bytes (preferred, so XML keeps its own
+    encoding information) or an already-decoded string.
+    """
+    if isinstance(content, bytes):
+        text = decode_bytes(content, strict=True)
+    else:
+        text = content
+    stripped = text.strip()
     if not stripped:
         raise ServiceError("工作流文件不能为空")
 
-    try:
-        root = ElementTree.fromstring(content)
-    except ElementTree.ParseError:
-        root = None
+    root = _parse_workflow_xml(content, text)
     if root is not None:
         if root.tag != f"{{{WINDOWS_TASK_NAMESPACE}}}Task":
             raise ServiceError("无法识别的 XML 工作流格式")
@@ -1182,7 +1221,7 @@ def _prepare_import_preview(filename: str, content: str) -> dict[str, object]:
         }
 
     try:
-        payload = json.loads(content)
+        payload = json.loads(text)
     except json.JSONDecodeError:
         payload = None
     definitions = payload if isinstance(payload, list) else [payload]
@@ -1210,13 +1249,13 @@ def _prepare_import_preview(filename: str, content: str) -> dict[str, object]:
         }
 
     try:
-        Workflow.from_yaml(content, fallback_name=Path(filename).stem)
+        Workflow.from_yaml(text, fallback_name=Path(filename).stem)
     except WorkflowError as exc:
         raise ServiceError(f"无法识别工作流来源：{exc}") from exc
     return {
         "source": "dag-runner",
         "source_label": "DAG Runner YAML",
-        "definition": content,
+        "definition": text,
         "warnings": [],
         "filename": filename,
     }
@@ -1258,6 +1297,7 @@ _ENGLISH_ERRORS = {
     "YAML 文件必须使用 UTF-8 编码": "The YAML file must use UTF-8 encoding",
     "请选择工作流文件": "Select a workflow file",
     "工作流文件必须使用 UTF-8 编码": "The workflow file must use UTF-8 encoding",
+    "工作流文件编码无法识别（请使用 UTF-8 或 UTF-16）": "Could not detect the workflow file encoding (use UTF-8 or UTF-16)",
     "示例工作流文件不可用": "The example workflow is unavailable",
     "工作流运行中，不能编辑": "A running workflow cannot be edited",
     "请先下线定时，再编辑工作流": "Disable the schedule before editing the workflow",
