@@ -1,0 +1,40 @@
+description: 示例 · 数据处理流水线
+timeout: 3600
+setup:
+  linux: |
+    cd demo
+    export DEMO_ENV=local
+  windows: |
+    cd demo
+    set DEMO_ENV=local
+schedule:
+  crons:
+    - "0 9 * * mon-fri"
+    - "30 22 * * mon-fri"
+  timezone: Asia/Shanghai
+  enabled: true
+notification:
+  email:
+    send_on: disabled
+    to:
+      - operator@example.com
+tasks:
+  extract_data:
+    description: 抽取示例数据
+    command: echo "[1/4] extract 3 records"
+    timeout: 600
+  transform_data:
+    description: 清洗转换数据
+    command: echo "[2/4] transform done"
+    depends: [extract_data]
+    timeout: 600
+  summarize_data:
+    description: 汇总统计结果
+    command: echo "[3/4] alpha=17 beta=8"
+    depends: [transform_data]
+    timeout: 600
+  publish_report:
+    description: 生成示例报告
+    command: echo "[4/4] report ready"
+    depends: [summarize_data]
+    timeout: 600

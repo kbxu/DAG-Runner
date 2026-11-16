@@ -1,0 +1,32 @@
+description: 示例 · 条件分支
+setup:
+  linux: |
+    cd demo
+    export DEMO_ENV=local
+  windows: |
+    cd demo
+    set DEMO_ENV=local
+tasks:
+  fetch_data:
+    description: 拉取示例数据
+    command: echo "fetch done"
+  gate:
+    description: 判断数据是否可用
+    type: condition
+    depends: [fetch_data]
+    condition:
+      relation: AND
+      groups:
+        - items:
+            - task: fetch_data
+              status: SUCCESS
+    success: [notify_ok]
+    failure: [notify_missing]
+  notify_ok:
+    description: 数据可用，继续后续流程
+    command: echo "data ready"
+    depends: [gate]
+  notify_missing:
+    description: 数据缺失，走告警分支
+    command: echo "data missing"
+    depends: [gate]

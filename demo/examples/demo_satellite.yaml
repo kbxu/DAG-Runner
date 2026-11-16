@@ -1,0 +1,18 @@
+description: 示例 · 卫星节点执行
+runner: moon
+setup:
+  linux: |
+    cd demo
+    export DEMO_ENV=satellite
+  windows: |
+    cd demo
+    set DEMO_ENV=satellite
+tasks:
+  on_satellite:
+    description: 在卫星节点上执行
+    command: echo "hello from satellite"
+  local_check:
+    description: 本机结果校验
+    command: echo "local check"
+    runner: local
+    depends: [on_satellite]

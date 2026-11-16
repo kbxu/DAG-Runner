@@ -1,0 +1,18 @@
+description: 示例 · 发布门禁（演示失败与失败续跑）
+setup:
+  linux: |
+    cd demo
+    export DEMO_ENV=local
+  windows: |
+    cd demo
+    set DEMO_ENV=local
+tasks:
+  build:
+    description: 构建产物
+    command: echo "build done"
+  deploy_gate:
+    description: 发布门禁检查（示例中固定失败）
+    command: |
+      echo "gate: artifact missing"
+      exit 1
+    depends: [build]
