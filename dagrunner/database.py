@@ -14,6 +14,17 @@ from .satellite_protocol import SatelliteConfig
 TASK_STATUSES = {"PENDING", "RUNNING", "SUCCESS", "FAILED", "SKIPPED"}
 RUN_STATUSES = {"RUNNING", "SUCCESS", "FAILED"}
 
+# Out-of-scope tasks are stored as SKIPPED/OUTSIDE_SCOPE placeholders so a run
+# keeps its full DAG shape, but they never execute. Run progress must therefore
+# count only the tasks in the run's scope: a run started from a single task (or a
+# subtree) reports that many tasks, not every task in the workflow.
+_RUN_PROGRESS_COLUMNS = """COUNT(CASE WHEN COALESCE(tr.skip_kind, '') <> 'OUTSIDE_SCOPE' THEN 1 END) AS task_count,
+                           SUM(CASE WHEN tr.status = 'SUCCESS' AND COALESCE(tr.skip_kind, '') <> 'OUTSIDE_SCOPE' THEN 1 ELSE 0 END) AS success_count,
+                           SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NULL AND COALESCE(tr.skip_kind, '') <> 'OUTSIDE_SCOPE' THEN 1 ELSE 0 END) AS failed_count,
+                           SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NOT NULL AND COALESCE(tr.skip_kind, '') <> 'OUTSIDE_SCOPE' THEN 1 ELSE 0 END) AS handled_count,
+                           SUM(CASE WHEN tr.status = 'RUNNING' AND COALESCE(tr.skip_kind, '') <> 'OUTSIDE_SCOPE' THEN 1 ELSE 0 END) AS running_count,
+                           SUM(CASE WHEN tr.status = 'SKIPPED' AND COALESCE(tr.skip_kind, '') <> 'OUTSIDE_SCOPE' THEN 1 ELSE 0 END) AS skipped_count"""
+
 
 def local_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
@@ -617,13 +628,8 @@ class StateDatabase:
     def list_all_runs(self, limit: int = 100) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
-                """SELECT wr.*,
-                          COUNT(tr.task_name) AS task_count,
-                          SUM(CASE WHEN tr.status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
-                          SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NULL THEN 1 ELSE 0 END) AS failed_count,
-                          SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NOT NULL THEN 1 ELSE 0 END) AS handled_count,
-                          SUM(CASE WHEN tr.status = 'RUNNING' THEN 1 ELSE 0 END) AS running_count,
-                          SUM(CASE WHEN tr.status = 'SKIPPED' THEN 1 ELSE 0 END) AS skipped_count
+                f"""SELECT wr.*,
+                          {_RUN_PROGRESS_COLUMNS}
                    FROM workflow_runs wr
                    LEFT JOIN task_runs tr ON tr.run_id = wr.run_id
                    GROUP BY wr.run_id
@@ -674,12 +680,7 @@ class StateDatabase:
             page = min(max(page, 1), total_pages)
             rows = connection.execute(
                 f"""SELECT wr.*, w.name AS workflow_description,
-                            COUNT(tr.task_name) AS task_count,
-                            SUM(CASE WHEN tr.status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
-                            SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NULL THEN 1 ELSE 0 END) AS failed_count,
-                            SUM(CASE WHEN tr.status = 'FAILED' AND tr.handled_by IS NOT NULL THEN 1 ELSE 0 END) AS handled_count,
-                            SUM(CASE WHEN tr.status = 'RUNNING' THEN 1 ELSE 0 END) AS running_count,
-                            SUM(CASE WHEN tr.status = 'SKIPPED' THEN 1 ELSE 0 END) AS skipped_count
+                            {_RUN_PROGRESS_COLUMNS}
                      {from_clause}
                      LEFT JOIN task_runs tr ON tr.run_id = wr.run_id
                      {where}
