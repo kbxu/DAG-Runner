@@ -6,3 +6,5 @@ APScheduler>=3.11,<4
 waitress>=3.0,<4
 psutil>=5.9,<8
 cryptography>=42.0,<51
+# Optional MySQL 8 backend (db.type = mysql8). SQLite uses the standard library.
+PyMySQL>=1.1,<2

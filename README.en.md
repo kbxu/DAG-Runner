@@ -11,7 +11,7 @@ A lightweight, cross-platform Python DAG workflow runner. Describe tasks and dep
 
 ## Features
 
-- **Lightweight, single node**: Flask + SQLite + APScheduler; no Redis, message queue, or external database
+- **Lightweight, single node**: Flask + SQLite + APScheduler; no Redis, message queue, or external database (MySQL 8 optional)
 - **DAG execution**: dependency and cycle validation, parallel ready tasks, stop, rerun, and resume-after-failure
 - **Scheduling**: Linux-style cron (`0`/`7` = Sunday), multiple crons, arbitrary time zones
 - **Cross-platform**: bash on Linux, cmd on Windows, PowerShell optional
@@ -128,13 +128,15 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | Option | Description | Default |
 | --- | --- | --- |
 | `host` / `port` | Web listen address | `127.0.0.1:7119` |
-| `db` / `logs` | Database and log directory | `var/scheduler.db` / `var/logs` |
+| `db` / `logs` | Database (SQLite path, or a MySQL 8 mapping) and log directory | `var/scheduler.db` / `var/logs` |
 | `threads` | Web worker threads | `8` |
 | `notifier_config` | Email config path | auto-detect `var/notifier.yaml` |
 | `allow_insecure_remote_login` | Allow HTTP login (trusted LAN only) | `false` |
 | `satellite.enabled` | Enable the satellite service | `false` |
 | `satellite.host` / `port` | Satellite service listen address | `0.0.0.0:7120` |
 | `satellite.public_url` | Address satellites use to reach the master | derived per request |
+
+CLI commands (`python -m dagrunner`, `python -m dagrunner.auth`, `python -m demo.init_demo`) accept `--db-config var/config.yaml` to reuse the `db` entry above; without it they use the SQLite file from `--db`.
 
 ## Common commands
 
@@ -156,7 +158,7 @@ dagrunner/        Core code and web assets
   server.py         Main service entry (web + satellite service)
   satellite.py      Satellite agent entry   satellite_*.py  Protocol / crypto / execution
   workflow.py       Workflow parsing        runner.py        DAG engine
-  service.py        Scheduling and runs     database.py      SQLite access
+  service.py        Scheduling and runs     database*.py   State storage (SQLite / MySQL 8)
 demo/             Sample workflows, task scripts, demo data builder
 docs/images/      README screenshots
 var/              Database, logs, certificates (local data)

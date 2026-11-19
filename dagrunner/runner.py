@@ -13,7 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event, Timer
 
-from .database import StateDatabase
+from .database import (
+    BaseStateDatabase,
+    StateDatabase,
+    create_state_database,
+    load_database_config,
+)
 from .executor import TaskExecutor
 from .logger import TaskLogManager
 from .pool import DaemonPool
@@ -32,7 +37,7 @@ class AlreadyRunningError(RuntimeError):
 class WorkflowRunner:
     def __init__(
         self,
-        database: StateDatabase,
+        database: BaseStateDatabase,
         logs: TaskLogManager,
         executor: TaskExecutor | None = None,
         notifier: Notifier | None = None,
@@ -596,6 +601,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="run this task and its descendants (independent of earlier runs)",
     )
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
+    parser.add_argument(
+        "--db-config",
+        type=Path,
+        default=None,
+        help="startup YAML config; reads its db entry (SQLite path or MySQL 8 mapping)",
+    )
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument(
         "--notifier-config",
@@ -614,7 +625,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        database = StateDatabase(args.db)
+        if args.db_config is not None:
+            database = create_state_database(load_database_config(args.db_config))
+        else:
+            database = StateDatabase(args.db)
+        state_dir = database.state_dir
         if args.show_log:
             return _show_log(database, args)
         if args.status:
@@ -649,14 +664,12 @@ def main(argv: list[str] | None = None) -> int:
 
             return SatelliteTaskExecutor(manager, alias)
 
-        lock_path = args.db.resolve().parent / "locks" / f"{workflow.name}.lock"
+        lock_path = state_dir / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             recovered = database.mark_orphaned(workflow.name)
             if recovered:
                 print(f"recovered {recovered} interrupted run(s)", file=sys.stderr)
-            notifier = load_notifier(
-                args.notifier_config, var_dir=args.db.resolve().parent
-            )
+            notifier = load_notifier(args.notifier_config, var_dir=state_dir)
             run_id, status = WorkflowRunner(
                 database,
                 TaskLogManager(args.logs),
@@ -685,7 +698,7 @@ TASK_COLUMNS = (
 )
 
 
-def _show_status(database: StateDatabase, args) -> int:
+def _show_status(database: BaseStateDatabase, args) -> int:
     if not args.run_id:
         raise WorkflowError("--status requires --run-id")
     run = database.get_run(args.run_id)
@@ -696,7 +709,7 @@ def _show_status(database: StateDatabase, args) -> int:
     return 0
 
 
-def _show_log(database: StateDatabase, args) -> int:
+def _show_log(database: BaseStateDatabase, args) -> int:
     if not args.run_id or not args.task:
         raise WorkflowError("--show-log requires --run-id and --task")
     task = database.task_states(args.run_id).get(args.task)

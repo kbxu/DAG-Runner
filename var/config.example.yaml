@@ -4,6 +4,16 @@
 #   python -m dagrunner.server --config var/config.yaml
 host: 127.0.0.1
 port: 7119
+# 默认 SQLite。写成 map 时可切换 MySQL 8：
+# db:
+#   type: mysql8
+#   host: 127.0.0.1
+#   port: 3306
+#   user: dagrunner
+#   password: ""
+#   database: dagrunner
+#   charset: utf8mb4
+#   state_dir: var
 db: var/scheduler.db
 logs: var/logs
 threads: 8

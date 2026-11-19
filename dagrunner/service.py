@@ -11,7 +11,7 @@ from threading import Event, Lock
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .database import StateDatabase
+from .database import BaseStateDatabase
 from .executor import TaskExecutor
 from .logger import TaskLogManager
 from .pool import DaemonPool
@@ -89,7 +89,7 @@ def encode_cron_expressions(crons: Sequence[str]) -> str:
 
 
 class WorkflowRegistry:
-    def __init__(self, database: StateDatabase):
+    def __init__(self, database: BaseStateDatabase):
         self.database = database
         self.workflows: dict[str, Workflow] = {}
         self.rows: dict[str, object] = {}
@@ -140,7 +140,7 @@ class ActiveRun:
 class ExecutionService:
     def __init__(
         self,
-        database: StateDatabase,
+        database: BaseStateDatabase,
         registry: WorkflowRegistry,
         logs: TaskLogManager,
         max_workers: int = 4,
@@ -229,7 +229,7 @@ class ExecutionService:
         resume_run_id: str | None,
         runner_alias: str = "local",
     ) -> tuple[str, str]:
-        lock_path = self.database.path.parent / "locks" / f"{workflow.name}.lock"
+        lock_path = self.database.state_dir / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
             return WorkflowRunner(
                 self.database,
@@ -304,7 +304,7 @@ class ExecutionService:
     def recover_orphaned_runs(self) -> int:
         recovered = 0
         for workflow_name in self.database.running_workflow_names():
-            lock_path = self.database.path.parent / "locks" / f"{workflow_name}.lock"
+            lock_path = self.database.state_dir / "locks" / f"{workflow_name}.lock"
             try:
                 with workflow_lock(lock_path):
                     recovered += self.database.mark_orphaned(workflow_name)
@@ -329,7 +329,7 @@ class ExecutionService:
 class ScheduleService:
     def __init__(
         self,
-        database: StateDatabase,
+        database: BaseStateDatabase,
         registry: WorkflowRegistry,
         executions: ExecutionService,
     ):

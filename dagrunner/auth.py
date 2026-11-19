@@ -12,7 +12,12 @@ import string
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .database import StateDatabase
+from .database import (
+    BaseStateDatabase,
+    StateDatabase,
+    create_state_database,
+    load_database_config,
+)
 
 
 SESSION_COOKIE = "dagrunner_session"
@@ -33,7 +38,7 @@ class LoginResult:
 
 
 class AuthService:
-    def __init__(self, database: StateDatabase):
+    def __init__(self, database: BaseStateDatabase):
         self.database = database
         self._dummy_hash = generate_password_hash(
             "0" * 64, method=PASSWORD_HASH_METHOD
@@ -111,7 +116,7 @@ def client_password_hash(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def store_password(database: StateDatabase, username: str, password: str) -> None:
+def store_password(database: BaseStateDatabase, username: str, password: str) -> None:
     if len(password) < 16:
         raise ValueError("password must contain at least 16 characters")
     password_hash = generate_password_hash(
@@ -151,6 +156,12 @@ def _parse_time(value: str) -> datetime:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Configure a DAG Runner login account")
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
+    parser.add_argument(
+        "--db-config",
+        type=Path,
+        default=None,
+        help="startup YAML config; reads its db entry (SQLite path or MySQL 8 mapping)",
+    )
     parser.add_argument("--username", default="admin")
     parser.add_argument(
         "--generate",
@@ -169,7 +180,11 @@ def main(argv: list[str] | None = None) -> int:
         if password != confirmation:
             parser.error("password confirmation does not match")
     try:
-        store_password(StateDatabase(args.db), args.username, password)
+        if args.db_config is not None:
+            database = create_state_database(load_database_config(args.db_config))
+        else:
+            database = StateDatabase(args.db)
+        store_password(database, args.username, password)
     except ValueError as exc:
         parser.error(str(exc))
     print(f"configured account: {args.username}")

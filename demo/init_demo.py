@@ -19,7 +19,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dagrunner.auth import store_password
-from dagrunner.database import StateDatabase
+from dagrunner.database import (
+    BaseStateDatabase,
+    create_state_database,
+    load_database_config,
+    reset_state_database,
+)
 from dagrunner.logger import TaskLogManager
 from dagrunner.runner import WorkflowRunner
 from dagrunner.satellite_protocol import SatelliteConfig
@@ -41,6 +46,12 @@ RUNS = {
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Initialize a demo DAG Runner database")
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
+    parser.add_argument(
+        "--db-config",
+        type=Path,
+        default=None,
+        help="startup YAML config; reads its db entry (SQLite path or MySQL 8 mapping)",
+    )
     parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument("--reset", action="store_true", help="delete the database first")
     parser.add_argument(
@@ -54,7 +65,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def import_workflows(database: StateDatabase) -> dict[str, Workflow]:
+def import_workflows(database: BaseStateDatabase) -> dict[str, Workflow]:
     imported: dict[str, Workflow] = {}
     for path in sorted(EXAMPLES.glob("demo_*.yaml")):
         definition = path.read_text(encoding="utf-8")
@@ -79,7 +90,7 @@ def import_workflows(database: StateDatabase) -> dict[str, Workflow]:
     return imported
 
 
-def add_satellites(database: StateDatabase, specs: list[str]) -> None:
+def add_satellites(database: BaseStateDatabase, specs: list[str]) -> None:
     for spec in specs:
         alias, _, token = spec.partition(":")
         if not token:
@@ -90,7 +101,9 @@ def add_satellites(database: StateDatabase, specs: list[str]) -> None:
         print(f"satellite {alias}")
 
 
-def create_runs(database: StateDatabase, workflows: dict[str, Workflow], logs: Path) -> None:
+def create_runs(
+    database: BaseStateDatabase, workflows: dict[str, Workflow], logs: Path
+) -> None:
     for name, count in RUNS.items():
         workflow = workflows.get(name)
         if workflow is None or (workflow.runner or "local") != "local":
@@ -104,21 +117,26 @@ def create_runs(database: StateDatabase, workflows: dict[str, Workflow], logs: P
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    db_config = (
+        load_database_config(args.db_config)
+        if args.db_config is not None
+        else args.db
+    )
     if args.reset:
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(args.db) + suffix).unlink(missing_ok=True)
-        print(f"reset {args.db}")
-    args.db.parent.mkdir(parents=True, exist_ok=True)
+        reset_state_database(db_config)
+        print(f"reset {db_config}")
+    if not isinstance(db_config, dict):
+        Path(db_config).resolve().parent.mkdir(parents=True, exist_ok=True)
     args.logs.mkdir(parents=True, exist_ok=True)
 
-    database = StateDatabase(args.db)
+    database = create_state_database(db_config)
     store_password(database, "admin", args.password)
     print(f"login: admin / {args.password}")
 
     workflows = import_workflows(database)
     add_satellites(database, args.satellite)
     create_runs(database, workflows, args.logs)
-    print(f"done: {args.db}")
+    print(f"done: {db_config}")
     return 0
 
 

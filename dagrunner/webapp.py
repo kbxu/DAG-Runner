@@ -15,7 +15,7 @@ import psutil
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
-from .database import StateDatabase
+from .database import BaseStateDatabase, create_state_database
 from .logger import TaskLogManager, decode_bytes
 from .notifier import load_email_config, load_notifier, save_email_config
 from .migrate_workflows import (
@@ -88,7 +88,7 @@ def _apply_runner_to_definition(definition: str, runner: str) -> str:
     return "\n".join(output) + "\n"
 
 
-def _satellites_payload(database: StateDatabase) -> list[dict]:
+def _satellites_payload(database: BaseStateDatabase) -> list[dict]:
     jobs_by_alias: dict[str, list] = {}
     for job in database.list_satellite_jobs(limit=200):
         jobs_by_alias.setdefault(job["satellite_alias"], []).append(job)
@@ -127,11 +127,11 @@ def _satellites_payload(database: StateDatabase) -> list[dict]:
     return satellites
 
 
-def _system_resources_payload(database_path: str) -> dict:
+def _system_resources_payload(state_dir: Path) -> dict:
     # A short explicit sample works reliably across request worker threads.
     cpu = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
-    disk = psutil.disk_usage(str(Path(database_path).resolve().parent))
+    disk = psutil.disk_usage(str(Path(state_dir).resolve()))
     return {
         "cpu": {"percent": cpu},
         "memory": {
@@ -143,7 +143,7 @@ def _system_resources_payload(database_path: str) -> dict:
     }
 
 
-def _run_stats_payload(database: StateDatabase, hours: int) -> dict:
+def _run_stats_payload(database: BaseStateDatabase, hours: int) -> dict:
     since = (
         datetime.now().astimezone() - timedelta(hours=hours)
     ).isoformat(timespec="milliseconds")
@@ -160,6 +160,9 @@ def _run_stats_payload(database: StateDatabase, hours: int) -> dict:
 def create_app(
     *,
     database_path="var/scheduler.db",
+    database_config=None,
+    database=None,
+    state_dir=None,
     logs_path="var/logs",
     start_scheduler: bool = True,
     allow_insecure_remote_login: bool = False,
@@ -174,7 +177,15 @@ def create_app(
         raise ValueError("language must be 'zh-CN' or 'en'")
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["DEFAULT_LANGUAGE"] = language
-    database = StateDatabase(database_path)
+    if database is None:
+        database = create_state_database(
+            database_config if database_config is not None else database_path
+        )
+    if state_dir is None:
+        state_dir = getattr(
+            database, "state_dir", Path(database_path).resolve().parent
+        )
+    state_dir = Path(state_dir)
     for stored in database.list_workflows():
         migrated, changed = migrate_legacy_env(stored["definition"])
         if changed:
@@ -184,7 +195,7 @@ def create_app(
     registry = WorkflowRegistry(database)
     auth = AuthService(database)
     logs = TaskLogManager(logs_path)
-    notifier_var_dir = Path(database_path).resolve().parent
+    notifier_var_dir = state_dir.resolve()
     notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
     executions = ExecutionService(
         database, registry, logs, notifier=notifier, satellite_manager=satellite_manager
@@ -524,12 +535,12 @@ def create_app(
 
     @app.get("/api/system/resources")
     def api_system_resources():
-        return jsonify(_system_resources_payload(database_path))
+        return jsonify(_system_resources_payload(state_dir))
 
     @app.get("/api/system/overview")
     def api_system_overview():
         return jsonify(
-            resources=_system_resources_payload(database_path),
+            resources=_system_resources_payload(state_dir),
             satellites=_satellites_payload(database),
             satellite_enabled=satellite_manager is not None,
         )

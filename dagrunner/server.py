@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 from waitress import serve
 
+from .database import create_state_database
 from .satellite_crypto import (
     certificate_fingerprint,
     ensure_certificate,
@@ -40,14 +41,20 @@ def load_config_file(path: Path) -> dict:
     return data
 
 
-def _start_satellite_service(config: dict, database_path: Path):
+def _resolve_state_dir(database_config) -> Path:
+    """Local directory for locks, notifier state and disk statistics."""
+    if isinstance(database_config, dict):
+        configured = database_config.get("state_dir")
+        return Path(configured) if configured else Path("var")
+    return Path(database_config).resolve().parent
+
+
+def _start_satellite_service(config: dict, database_config):
     """Start the satellite-facing HTTPS service in a background thread."""
     satellite_config = config.get("satellite") or {}
     if not satellite_config.get("enabled", False):
         return None
-    from .database import StateDatabase
-
-    database = StateDatabase(database_path)
+    database = create_state_database(database_config)
     manager = SatelliteManager(
         database,
         timeout=float(satellite_config.get("timeout", 15)),
@@ -91,13 +98,17 @@ def main(argv: list[str] | None = None) -> int:
     port = int(config.get("port", 7119))
     threads = int(config.get("threads", 8))
     language = config.get("language", "zh-CN")
-    db = Path(config.get("db", "var/scheduler.db"))
+    db_config = config.get("db", "var/scheduler.db")
+    if isinstance(db_config, dict) and config.get("state_dir"):
+        db_config = {**db_config, "state_dir": config["state_dir"]}
     logs = Path(config.get("logs", "var/logs"))
     notifier_config = config.get("notifier_config")
     allow_insecure_remote_login = bool(config.get("allow_insecure_remote_login", False))
-    satellite = _start_satellite_service(config, db)
+    state_dir = _resolve_state_dir(db_config)
+    satellite = _start_satellite_service(config, db_config)
     app = create_app(
-        database_path=db,
+        database_config=db_config,
+        state_dir=state_dir,
         logs_path=logs,
         allow_insecure_remote_login=allow_insecure_remote_login,
         language=language,

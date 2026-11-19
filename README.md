@@ -11,7 +11,7 @@
 
 ## 特性
 
-- **轻量单机**：Flask + SQLite + APScheduler，不需要 Redis、消息队列或外部数据库
+- **轻量单机**：Flask + SQLite + APScheduler，不需要 Redis、消息队列或外部数据库；也可在配置里选用 MySQL 8
 - **DAG 执行**：自动校验依赖与环路，并行执行就绪任务，支持停止、重跑、失败续跑
 - **定时调度**：Linux 风格 cron（`0`/`7` 为周日），支持多条 cron 与任意时区
 - **跨平台**：Linux 用 bash，Windows 用 cmd，也可指定 PowerShell
@@ -128,13 +128,15 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | 配置项 | 说明 | 默认 |
 | --- | --- | --- |
 | `host` / `port` | Web 监听地址 | `127.0.0.1:7119` |
-| `db` / `logs` | 数据库与日志目录 | `var/scheduler.db` / `var/logs` |
+| `db` / `logs` | 数据库（SQLite 路径，或 MySQL 8 的 map 配置）与日志目录 | `var/scheduler.db` / `var/logs` |
 | `threads` | Web 线程数 | `8` |
 | `notifier_config` | 邮件配置路径 | 自动查找 `var/notifier.yaml` |
 | `allow_insecure_remote_login` | 允许 HTTP 登录（仅可信内网） | `false` |
 | `satellite.enabled` | 启用卫星服务 | `false` |
 | `satellite.host` / `port` | 卫星服务监听地址 | `0.0.0.0:7120` |
 | `satellite.public_url` | 卫星回连主程序的地址 | 按请求推导 |
+
+CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m demo.init_demo`）加 `--db-config var/config.yaml` 即可复用上面的 `db` 配置；不传时仍用 `--db` 指定的 SQLite 文件。
 
 ## 常用命令
 
@@ -156,7 +158,7 @@ dagrunner/        核心代码与 Web 资源
   server.py         主服务入口（Web + 卫星服务）
   satellite.py      卫星版入口        satellite_*.py  卫星协议 / 加密 / 执行
   workflow.py       工作流解析与校验   runner.py        DAG 执行引擎
-  service.py        调度与运行管理     database.py      SQLite 存取
+  service.py        调度与运行管理     database*.py   状态存取（SQLite / MySQL 8）
 demo/             示例工作流、任务脚本与演示数据初始化
 docs/images/      README 截图
 var/              数据库、日志、证书（本地数据）

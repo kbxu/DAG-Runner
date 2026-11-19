@@ -24,7 +24,7 @@ from threading import Event, Lock
 
 from flask import Flask, Response, jsonify, request
 
-from .database import StateDatabase, local_now
+from .database import BaseStateDatabase, local_now
 from .satellite_crypto import (
     ALIAS_HEADER,
     AUTH_HEADER,
@@ -112,7 +112,7 @@ def _error_agent_version(exc: SatelliteHttpError) -> str:
 class SatelliteManager:
     def __init__(
         self,
-        database: StateDatabase,
+        database: BaseStateDatabase,
         *,
         agent_version: str = AGENT_VERSION,
         timeout: float = 15,
