@@ -17,7 +17,21 @@ from .satellite_crypto import (
     client_ssl_context,
     peer_fingerprint,
 )
-from .satellite_protocol import PATH_NONCE, PATH_REGISTER
+from .satellite_protocol import PATH_NONCE, PATH_REGISTER, VERSION_HEADER
+
+
+def _error_code(payload: bytes | None) -> str | None:
+    """Extract the protocol ``error_code`` from an error response body."""
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        code = data.get("error_code")
+        return str(code) if code else None
+    return None
 
 
 class SatelliteHttpError(RuntimeError):
@@ -27,10 +41,12 @@ class SatelliteHttpError(RuntimeError):
         *,
         status_code: int | None = None,
         payload: bytes | None = None,
+        error_code: str | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+        self.error_code = error_code
 
 
 class SatelliteClient:
@@ -46,6 +62,7 @@ class SatelliteClient:
         trust=None,
         nonce_ttl: int = 120,
         register_body: dict | None = None,
+        version: str = "",
     ):
         parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
         if parsed.scheme != "https":
@@ -63,6 +80,7 @@ class SatelliteClient:
         self.trust = trust
         self._nonce_store = NonceStore(ttl_seconds=nonce_ttl)
         self._register_body = register_body or {}
+        self.version = version
         self._session_token: str | None = None
 
     # ------------------------------------------------------------------
@@ -119,6 +137,8 @@ class SatelliteClient:
         if json_body is not None:
             body = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
             request_headers.setdefault("Content-Type", "application/json")
+        if self.version:
+            request_headers.setdefault(VERSION_HEADER, self.version)
         connection = self._connect(timeout)
         try:
             connection.request(method, path, body=body, headers=request_headers)
@@ -129,6 +149,7 @@ class SatelliteClient:
                     f"{method} {path} failed with {response.status}",
                     status_code=response.status,
                     payload=data,
+                    error_code=_error_code(data),
                 )
             return json.loads(data) if data else {}
         finally:
@@ -154,6 +175,8 @@ class SatelliteClient:
         self, method: str, path: str, timeout: float | None = None
     ) -> dict[str, str]:
         headers = {"Accept": "application/json", ALIAS_HEADER: self.alias}
+        if self.version:
+            headers[VERSION_HEADER] = self.version
         if self._session_token:
             headers["Authorization"] = f"Bearer {self._session_token}"
         else:
@@ -165,7 +188,9 @@ class SatelliteClient:
     ) -> dict:
         """Authenticate with the challenge-response and store a session token."""
         headers = self._challenge_headers("POST", PATH_REGISTER, timeout)
-        body = json_body if json_body is not None else self._register_body
+        body = dict(json_body) if json_body is not None else dict(self._register_body)
+        if self.version:
+            body.setdefault("agent_version", self.version)
         response = self._raw_request(
             "POST", PATH_REGISTER, headers=headers, json_body=body, timeout=timeout
         )

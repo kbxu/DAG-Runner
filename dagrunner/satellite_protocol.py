@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from . import __version__
 from .scripting import (
     ScriptPlan,
     cmd_encoding,
@@ -23,8 +24,13 @@ from .workflow import Task
 
 
 SATELLITE_API_PREFIX = "/api/satellite/v1"
-AGENT_VERSION = "1.0.0"
+# The peer version is the dagrunner release version: the master and the
+# satellite are the same codebase in two roles, so a mismatch means one side
+# was upgraded without the other and the wire protocol cannot be trusted.
+AGENT_VERSION = __version__
 MASTER_ALIAS = "master"
+VERSION_HEADER = "X-DAGRunner-Version"
+VERSION_MISMATCH = "version_mismatch"
 
 PATH_HEALTH = f"{SATELLITE_API_PREFIX}/health"
 PATH_PING = f"{SATELLITE_API_PREFIX}/ping"

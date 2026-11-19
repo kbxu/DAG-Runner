@@ -1,6 +1,7 @@
 # DAG Runner 卫星版启动配置示例。
 # 启动：python -m dagrunner.satellite --config var/satellite.yaml
 # token 由主程序 Web 控制台的“卫星”页面生成，下载配置时会自动填入。
+# 主程序与卫星版本必须完全相同（dagrunner.__version__），不一致时拒绝连接并断开。
 satellite:
   # 卫星节点别名，必须与主程序上配置的一致
   alias: sat-01

@@ -39,7 +39,7 @@ from .satellite_crypto import (
     server_ssl_context,
 )
 from .satellite_server import serve_ssl
-from .satellite_http import SatelliteClient
+from .satellite_http import SatelliteClient, SatelliteHttpError
 from .satellite_protocol import (
     AGENT_VERSION,
     JOB_CANCELLED,
@@ -61,6 +61,7 @@ from .satellite_protocol import (
     ROUTE_JOB_CANCEL,
     SSE_EVENT_CANCEL,
     SSE_EVENT_JOB,
+    VERSION_MISMATCH,
     JobSpec,
     ProtocolError,
     build_job_plan,
@@ -131,6 +132,7 @@ class SatelliteAgent:
             Path(config.cert).resolve().parent / "known_master.json"
         )
         self._last_error: str | None = None
+        self._version_mismatch = False
 
     # ------------------------------------------------------------------
     # Trust
@@ -154,6 +156,7 @@ class SatelliteAgent:
                 timeout=self.config.timeout,
                 stream_timeout=60,
                 trust=self._trust,
+                version=AGENT_VERSION,
             )
         return self._client
 
@@ -234,6 +237,16 @@ class SatelliteAgent:
                 self._last_error = None
             except Exception as exc:
                 self._last_error = str(exc)
+                if (
+                    isinstance(exc, SatelliteHttpError)
+                    and exc.error_code == VERSION_MISMATCH
+                ):
+                    self._version_mismatch = True
+                    print(
+                        f"satellite reverse channel stopped: {exc}",
+                        file=sys.stderr,
+                    )
+                    return
                 print(f"satellite reverse channel unavailable: {exc}", file=sys.stderr)
                 self._stop.wait(
                     5 if self.config.mode == "reverse" else self.config.probe_interval
@@ -547,6 +560,7 @@ def create_satellite_agent_app(agent: SatelliteAgent) -> Flask:
                 "hostname": socket.gethostname(),
                 "mode": agent.config.mode,
                 "last_error": agent._last_error,
+                "version_mismatch": agent._version_mismatch,
                 "time": datetime.now().astimezone().isoformat(timespec="seconds"),
             }
         )
@@ -565,6 +579,21 @@ def create_satellite_agent_app(agent: SatelliteAgent) -> Flask:
     @app.post(PATH_REGISTER)
     @require_auth
     def register():
+        payload = request.get_json(silent=True) or {}
+        agent_version = str(payload.get("agent_version", "") or "")
+        if agent_version != AGENT_VERSION:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error_code": VERSION_MISMATCH,
+                    "error": (
+                        f"版本不一致: master {agent_version or '未知'} != "
+                        f"satellite {AGENT_VERSION}"
+                    ),
+                    "server_version": agent_version,
+                    "agent_version": AGENT_VERSION,
+                }
+            ), 409
         alias = request.headers.get(ALIAS_HEADER, "")
         agent.session_store.revoke_alias(alias)
         return jsonify(

@@ -59,6 +59,7 @@ from .satellite_protocol import (
     SSE_EVENT_CANCEL,
     SSE_EVENT_JOB,
     SSE_EVENT_PING,
+    VERSION_MISMATCH,
     JobSpec,
     SatelliteConfig,
     sse_event,
@@ -100,6 +101,14 @@ class _StreamState:
 _TERMINAL = {JOB_SUCCESS, JOB_FAILED, JOB_CANCELLED, JOB_ERROR}
 
 
+def _error_agent_version(exc: SatelliteHttpError) -> str:
+    try:
+        data = json.loads(exc.payload or b"{}")
+    except ValueError:
+        return ""
+    return str(data.get("agent_version", "") or "")
+
+
 class SatelliteManager:
     def __init__(
         self,
@@ -124,6 +133,26 @@ class SatelliteManager:
         self._streams_lock = Lock()
         self._stop = Event()
         self._monitor: threading.Thread | None = None
+
+    # ------------------------------------------------------------------
+    # Version compatibility
+    # ------------------------------------------------------------------
+
+    def version_mismatch_message(self, agent_version: str) -> str:
+        return (
+            f"版本不一致: master {self.agent_version} != "
+            f"satellite {agent_version or '未知'}"
+        )
+
+    def reject_version(self, alias: str, agent_version: str) -> None:
+        """Drop any live channel from a satellite whose version does not match."""
+        with self._streams_lock:
+            state = self._streams.pop(alias, None)
+        if state is not None:
+            state.queue.put(STREAM_CLOSE)
+        self.database.set_satellite_status(
+            alias, "offline", last_error=self.version_mismatch_message(agent_version)
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -237,6 +266,19 @@ class SatelliteManager:
                 "mode": "forward",
                 "error_message": str(exc)[:500],
             }
+        try:
+            payload = client.request(
+                "GET", PATH_HEALTH, auth=False, timeout=self.timeout
+            )
+        except Exception:
+            payload = {}
+        remote_version = str(payload.get("version", "") or "")
+        if remote_version and remote_version != self.agent_version:
+            return {
+                "reachable": False,
+                "mode": "forward",
+                "error_message": self.version_mismatch_message(remote_version),
+            }
         return {
             "reachable": True,
             "mode": "forward",
@@ -299,7 +341,22 @@ class SatelliteManager:
                 f"satellite {runtime.alias!r} has no active channel or URL"
             )
         client = self._forward_client(config)
-        response = client.register(json_body={"role": "master"})
+        try:
+            response = client.register(json_body={"role": "master"})
+        except SatelliteHttpError as exc:
+            if exc.error_code == VERSION_MISMATCH:
+                message = self.version_mismatch_message(_error_agent_version(exc))
+                self.database.set_satellite_status(
+                    config.alias, "offline", last_error=message
+                )
+            raise
+        remote_version = str(response.get("agent_version", "") or "")
+        if remote_version != self.agent_version:
+            message = self.version_mismatch_message(remote_version)
+            self.database.set_satellite_status(
+                config.alias, "offline", last_error=message
+            )
+            raise SatelliteError(message)
         platform = str(response.get("platform", "") or "")
         if platform:
             self.database.set_satellite_status(
@@ -390,6 +447,7 @@ class SatelliteManager:
             alias=MASTER_ALIAS,
             timeout=self.timeout,
             trust=trust,
+            version=self.agent_version,
         )
         self._clients[config.alias] = client
         return client
@@ -531,11 +589,19 @@ class SatelliteManager:
                 config.alias, "offline", last_error=str(exc)[:500]
             )
         else:
-            self.database.set_satellite_status(
-                config.alias,
-                "online",
-                platform=str(payload.get("platform", "") or ""),
-            )
+            remote_version = str(payload.get("version", "") or "")
+            if remote_version and remote_version != self.agent_version:
+                self.database.set_satellite_status(
+                    config.alias,
+                    "offline",
+                    last_error=self.version_mismatch_message(remote_version),
+                )
+            else:
+                self.database.set_satellite_status(
+                    config.alias,
+                    "online",
+                    platform=str(payload.get("platform", "") or ""),
+                )
 
     def _cleanup_jobs(self) -> None:
         cutoff = time.monotonic() - 3600
@@ -613,6 +679,18 @@ def create_satellite_master_app(manager: SatelliteManager) -> Flask:
         config = manager.database.get_satellite(alias)
         if config is None:
             return jsonify({"ok": False, "error": "unknown satellite"}), 403
+        agent_version = str(payload.get("agent_version", "") or "")
+        if agent_version != manager.agent_version:
+            manager.reject_version(alias, agent_version)
+            return jsonify(
+                {
+                    "ok": False,
+                    "error_code": VERSION_MISMATCH,
+                    "error": manager.version_mismatch_message(agent_version),
+                    "server_version": manager.agent_version,
+                    "agent_version": agent_version,
+                }
+            ), 409
         manager.database.set_satellite_status(
             alias,
             "online",

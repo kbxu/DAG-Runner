@@ -1,6 +1,6 @@
 [中文](README.md) | [English](README.en.md)
 
-# DAG Runner
+# Directed Acyclic Graph (DAG) Runner
 
 轻量、跨平台的 Python DAG 工作流运行器：用 YAML 描述任务与依赖，一个常驻服务负责定时调度、执行、监控与日志。
 
@@ -120,6 +120,8 @@ python -m dagrunner.satellite --config var/satellite.yaml
 ```
 
 **证书目录**：主程序用 `var/master-certs/`，卫星用 `var/satellite-certs/`（含信任记录 `known_master.json`）。迁移卫星直接拷 `var/satellite-certs/` 整个目录。
+
+**版本一致**：主程序与卫星必须使用完全相同的 `dagrunner.__version__`。注册时校验，不一致就断开：反向模式卫星停止重连，前向模式任务直接失败，Web 上的「检查连通」也会提示版本不一致。
 
 ## 配置速查
 

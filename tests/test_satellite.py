@@ -31,13 +31,16 @@ from dagrunner.satellite_crypto import (
     verify_auth,
 )
 from dagrunner.satellite_executor import SatelliteTaskExecutor
-from dagrunner.satellite_http import SatelliteClient
+from dagrunner.satellite_http import SatelliteClient, SatelliteHttpError
 from dagrunner.satellite_master import SatelliteManager, create_satellite_master_app
 from dagrunner.satellite_server import serve_ssl
 from dagrunner.satellite_protocol import (
+    AGENT_VERSION,
     JOB_FAILED,
     JOB_SUCCESS,
+    PATH_HEALTH,
     PATH_STREAM,
+    VERSION_MISMATCH,
     JobSpec,
     ProtocolError,
     SatelliteConfig,
@@ -493,8 +496,15 @@ class SatelliteEndToEndTests(unittest.TestCase):
             alias="sat-01",
             timeout=10,
             trust=lambda fp: True,
+            version=AGENT_VERSION,
         )
-        client.register(json_body={"alias": "sat-01", "platform": "linux"})
+        client.register(
+            json_body={
+                "alias": "sat-01",
+                "platform": "linux",
+                "agent_version": AGENT_VERSION,
+            }
+        )
         started = time.monotonic()
         connection, response = client.open_stream(PATH_STREAM)
         line = response.readline()
@@ -542,6 +552,60 @@ class SatelliteEndToEndTests(unittest.TestCase):
         )
         executor = SatelliteTaskExecutor(self.manager, "sat-01")
         self.assertEqual(executor.platform, "windows" if os.name == "nt" else "linux")
+
+    def test_reverse_register_rejects_version_mismatch(self) -> None:
+        self._register_satellite(mode="reverse")
+        client = SatelliteClient(
+            f"https://127.0.0.1:{self.master.port}",
+            token=TOKEN,
+            alias="sat-01",
+            timeout=10,
+            trust=lambda fp: True,
+        )
+        with self.assertRaises(SatelliteHttpError) as caught:
+            client.register(
+                json_body={
+                    "alias": "sat-01",
+                    "platform": "linux",
+                    "agent_version": "0.0.0",
+                }
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(caught.exception.error_code, VERSION_MISMATCH)
+        self.assertIsNone(self.manager._get_stream("sat-01"))
+        status = self.database.get_satellite("sat-01")
+        self.assertEqual(status.status, "offline")
+        self.assertIn("版本不一致", status.last_error or "")
+
+    def test_reverse_agent_stops_on_version_mismatch(self) -> None:
+        self.manager.agent_version = "9.9.9"
+        agent = self._start_agent("reverse")
+        self._register_satellite(mode="reverse")
+        self.assertTrue(
+            self._wait_for(lambda: agent._version_mismatch),
+            "satellite did not stop on version mismatch",
+        )
+        self.assertIsNone(self.manager._get_stream("sat-01"))
+
+    def test_forward_version_mismatch_fails_task(self) -> None:
+        self._start_agent("forward")
+        port = self.agent_servers[-1].port
+        self._register_satellite(mode="forward", url=f"https://127.0.0.1:{port}")
+        self.manager.agent_version = "9.9.9"
+        exit_code, _, _ = self._submit(Task(name="run", command="echo hello"))
+        self.assertEqual(exit_code, 127)
+        status = self.database.get_satellite("sat-01")
+        self.assertEqual(status.status, "offline")
+        self.assertIn("版本不一致", status.last_error or "")
+
+    def test_forward_test_connection_reports_version_mismatch(self) -> None:
+        self._start_agent("forward")
+        port = self.agent_servers[-1].port
+        self._register_satellite(mode="forward", url=f"https://127.0.0.1:{port}")
+        self.manager.agent_version = "9.9.9"
+        result = self.manager.test_connection("sat-01")
+        self.assertFalse(result["reachable"])
+        self.assertIn("版本不一致", result["error_message"])
 
 
 class RunnerAssignmentTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 [中文](README.md) | [English](README.en.md)
 
-# DAG Runner
+# Directed Acyclic Graph (DAG) Runner
 
 A lightweight, cross-platform Python DAG workflow runner. Describe tasks and dependencies in YAML; one long-running service handles scheduling, execution, monitoring, and logs.
 
@@ -120,6 +120,8 @@ python -m dagrunner.satellite --config var/satellite.yaml
 ```
 
 **Certificate directories**: the master uses `var/master-certs/`, the agent uses `var/satellite-certs/` (including the `known_master.json` trust record). To migrate a satellite, copy the whole `var/satellite-certs/` directory.
+
+**Version match**: the master and the satellite must run the exact same `dagrunner.__version__`. Registration is refused on a mismatch and the channel is dropped: a reverse satellite stops reconnecting, a forward task fails immediately, and **Test connection** reports the mismatch.
 
 ## Configuration
 
