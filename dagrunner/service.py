@@ -6,6 +6,7 @@ import sys
 from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from datetime import datetime
 from threading import Event, Lock
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -152,6 +153,7 @@ class ExecutionService:
         self.logs = logs
         self.notifier = notifier or NullNotifier()
         self.satellite_manager = satellite_manager
+        self.update_service = None
         self.pool = DaemonPool(max_workers=max_workers, thread_name_prefix="dag-run")
         self._active: dict[str, ActiveRun] = {}
         self._lock = Lock()
@@ -165,6 +167,8 @@ class ExecutionService:
         trigger_type: str = "manual",
         resume_run_id: str | None = None,
     ) -> str:
+        if self.update_service is not None and self.update_service.active:
+            raise ServiceError("更新进行中，暂不能启动任务")
         self.registry.refresh()
         workflow = self.registry.get(workflow_name)
         if from_task:
@@ -337,8 +341,10 @@ class ScheduleService:
         self.registry = registry
         self.executions = executions
         self.scheduler = BackgroundScheduler()
+        self._paused_at: datetime | None = None
 
     def start(self) -> None:
+        self._paused_at = None
         for schedule in self.database.list_schedules():
             if schedule["enabled"] and schedule["workflow_name"] in self.registry.workflows:
                 try:
@@ -454,6 +460,52 @@ class ScheduleService:
     def _job_id(workflow_name: str, index: int | None = None) -> str:
         base = f"workflow:{workflow_name}"
         return base if index is None else f"{base}:{index}"
+
+    def pause(self) -> None:
+        """Stop firing scheduled runs (used while an update is in progress)."""
+        if self.scheduler.running:
+            self.scheduler.pause()
+        self._paused_at = datetime.now().astimezone()
+
+    def missed_count(self) -> int:
+        """Number of scheduled runs that came due and were skipped."""
+        now = datetime.now().astimezone()
+        count = 0
+        for job in self.scheduler.get_jobs():
+            next_time = getattr(job, "next_run_time", None)
+            if next_time is not None and next_time <= now:
+                count += 1
+        return count
+
+    def resume_and_reinstall(self) -> int:
+        """Resume scheduling, discarding any run missed during the pause.
+
+        Removing and reinstalling the jobs recomputes ``next_run_time`` from
+        now, so APScheduler's misfire handling cannot replay a trigger that
+        fired while the update was running.
+        """
+        if not self.scheduler.running:
+            self._paused_at = None
+            return 0
+        self.scheduler.resume()
+        missed = self.missed_count()
+        for job in list(self.scheduler.get_jobs()):
+            self.scheduler.remove_job(job.id)
+        for schedule in self.database.list_schedules():
+            if schedule["enabled"] and schedule["workflow_name"] in self.registry.workflows:
+                try:
+                    self._install_jobs(
+                        schedule["workflow_name"],
+                        decode_cron_expressions(schedule["cron_expression"]),
+                        schedule["timezone"],
+                    )
+                except (ValueError, TypeError, KeyError) as exc:
+                    print(
+                        f"invalid schedule for {schedule['workflow_name']}: {exc}",
+                        file=sys.stderr,
+                    )
+        self._paused_at = None
+        return missed
 
     def shutdown(self) -> None:
         if self.scheduler.running:

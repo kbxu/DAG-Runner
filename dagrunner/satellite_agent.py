@@ -57,14 +57,28 @@ from .satellite_protocol import (
     PATH_PING,
     PATH_REGISTER,
     PATH_STREAM,
+    PATH_UPDATE_COMMIT,
+    PATH_UPDATE_PREPARE,
+    PATH_UPDATE_REPORT,
+    PATH_UPDATE_ROLLBACK,
+    PATH_UPDATE_STATUS,
     ROUTE_JOB,
     ROUTE_JOB_CANCEL,
     SSE_EVENT_CANCEL,
     SSE_EVENT_JOB,
+    SSE_EVENT_UPDATE_COMMIT,
+    SSE_EVENT_UPDATE_PREPARE,
+    SSE_EVENT_UPDATE_ROLLBACK,
     VERSION_MISMATCH,
     JobSpec,
     ProtocolError,
     build_job_plan,
+)
+from .satellite_update import (
+    SatelliteUpdater,
+    handle_commit,
+    mark_update_done,
+    recover_grace,
 )
 from .scripting import (
     append_error,
@@ -75,6 +89,9 @@ from .scripting import (
 
 
 TERMINAL = {JOB_SUCCESS, JOB_FAILED, JOB_CANCELLED, JOB_ERROR}
+# After committing an update the master may still run the previous version for
+# a few seconds; keep retrying the reverse channel instead of giving up.
+UPDATE_GRACE_SECONDS = 900
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
@@ -133,6 +150,8 @@ class SatelliteAgent:
         )
         self._last_error: str | None = None
         self._version_mismatch = False
+        self._update_deadline: float = 0.0
+        self._update_worker: SatelliteUpdater | None = None
 
     # ------------------------------------------------------------------
     # Trust
@@ -161,11 +180,82 @@ class SatelliteAgent:
         return self._client
 
     # ------------------------------------------------------------------
+    # Update
+    # ------------------------------------------------------------------
+
+    def _updater(self) -> SatelliteUpdater:
+        if self._update_worker is None:
+            self._update_worker = SatelliteUpdater(
+                root=Path.cwd().resolve(),
+                alias=self.config.alias,
+                master_url=self.config.master_url,
+                token=self.config.token,
+                timeout=self.config.timeout,
+                client=self._master_client(),
+                host_key_policy=self.config.host_key_policy,
+                master_cert_fingerprint=self.config.master_cert_fingerprint,
+                cert_dir=Path(self.config.cert).resolve().parent,
+                listen_host=self.config.listen_host,
+                listen_port=self.config.listen_port,
+            )
+        return self._update_worker
+
+    def _report_update(self, result: dict) -> None:
+        for attempt in range(3):
+            try:
+                client = self._master_client()
+                client.request("POST", PATH_UPDATE_REPORT, json_body=result)
+                return
+            except Exception:
+                if attempt < 2:
+                    time.sleep(1 + attempt)
+
+    def _handle_update_prepare(self, data: str) -> None:
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            return
+
+        def run() -> None:
+            try:
+                result = self._updater().prepare(payload)
+            except Exception as exc:  # noqa: BLE001 - reported back to the master
+                result = {"ok": False, "state": "failed", "message": str(exc)[:300]}
+            self._report_update(result)
+
+        threading.Thread(
+            target=run, daemon=True, name="satellite-update"
+        ).start()
+
+    def _handle_update_commit(self, data: str) -> None:
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            return
+        self._mark_updating()
+        handle_commit(self._updater(), str(payload.get("version", "")))
+
+    def _handle_update_rollback(self, data: str) -> None:
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            return
+        self._mark_updating()
+        self._updater().rollback(str(payload.get("version", "")))
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+
+    def _mark_updating(self) -> None:
+        self._update_deadline = time.monotonic() + UPDATE_GRACE_SECONDS
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def run(self) -> int:
         self._install_signal_handlers()
+        self._update_deadline = recover_grace(
+            Path.cwd().resolve(), UPDATE_GRACE_SECONDS
+        )
         ensure_certificate(
             self.config.cert,
             self.config.key,
@@ -242,6 +332,13 @@ class SatelliteAgent:
                     and exc.error_code == VERSION_MISMATCH
                 ):
                     self._version_mismatch = True
+                    if time.monotonic() < self._update_deadline:
+                        print(
+                            f"satellite version mismatch while the master catches up: {exc}",
+                            file=sys.stderr,
+                        )
+                        self._stop.wait(5)
+                        continue
                     print(
                         f"satellite reverse channel stopped: {exc}",
                         file=sys.stderr,
@@ -265,6 +362,7 @@ class SatelliteAgent:
                 "listener_addr": f"{self.config.listen_host}:{self.config.listen_port}",
             }
         )
+        mark_update_done(Path.cwd().resolve())
         connection, response = client.open_stream(PATH_STREAM)
         stop_heartbeat = Event()
         heartbeat = threading.Thread(
@@ -280,6 +378,12 @@ class SatelliteAgent:
                     self._handle_job_event(data)
                 elif event == SSE_EVENT_CANCEL:
                     self._handle_cancel_event(data)
+                elif event == SSE_EVENT_UPDATE_PREPARE:
+                    self._handle_update_prepare(data)
+                elif event == SSE_EVENT_UPDATE_COMMIT:
+                    self._handle_update_commit(data)
+                elif event == SSE_EVENT_UPDATE_ROLLBACK:
+                    self._handle_update_rollback(data)
         finally:
             stop_heartbeat.set()
             try:
@@ -654,5 +758,40 @@ def create_satellite_agent_app(agent: SatelliteAgent) -> Flask:
         if job.process is not None:
             terminate_process(job.process)
         return jsonify({"ok": True})
+
+    @app.post(PATH_UPDATE_PREPARE)
+    @require_auth
+    def update_prepare():
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(agent._updater().prepare(payload))
+        except Exception as exc:  # noqa: BLE001 - reported back to the master
+            return jsonify({"ok": False, "state": "failed", "message": str(exc)[:300]})
+
+    @app.post(PATH_UPDATE_COMMIT)
+    @require_auth
+    def update_commit():
+        payload = request.get_json(silent=True) or {}
+        version = str(payload.get("version", ""))
+        agent._mark_updating()
+        handle_commit(agent._updater(), version)
+        return jsonify({"ok": True, "restarting": True})
+
+    @app.post(PATH_UPDATE_ROLLBACK)
+    @require_auth
+    def update_rollback():
+        payload = request.get_json(silent=True) or {}
+        version = str(payload.get("version", ""))
+        agent._mark_updating()
+        agent._updater().rollback(version)
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+        return jsonify({"ok": True, "restarting": True})
+
+    @app.get(PATH_UPDATE_STATUS)
+    @require_auth
+    def update_status():
+        return jsonify(
+            {"ok": True, "version": AGENT_VERSION, "state": agent._updater().state}
+        )
 
     return app

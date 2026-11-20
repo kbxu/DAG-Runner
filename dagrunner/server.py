@@ -12,6 +12,7 @@ import yaml
 from waitress import serve
 
 from .database import create_state_database
+from .install import repo_root
 from .satellite_crypto import (
     certificate_fingerprint,
     ensure_certificate,
@@ -22,7 +23,7 @@ from .satellite_server import serve_ssl
 from .webapp import create_app
 
 
-DEFAULT_CONFIG_PATH = Path("var") / "config.example.yaml"
+DEFAULT_CONFIG_PATH = Path("var") / "example_configs" / "config.example.yaml"
 
 
 def load_config_file(path: Path) -> dict:
@@ -49,17 +50,23 @@ def _resolve_state_dir(database_config) -> Path:
     return Path(database_config).resolve().parent
 
 
-def _start_satellite_service(config: dict, database_config):
-    """Start the satellite-facing HTTPS service in a background thread."""
+def build_satellite_manager(config: dict, database):
+    """Create the satellite manager when ``satellite.enabled`` is true."""
     satellite_config = config.get("satellite") or {}
     if not satellite_config.get("enabled", False):
         return None
-    database = create_state_database(database_config)
-    manager = SatelliteManager(
+    return SatelliteManager(
         database,
         timeout=float(satellite_config.get("timeout", 15)),
         poll_interval=float(satellite_config.get("poll_interval", 1.0)),
+        update_timeout=float(satellite_config.get("update_timeout", 300)),
+        root=repo_root(),
     )
+
+
+def serve_satellite_manager(config: dict, manager: SatelliteManager) -> dict:
+    """Serve an existing satellite manager over HTTPS in background threads."""
+    satellite_config = config.get("satellite") or {}
     cert = Path(satellite_config.get("cert", "var/master-certs/cert.pem"))
     key = Path(satellite_config.get("key", "var/master-certs/key.pem"))
     ensure_certificate(cert, key, common_name="dagrunner-satellite-master")
@@ -69,19 +76,25 @@ def _start_satellite_service(config: dict, database_config):
     threads = int(satellite_config.get("threads", 16))
     context = server_ssl_context(cert, key)
     try:
-        serve_ssl(
-            app, host=host, port=port, threads=threads, ssl_context=context
-        )
+        serve_ssl(app, host=host, port=port, threads=threads, ssl_context=context)
     except OSError as exc:
         raise SystemExit(f"卫星服务端口绑定失败 {host}:{port}: {exc}") from exc
     manager.start()
     print(f"dagrunner satellite service listening on https://{host}:{port}")
     return {
-        "manager": manager,
         "url": str(satellite_config.get("public_url", "") or ""),
         "port": port,
         "fingerprint": certificate_fingerprint(cert),
     }
+
+
+def _start_satellite_service(config: dict, database_config):
+    """Start the satellite-facing HTTPS service in a background thread."""
+    database = create_state_database(database_config)
+    manager = build_satellite_manager(config, database)
+    if manager is None:
+        return None
+    return {"manager": manager, **serve_satellite_manager(config, manager)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="startup YAML config (default: var/config.example.yaml)",
+        help="startup YAML config (default: var/example_configs/config.example.yaml)",
     )
     args = parser.parse_args(argv)
     config = load_config_file(args.config)
@@ -117,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
         satellite_url=satellite["url"] if satellite else "",
         satellite_port=satellite["port"] if satellite else 7120,
         satellite_fingerprint=satellite["fingerprint"] if satellite else "",
+        update_config=config.get("update") or {},
+        update_host=host,
+        update_port=port,
     )
     _install_signal_handlers(app)
     print(f"dag-runner service listening on http://{host}:{port}")

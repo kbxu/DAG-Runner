@@ -15,7 +15,9 @@ import psutil
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
+from . import __version__
 from .database import BaseStateDatabase, create_state_database
+from .install import repo_root
 from .logger import TaskLogManager, decode_bytes
 from .notifier import load_email_config, load_notifier, save_email_config
 from .migrate_workflows import (
@@ -38,6 +40,7 @@ from .service import (
     WorkflowRegistry,
     decode_cron_expressions,
 )
+from .update import UpdateError, UpdateService
 from .workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
 from .workflow_editor import demo_command, demo_setup, preview_definition, extend_definition
 
@@ -172,6 +175,9 @@ def create_app(
     satellite_url: str = "",
     satellite_port: int = 7120,
     satellite_fingerprint: str = "",
+    update_config: dict | None = None,
+    update_host: str = "",
+    update_port: int = 0,
 ) -> Flask:
     if language not in {"zh-CN", "en"}:
         raise ValueError("language must be 'zh-CN' or 'en'")
@@ -201,9 +207,21 @@ def create_app(
         database, registry, logs, notifier=notifier, satellite_manager=satellite_manager
     )
     schedules = ScheduleService(database, registry, executions)
+    update_service = UpdateService(
+        config=update_config or {},
+        database=database,
+        executions=executions,
+        schedules=schedules,
+        satellite_manager=satellite_manager,
+        root=repo_root(),
+        verify_host=update_host,
+        verify_port=update_port,
+    )
+    executions.update_service = update_service
     if start_scheduler:
         executions.recover_orphaned_runs()
         schedules.start()
+    update_service.recover()
 
     app.extensions["state_database"] = database
     app.extensions["workflow_registry"] = registry
@@ -211,6 +229,7 @@ def create_app(
     app.extensions["execution_service"] = executions
     app.extensions["schedule_service"] = schedules
     app.extensions["satellite_manager"] = satellite_manager
+    app.extensions["update_service"] = update_service
 
     public_endpoints = {"static", "login_page", "api_login"}
 
@@ -350,7 +369,17 @@ def create_app(
 
     @app.get("/health")
     def health():
-        return jsonify({"ok": True, "scheduler_running": schedules.scheduler.running})
+        return jsonify(
+            {
+                "ok": True,
+                "version": __version__,
+                "scheduler_running": schedules.scheduler.running,
+                "update": {
+                    "active": update_service.active,
+                    "state": update_service.status()["state"],
+                },
+            }
+        )
 
     @app.get("/api/notifier")
     def notifier_settings():
@@ -537,12 +566,81 @@ def create_app(
     def api_system_resources():
         return jsonify(_system_resources_payload(state_dir))
 
+    @app.get("/api/update/status")
+    def update_status():
+        return jsonify(update_service.status())
+
+    @app.post("/api/update/check")
+    def update_check():
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(
+                update_service.check(
+                    str(payload.get("target", "")), str(payload.get("source", ""))
+                )
+            )
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+
+    @app.post("/api/update")
+    def update_apply():
+        payload = request.get_json(silent=True) or {}
+        target = str(payload.get("target", "")).strip()
+        source = str(payload.get("source", ""))
+        if not target:
+            raise ServiceError("缺少目标版本")
+        try:
+            checked = update_service.check(target, source)
+            staged = update_service.begin(checked["target"], source)
+            prepared = update_service.prepare()
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+        if prepared["state"] != "prepared":
+            update_service.abort()
+            return jsonify(
+                {
+                    "ok": False,
+                    "state": prepared["state"],
+                    "satellites": prepared["satellites"],
+                    "error": "部分卫星准备失败，已中止",
+                }
+            )
+        try:
+            update_service.commit()
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+        _schedule_restart()
+        return jsonify(
+            {
+                "ok": True,
+                "restarting": True,
+                "version": staged["version"],
+                "satellites": prepared["satellites"],
+            }
+        )
+
+    @app.post("/api/update/abort")
+    def update_abort():
+        return jsonify(update_service.abort())
+
+    @app.post("/api/update/rollback")
+    def update_rollback():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = update_service.rollback(str(payload.get("version", "")))
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+        _schedule_restart()
+        return jsonify(result)
+
     @app.get("/api/system/overview")
     def api_system_overview():
         return jsonify(
             resources=_system_resources_payload(state_dir),
             satellites=_satellites_payload(database),
             satellite_enabled=satellite_manager is not None,
+            version=__version__,
+            update=update_service.status(),
         )
 
     @app.get("/api/workflows")
@@ -1107,6 +1205,20 @@ def create_app(
 def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
     schedules.shutdown()
     executions.shutdown()
+
+
+def _schedule_restart(delay: float = 1.5) -> None:
+    """Exit the process after the HTTP response has been flushed.
+
+    The restart watchdog is already running detached; exiting releases the port
+    so it can switch ``var/current`` and start the new version.
+    """
+    import threading
+
+    def _exit() -> None:
+        os._exit(0)
+
+    threading.Timer(delay, _exit).start()
 
 
 def _platform_example_definition(definition: str) -> str:

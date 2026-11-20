@@ -123,6 +123,31 @@ python -m dagrunner.satellite --config var/satellite.yaml
 
 **Version match**: the master and the satellite must run the exact same `dagrunner.__version__`. Registration is refused on a mismatch and the channel is dropped: a reverse satellite stops reconnecting, a forward task fails immediately, and **Test connection** reports the mismatch.
 
+## Version display and updates
+
+The top bar shows the current version `vX.Y.Z`; the satellite panel shows each satellite's version and flags a mismatch. Click **Update** in the top bar to open the update panel.
+
+**Version source**: `dagrunner/__init__.py::__version__`. `pyproject.toml` reads it through a `dynamic version`, and release tags must match it.
+
+**Versioned install**: code lives in `var/versions/<version>/` and `var/current` holds the active version. The launchers (`var/start.bat` / `var/start.sh`) read `var/current` to pick the directory; without that file they fall back to the repository root (development mode). An update only switches `var/current`, and so does a rollback.
+
+**Update sources** (the `update` block in `var/config.yaml`):
+
+| Source | Description |
+| --- | --- |
+| `git` | `git archive <tag>` into `var/versions/<version>/`; the working tree is never touched, so local changes cannot break an update |
+| `release` | Download `dagrunner-<version>.tar.gz` from a GitHub release and verify its sha256 |
+
+**Update flow** (manual from the web console, or `python -m dagrunner.update`; both run the same steps):
+
+1. Preflight: refuse while a task is running, a run record is unfinished, or a satellite job is pending/running;
+2. Stage the new version and pause the scheduler;
+3. Distribute the package to online satellites (they pull it from the master, falling back to the release URL) and verify the sha256;
+4. Commit together: satellites restart first, the master last; scheduled runs missed during the update are not replayed;
+5. Verify every satellite version after startup and roll back to the previous version on failure.
+
+Offline satellites are skipped; a satellite can also be updated on its own with `python -m dagrunner.update --role satellite --to <version>`. An update is refused while tasks are running.
+
 ## Configuration
 
 | Option | Description | Default |
@@ -135,6 +160,9 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | `satellite.enabled` | Enable the satellite service | `false` |
 | `satellite.host` / `port` | Satellite service listen address | `0.0.0.0:7120` |
 | `satellite.public_url` | Address satellites use to reach the master | derived per request |
+| `update.source` | Update source: `git` / `release` / `auto` | `auto` |
+| `update.release.repo` | GitHub release repository | empty (git source) |
+| `update.enabled` | Allow updates | `true` |
 
 CLI commands (`python -m dagrunner`, `python -m dagrunner.auth`, `python -m demo.init_demo`) accept `--db-config var/config.yaml` to reuse the `db` entry above; without it they use the SQLite file from `--db`.
 
@@ -147,6 +175,10 @@ CLI commands (`python -m dagrunner`, `python -m dagrunner.auth`, `python -m demo
 | `python -m dagrunner --workflow <id> --list-runs` | Show run history |
 | `python -m dagrunner --show-log --run-id <id> --task <task>` | Show a task log |
 | `python -m dagrunner.auth --generate` | Create or reset the login account |
+| `python -m dagrunner --version` | Print the version |
+| `python -m dagrunner.update --check` | List available versions |
+| `python -m dagrunner.update --to <version>` | Update the master and online satellites from the CLI |
+| `python -m dagrunner.update --role satellite --to <version>` | Update one satellite |
 | `python -m dagrunner.migrate_workflows --source <ds\|windows-task-scheduler> ...` | Import external tasks |
 | `python -m dagrunner.satellite --config <path>` | Start the satellite agent |
 | `python -m demo.init_demo --reset` | Build the demo dataset |
@@ -159,9 +191,14 @@ dagrunner/        Core code and web assets
   satellite.py      Satellite agent entry   satellite_*.py  Protocol / crypto / execution
   workflow.py       Workflow parsing        runner.py        DAG engine
   service.py        Scheduling and runs     database*.py   State storage (SQLite / MySQL 8)
+  update.py         Version discovery / staging / coordination
+  satellite_update.py Satellite download / verify / restart
+  restart.py        Update watchdog (switches var/current and restarts)
+  install.py        Versioned install layout  version.py      Semantic version ordering
+run_server.py       Version-directory launcher  run_satellite.py Satellite launcher
 demo/             Sample workflows, task scripts, demo data builder
 docs/images/      README screenshots
-var/              Database, logs, certificates (local data)
+var/              Database, logs, certificates, versioned installs (local data)
 ```
 
 ## Security

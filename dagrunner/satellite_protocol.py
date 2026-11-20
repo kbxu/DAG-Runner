@@ -43,6 +43,12 @@ PATH_JOB = f"{SATELLITE_API_PREFIX}/jobs/{{job_id}}"
 PATH_JOB_CHUNKS = f"{SATELLITE_API_PREFIX}/jobs/{{job_id}}/chunks"
 PATH_JOB_RESULT = f"{SATELLITE_API_PREFIX}/jobs/{{job_id}}/result"
 PATH_JOB_CANCEL = f"{SATELLITE_API_PREFIX}/jobs/{{job_id}}/cancel"
+PATH_UPDATE_PREPARE = f"{SATELLITE_API_PREFIX}/update/prepare"
+PATH_UPDATE_COMMIT = f"{SATELLITE_API_PREFIX}/update/commit"
+PATH_UPDATE_ROLLBACK = f"{SATELLITE_API_PREFIX}/update/rollback"
+PATH_UPDATE_STATUS = f"{SATELLITE_API_PREFIX}/update/status"
+PATH_UPDATE_PACKAGE = f"{SATELLITE_API_PREFIX}/update/package"
+PATH_UPDATE_REPORT = f"{SATELLITE_API_PREFIX}/update/report"
 ROUTE_JOB = f"{SATELLITE_API_PREFIX}/jobs/<job_id>"
 ROUTE_JOB_CANCEL = f"{SATELLITE_API_PREFIX}/jobs/<job_id>/cancel"
 
@@ -60,6 +66,9 @@ DEFAULT_PLATFORM_SHELLS = {"linux": "bash", "windows": "cmd"}
 SSE_EVENT_JOB = "job"
 SSE_EVENT_CANCEL = "cancel"
 SSE_EVENT_PING = "ping"
+SSE_EVENT_UPDATE_PREPARE = "update_prepare"
+SSE_EVENT_UPDATE_COMMIT = "update_commit"
+SSE_EVENT_UPDATE_ROLLBACK = "update_rollback"
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 

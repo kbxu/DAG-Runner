@@ -1,0 +1,64 @@
+# DAG Runner 启动配置示例。
+# 复制到 var/config.yaml 后使用（dagrunner.server 默认读取 var/config.yaml）：
+#   python -m dagrunner.server --config var/config.yaml
+host: 127.0.0.1
+port: 7119
+# 默认 SQLite。写成 map 时可切换 MySQL 8：
+# db:
+#   type: mysql8
+#   host: 127.0.0.1
+#   port: 3306
+#   user: dagrunner
+#   password: ""
+#   database: dagrunner
+#   charset: utf8mb4
+#   state_dir: var
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+language: zh-CN
+notifier_config: null
+allow_insecure_remote_login: false
+
+# 卫星版服务（主程序侧，HTTPS）。启用后监听独立端口，接收卫星版注册并下发任务。
+# 三种网络拓扑：双向可达用反向模式；仅主程序能访问卫星用前向模式；
+# 仅卫星能访问主程序用反向模式。卫星版会根据 mode 自动选择。
+# 主程序与卫星版本必须完全相同（dagrunner.__version__），不一致时拒绝连接并断开。
+satellite:
+  enabled: false
+  host: 0.0.0.0
+  port: 7120
+  threads: 16
+  # 主程序侧证书（首次启动自动生成）
+  cert: var/master-certs/cert.pem
+  key: var/master-certs/key.pem
+  # 卫星版回连主程序时使用的地址，会写进「下载配置」里的 master_url。
+  # 留空则按 Web 请求的 Host + satellite.port 推导。
+  # 例如用 nginx 反向代理 https://xxx.com:7117 -> 本机 7120，这里填 https://xxx.com:7117。
+  # 注意 7120 是 HTTPS：nginx 需做 TLS 穿透或终止后重新加密，不能直接 HTTP 转发。
+  public_url: ""
+  timeout: 15
+  poll_interval: 1.0
+  # 下发更新时等待卫星下载、校验、暂存的最长秒数
+  update_timeout: 300
+
+# 版本更新。更新前会检查：没有运行中的任务；更新期间定时任务跳过；
+# 主程序与在线卫星同时更新（离线卫星跳过，卫星也可单独更新）。
+# 版本化安装目录：var/versions/<version>/，当前版本写在 var/current。
+update:
+  enabled: true
+  # auto：优先 GitHub Release，其次 git；也可显式指定 git 或 release
+  source: auto
+  git:
+    remote: origin
+    # 目标 tag/分支；留空则按版本号找 vX.Y.Z 或 X.Y.Z
+    branch_or_tag: ""
+  release:
+    repo: kbxu/DAG-Runner
+    # 资产名模板；默认使用 dagrunner-<version>.tar.gz（跨平台）
+    assets:
+      windows: "dagrunner-{version}.tar.gz"
+      linux: "dagrunner-{version}.tar.gz"
+    # 可选：内网镜像地址模板，留空使用 GitHub
+    download_url: ""
+  rollback_on_failure: true

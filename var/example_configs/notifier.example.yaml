@@ -1,5 +1,5 @@
-# Copy this file to notifier.yaml. It contains only the SMTP sending account;
-# enable notifications and configure recipients in each workflow YAML.
+# Copy this file to var/notifier.yaml and fill in the SMTP account.
+# Notifications are enabled and recipients are set in each workflow YAML.
 email:
   host: smtp.example.com
   port: 465

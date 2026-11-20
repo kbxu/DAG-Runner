@@ -501,3 +501,18 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
   .card-table td.card-cell-actions .actions { grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); }
   .modal-body { padding: 12px; }
 }
+
+.version-badge { padding: 6px 10px; color: #d9e9ec; border: 1px solid #ffffff38; border-radius: 99px; background: #ffffff12; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.version-badge.updating { color: #fde68a; border-color: #fde68a66; }
+.update-panel { display: flex; flex-direction: column; gap: 14px; }
+.update-current { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.update-form { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.update-form label { display: flex; flex-direction: column; gap: 4px; color: #475467; font-size: 12px; }
+.update-satellites { display: flex; flex-direction: column; gap: 6px; }
+.update-satellite-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.update-satellite-message { color: #667085; font-size: 11px; }
+.update-state { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; color: #667085; background: #f2f4f7; }
+.update-state.ready { color: #067647; background: #ecfdf3; }
+.update-state.failed, .update-state.prepare_failed, .update-state.commit_failed { color: #b42318; background: #fef3f2; }
+.update-state.staged, .update-state.prepared, .update-state.committing, .update-state.preparing { color: #175cd3; background: #eff8ff; }
+.update-actions { display: flex; gap: 8px; flex-wrap: wrap; }

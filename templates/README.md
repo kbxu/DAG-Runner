@@ -16,3 +16,12 @@ adds the same main environment directories used by Conda's Windows activator.
 It deliberately does not load `conda-hook.ps1` or environment `activate.d`
 scripts, so it also works when the machine's execution policy blocks `.ps1`
 activation scripts.
+
+## Satellite reverse proxy
+
+`nginx-satellite.conf` is a reference nginx config for exposing the master's
+satellite channel (HTTPS, self-signed) on another port through a reverse
+proxy. It contains two variants: SSL passthrough (recommended, keeps the
+master certificate fingerprint valid) and TLS termination at nginx. Set
+`satellite.public_url` to the external address, for example
+`https://xxx.com:7117`.

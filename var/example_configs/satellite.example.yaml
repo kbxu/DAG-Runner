@@ -1,5 +1,6 @@
-# DAG Runner 卫星版启动配置示例。
-# 启动：python -m dagrunner.satellite --config var/satellite.yaml
+# DAG Runner 卫星版配置示例。
+# 复制到 var/satellite.yaml 后使用：
+#   python -m dagrunner.satellite --config var/satellite.yaml
 # token 由主程序 Web 控制台的“卫星”页面生成，下载配置时会自动填入。
 # 主程序与卫星版本必须完全相同（dagrunner.__version__），不一致时拒绝连接并断开。
 satellite:
@@ -15,7 +16,6 @@ satellite:
   mode: auto
   listen_host: 0.0.0.0
   listen_port: 7121
-  # 首次启动自动生成自签名证书
   # 卫星版自己的证书（首次启动自动生成，不要与主程序共用）
   # 迁移卫星时直接拷贝 var/satellite-certs/ 整个目录即可
   cert: var/satellite-certs/cert.pem
@@ -29,3 +29,5 @@ satellite:
   heartbeat_interval: 30
   probe_interval: 60
   timeout: 15
+  # 主机下发更新时，证书信任策略同 host_key_policy；
+  # 单独更新：python -m dagrunner.update --role satellite --to <version>

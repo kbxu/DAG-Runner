@@ -237,6 +237,29 @@ class SatelliteClient:
                 timeout=timeout, ok=ok,
             )
 
+    def download(self, path: str, dest, *, timeout: float | None = None) -> None:
+        """Stream an authenticated binary response to ``dest``."""
+        headers = self._authorized_headers("GET", path, timeout)
+        connection = self._connect(timeout)
+        try:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            if response.status != 200:
+                data = response.read()
+                raise SatelliteHttpError(
+                    f"download failed with {response.status}",
+                    status_code=response.status,
+                    payload=data,
+                )
+            with open(dest, "wb") as handle:
+                while True:
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+        finally:
+            connection.close()
+
     def open_stream(self, path: str, *, timeout: float | None = None):
         """Open an SSE stream and return (connection, response)."""
         headers = self._authorized_headers("GET", path, timeout)

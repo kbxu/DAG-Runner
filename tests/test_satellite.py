@@ -85,10 +85,14 @@ class SatelliteCryptoTests(unittest.TestCase):
 
         root = Path(__file__).resolve().parent.parent
         master = yaml.safe_load(
-            (root / "var" / "config.example.yaml").read_text(encoding="utf-8")
+            (root / "var" / "example_configs" / "config.example.yaml").read_text(
+                encoding="utf-8"
+            )
         )
         agent = yaml.safe_load(
-            (root / "var" / "satellite.example.yaml").read_text(encoding="utf-8")
+            (root / "var" / "example_configs" / "satellite.example.yaml").read_text(
+                encoding="utf-8"
+            )
         )
         self.assertNotEqual(
             master["satellite"]["cert"], agent["satellite"]["cert"]

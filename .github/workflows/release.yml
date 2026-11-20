@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify tag matches dagrunner.__version__
+        run: |
+          python - <<'PY'
+          import os, re, sys, pathlib
+          tag = os.environ["GITHUB_REF_NAME"]
+          text = pathlib.Path("dagrunner/__init__.py").read_text(encoding="utf-8")
+          match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+          version = match.group(1) if match else ""
+          expected = tag[1:] if tag.startswith("v") else tag
+          if version != expected:
+              raise SystemExit(f"tag {tag} != dagrunner.__version__ {version}")
+          print(f"version {version}")
+          PY
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
+      - name: Build wheel and source archive
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          for file in dagrunner-*.tar.gz dagrunner-*.whl; do
+            sha256sum "$file" > "$file.sha256"
+          done
+          sha256sum dagrunner-*.tar.gz dagrunner-*.whl > SHA256SUMS
+          ls -l
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

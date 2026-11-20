@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event, Timer
 
+from . import __version__
 from .database import (
     BaseStateDatabase,
     StateDatabase,
@@ -592,6 +593,12 @@ def _decode_scope(raw: str | None, order: list[str]) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a database-backed DAG workflow")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"dagrunner {__version__}",
+        help="print the dagrunner version and exit",
+    )
     parser.add_argument(
         "--workflow", help="imported workflow ID, for example workflow_a1b2c3d4e5f6"
     )

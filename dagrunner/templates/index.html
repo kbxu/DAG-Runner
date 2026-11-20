@@ -18,6 +18,8 @@
       </div>
     </div>
     <div class="header-actions">
+      <span id="versionBadge" class="version-badge" title="">v—</span>
+      <button id="updateButton" class="logout-button" type="button" onclick="openUpdateSettings()"><span data-i18n>更新</span></button>
       <div id="serviceStatus" class="live checking"><span></span><b data-i18n>正在连接</b></div>
       <span class="signed-in-user">{{ username }}</span>
       <button id="languageToggle" class="logout-button" type="button">EN</button>
@@ -116,6 +118,7 @@
   <div id="toast" class="toast hidden"></div>
   <script src="{{ url_for('static', filename='i18n.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='update.js') }}"></script>
   <script src="{{ url_for('static', filename='workflow-editor.js') }}"></script>
   <script src="{{ url_for('static', filename='workflow-viewer.js') }}"></script>
 </body>

@@ -18,13 +18,9 @@ data/
 # Runtime state is local and may contain sensitive paths or logs.
 var/*
 !var/.gitkeep
-!var/notifier.example.yaml
-!var/config.example.yaml
-!var/satellite.example.yaml
-!var/start.example.bat
-!var/start.example.sh
-!var/start-satellite.example.bat
-!var/start-satellite.example.sh
+# Tracked templates: copy a file to var/ (or var/logs/ for output) to use it.
+!var/example_configs/
+!var/example_configs/**
 
 # Demo execution output.
 .demo_data/

@@ -123,6 +123,31 @@ python -m dagrunner.satellite --config var/satellite.yaml
 
 **版本一致**：主程序与卫星必须使用完全相同的 `dagrunner.__version__`。注册时校验，不一致就断开：反向模式卫星停止重连，前向模式任务直接失败，Web 上的「检查连通」也会提示版本不一致。
 
+## 版本展示与更新
+
+顶栏显示当前版本 `vX.Y.Z`，卫星面板显示每台卫星的版本，版本不一致会标红。点顶栏「更新」打开更新面板。
+
+**版本号来源**：`dagrunner/__init__.py::__version__`，`pyproject.toml` 通过 `dynamic version` 读取，发版 tag 必须与它一致。
+
+**版本化安装**：代码放在 `var/versions/<version>/`，`var/current` 保存当前版本号。启动脚本（`var/start.bat` / `var/start.sh`）读取 `var/current` 决定运行哪个目录；没有该文件时回退到仓库根目录（开发模式）。更新只切换 `var/current`，回滚也只是切回去。
+
+**两种更新来源**（`var/config.yaml` 的 `update`）：
+
+| 来源 | 说明 |
+| --- | --- |
+| `git` | `git archive <tag>` 导出到 `var/versions/<version>/`，不碰工作区，本地未提交改动不会影响更新 |
+| `release` | 从 GitHub Release 下载 `dagrunner-<version>.tar.gz`，校验 sha256 后解压 |
+
+**更新流程**（Web 手动，或命令行 `python -m dagrunner.update`，两者流程一致）：
+
+1. 预检：有运行中任务、未完成运行记录或未结束的卫星任务时拒绝更新；
+2. 暂存新版本，暂停定时调度；
+3. 主机把更新包下发给在线卫星（卫星从主机下载，失败再直连发布地址），校验 sha256 后暂存；
+4. 一起提交：卫星先重启，主机最后重启；更新期间错过的定时触发不补跑；
+5. 启动后自动校验各卫星版本，失败自动回滚到上一版本。
+
+离线卫星跳过更新，也可以单独更新卫星：`python -m dagrunner.update --role satellite --to <version>`。有运行中任务时更新会被拒绝。
+
 ## 配置速查
 
 | 配置项 | 说明 | 默认 |
@@ -135,6 +160,9 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | `satellite.enabled` | 启用卫星服务 | `false` |
 | `satellite.host` / `port` | 卫星服务监听地址 | `0.0.0.0:7120` |
 | `satellite.public_url` | 卫星回连主程序的地址 | 按请求推导 |
+| `update.source` | 更新来源：`git` / `release` / `auto` | `auto` |
+| `update.release.repo` | GitHub Release 仓库 | 空（用 git 源） |
+| `update.enabled` | 是否允许更新 | `true` |
 
 CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m demo.init_demo`）加 `--db-config var/config.yaml` 即可复用上面的 `db` 配置；不传时仍用 `--db` 指定的 SQLite 文件。
 
@@ -147,6 +175,10 @@ CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m demo.init_
 | `python -m dagrunner --workflow <id> --list-runs` | 查看历史 |
 | `python -m dagrunner --show-log --run-id <id> --task <task>` | 查看日志 |
 | `python -m dagrunner.auth --generate` | 创建 / 重置登录账号 |
+| `python -m dagrunner --version` | 打印版本号 |
+| `python -m dagrunner.update --check` | 查看可用版本 |
+| `python -m dagrunner.update --to <version>` | 命令行更新主程序与在线卫星 |
+| `python -m dagrunner.update --role satellite --to <version>` | 单独更新卫星 |
 | `python -m dagrunner.migrate_workflows --source <ds\|windows-task-scheduler> ...` | 导入外部任务 |
 | `python -m dagrunner.satellite --config <path>` | 启动卫星版 |
 | `python -m demo.init_demo --reset` | 生成演示数据 |
@@ -159,9 +191,14 @@ dagrunner/        核心代码与 Web 资源
   satellite.py      卫星版入口        satellite_*.py  卫星协议 / 加密 / 执行
   workflow.py       工作流解析与校验   runner.py        DAG 执行引擎
   service.py        调度与运行管理     database*.py   状态存取（SQLite / MySQL 8）
+  update.py         版本发现 / 暂存 / 协调更新
+  satellite_update.py 卫星侧下载 / 校验 / 重启
+  restart.py        更新看门狗（切换 var/current 并重启）
+  install.py        版本化安装布局     version.py      语义化版本比较
+run_server.py       版本目录启动器     run_satellite.py 卫星启动器
 demo/             示例工作流、任务脚本与演示数据初始化
 docs/images/      README 截图
-var/              数据库、日志、证书（本地数据）
+var/              数据库、日志、证书、版本化安装（本地数据）
 ```
 
 ## 安全
