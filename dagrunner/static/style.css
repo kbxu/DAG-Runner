@@ -216,6 +216,7 @@ select.ui-select { width: 100%; margin-top: 5px; padding: 9px 34px 9px 10px; col
 select.ui-select:hover { border-color: #98a2b3; }
 select.ui-select:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px #087f7820; }
 .panel-actions { display: flex; gap: 8px; }
+.mobile-sort { display: none; }
 label { display: block; color: #475467; font-size: 12px; font-weight: 650; }
 input { width: 100%; margin-top: 5px; padding: 9px 10px; border: 1px solid #ccd3da; border-radius: 6px; font: inherit; }
 input[readonly] { color: #475467; background: #f2f4f7; cursor: default; }
@@ -223,7 +224,7 @@ textarea { width: 100%; min-height: 420px; margin-top: 5px; padding: 12px; borde
 .yaml-editor { position: relative; display: flex; height: 420px; min-height: 420px; margin-top: 5px; overflow: hidden; border: 1px solid #ccd3da; border-radius: 6px; background: #f8fafc; }
 .yaml-gutter { flex: 0 0 46px; box-sizing: border-box; padding: 12px 8px 12px 0; overflow: hidden; color: #98a2b3; background: #f2f4f7; border-right: 1px solid #e4e9ee; font: 12px/1.55 "Cascadia Code", Consolas, monospace; text-align: right; white-space: pre; user-select: none; }
 .yaml-code { position: relative; flex: 1 1 auto; min-width: 0; }
-.yaml-editor textarea, .yaml-editor pre { box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 12px; border-radius: 0; font: 12px/1.55 "Cascadia Code", Consolas, monospace; tab-size: 2; white-space: pre; overflow: auto; }
+.yaml-editor textarea, .yaml-editor pre { box-sizing: border-box; width: 100%; height: 100%; min-height: 0; margin: 0; padding: 12px; border-radius: 0; font: 12px/1.55 "Cascadia Code", Consolas, monospace; tab-size: 2; white-space: pre; overflow: auto; }
 .yaml-editor pre { position: absolute; inset: 0; z-index: 0; min-height: 0; color: #344054; border: 0; background: transparent; pointer-events: none; }
 .yaml-editor textarea { position: absolute; inset: 0; z-index: 1; color: transparent; caret-color: #101828; background: transparent; border: 0; resize: none; -webkit-text-fill-color: transparent; }
 .yaml-editor textarea::selection { background: #84caff66; }
@@ -384,4 +385,119 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .workflow-name-cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .workflow-name-cell .workflow-link { flex: 0 1 auto; min-width: 0; }
 .runner-tag { flex: 0 0 auto; white-space: nowrap; padding: 1px 6px; color: #3538cd; border-radius: 999px; background: #eef4ff; font-size: 11px; font-weight: 700; }
-@media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .brand { gap: 12px; } .brand-logo { width: 58px; height: 58px; } .live, .signed-in-user { display: none; } main { padding: 0 10px; } .panel-head { align-items: flex-start; gap: 12px; } .panel-actions { flex-wrap: wrap; justify-content: flex-end; } .form-grid, .schedule-editor-head, .schedule-input-row, .channel-form-grid, .satellite-form-grid { grid-template-columns: 1fr; } .channel-form-grid .channel-wide, .satellite-form-grid .satellite-wide { grid-column: auto; } }
+@media (max-width: 720px) { .topbar { align-items: flex-start; padding: 22px; } .brand { gap: 12px; } .brand-logo { width: 58px; height: 58px; } .signed-in-user { display: none; } main { padding: 0 10px; } .panel-head { align-items: flex-start; gap: 12px; } .panel-actions { flex-wrap: wrap; justify-content: flex-end; } .form-grid, .schedule-editor-head, .schedule-input-row, .channel-form-grid, .satellite-form-grid { grid-template-columns: 1fr; } .channel-form-grid .channel-wide, .satellite-form-grid .satellite-wide { grid-column: auto; } }
+
+/* ------------------------------------------------------------------
+   Small screens and phones
+   The desktop layout above is unchanged. These rules only refine the
+   narrower viewports: the wide data tables become stacked cards, the
+   header and dialogs use the full width, and touch targets grow.
+------------------------------------------------------------------- */
+
+/* Stack the workflow editor / viewer instead of a two-column split. */
+@media (max-width: 900px) {
+  .workflow-editor-vertical { grid-template-columns: minmax(0, 1fr); }
+  .workflow-editor-vertical .workflow-preview { width: 100%; }
+  .workflow-editor-vertical .dag-scroll { height: 320px; min-height: 320px; max-height: 50vh; flex: none; }
+  .workflow-viewer-frame.workflow-editor-vertical { height: auto; min-height: 0; }
+  .workflow-viewer-frame.workflow-editor-vertical .viewer-details { overflow: visible; }
+}
+
+/* Wide tables become cards with field labels on tablets and phones. */
+@media (max-width: 860px) {
+  .card-table, .card-table tbody, .card-table tr, .card-table td { display: block; }
+  .card-table { width: 100%; min-width: 0; max-width: none; table-layout: auto; }
+  .card-table thead { display: block; }
+  .card-table thead tr:not(.filter-row) { display: none; }
+  .card-table tbody tr { padding: 10px 12px; border-top: 1px solid var(--line); }
+  .card-table tbody tr:first-child { border-top: 0; }
+  .card-table td { padding: 5px 0; border: 0; white-space: normal; vertical-align: top; display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 2px 10px; }
+  .card-table td::before { content: attr(data-label); color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .02em; }
+  .card-table td.card-cell-name, .card-table td.card-cell-actions { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr); }
+  .card-table td.card-cell-name::before, .card-table td.card-cell-actions::before { content: none; }
+  .card-table td.card-cell-name { padding-top: 2px; position: static; max-width: none; min-width: 0; }
+  .card-table td.card-cell-name .workflow-link { font-size: 14px; }
+  .card-table td.card-cell-name .workflow-id { max-width: none; }
+  .card-table td.card-cell-actions { margin-top: 8px; padding-top: 9px; border-top: 1px dashed var(--line); }
+  .card-table td.card-cell-actions .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 6px; width: 100%; min-width: 0; }
+  .card-table td.card-cell-actions .actions .button { width: 100%; padding: 8px 6px; font-size: 12px; white-space: normal; text-align: center; }
+  .card-table td.empty { display: block; padding: 22px 8px; }
+  .card-table td.viewer-table-error { max-width: none; min-width: 0; }
+  .card-table .progress { width: 100%; }
+  /* Run filters: search on its own row, the two selects side by side. */
+  .card-table .filter-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 4px 12px 10px; border-top: 0; }
+  .card-table .filter-row th { display: block; padding: 0; border: 0; background: transparent; text-transform: none; letter-spacing: 0; }
+  .card-table .filter-row th:first-child { grid-column: 1 / -1; }
+  .card-table .filter-row th:empty { display: none; }
+  .card-table .filter-row input, .card-table .filter-row select { width: 100%; min-width: 0; }
+  /* Sort control replaces the hidden column headers on narrow screens. */
+  .mobile-sort { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--muted); font-size: 12px; font-weight: 650; }
+  .mobile-sort select { width: auto; min-width: 108px; margin-top: 0; }
+}
+
+/* Touch devices: avoid hover states sticking after a tap. */
+@media (hover: none) {
+  tbody tr:hover { background: transparent; }
+}
+
+@media (max-width: 720px) {
+  .topbar { flex-direction: column; align-items: flex-start; gap: 12px; padding: 20px 16px; }
+  .brand { gap: 12px; }
+  .brand-logo { width: 46px; height: 46px; }
+  .eyebrow { display: none; }
+  h1 { font-size: 20px; }
+  .subtitle { display: none; }
+  .header-actions { width: 100%; flex-wrap: wrap; gap: 8px; }
+  .live { padding: 6px 10px; }
+  main { padding: 0 10px; margin-top: 16px; }
+  main .panel { min-height: 0; }
+  .panel { margin-bottom: 14px; border-radius: 10px; }
+  .panel-head { padding: 14px; }
+  .panel-head-title { flex-wrap: wrap; }
+  .run-stats { width: 100%; }
+  .workflow-panel-head { flex-direction: column; align-items: stretch; gap: 12px; }
+  .workflow-panel-head > div:first-child { width: 100%; }
+  .workflow-panel-head .resource-bar { order: 3; width: 100%; margin: 0; }
+  .panel-actions { width: 100%; }
+  .panel-actions .button { flex: 1 1 auto; min-height: 36px; }
+  .header-actions .button, .header-actions .logout-button { min-height: 34px; }
+  /* Tag rail becomes a single horizontally scrollable row. */
+  .workflow-tags { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; max-height: none; margin-bottom: 8px; padding-bottom: 4px; scrollbar-width: none; }
+  .workflow-tags::-webkit-scrollbar { display: none; }
+  .workflow-tag { flex: 0 0 auto; }
+  .resource-bar { gap: 10px; padding-inline: 10px; }
+  .resource-metric { flex: 1; min-width: 0; }
+  .pagination { flex-wrap: wrap; justify-content: center; gap: 8px; padding: 10px 12px; }
+  /* Dialogs take the whole screen on phones. */
+  .modal { padding: 8px; }
+  .modal-card { width: 100%; max-width: none; height: calc(100vh - 16px); height: calc(100dvh - 16px); max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); display: flex; flex-direction: column; border-radius: 10px; }
+  .modal-head { flex: 0 0 auto; padding: 14px; }
+  .modal-body { flex: 1 1 auto; min-height: 0; max-height: none; padding: 14px; }
+  .compact-modal-card { height: auto; max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); }
+  .log-modal-card { height: calc(100vh - 16px); height: calc(100dvh - 16px); max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); }
+  .log-modal .modal-body { max-height: none; }
+  .log-modal-body { max-height: none; }
+  .confirm-card { width: 100%; }
+  .toast { right: 12px; bottom: 12px; left: 12px; max-width: none; }
+  .yaml-editor { height: min(420px, 56vh); min-height: 260px; }
+  .workflow-editor-footer { position: sticky; bottom: 0; margin-top: 10px; padding: 8px 0; background: var(--paper); box-shadow: 0 -8px 16px -12px #17324d55; }
+  .schedule-popover { min-width: 0; width: auto; max-width: calc(100vw - 16px); }
+  .schedule-popover-row { grid-template-columns: minmax(120px, 1fr) auto; gap: 8px 12px; }
+  .schedule-popover-row span:first-child { white-space: normal; overflow-wrap: anywhere; }
+  .schedule-summary { width: auto; max-width: 100%; }
+  .channel-card, .notification-card { flex-wrap: wrap; }
+  .channel-card > div:nth-child(2), .notification-card > div:nth-child(2) { min-width: 0; flex: 1 1 180px; }
+  .viewer-records-heading { flex-wrap: wrap; }
+  .viewer-node-heading { flex-wrap: wrap; }
+  input, select { font-size: 16px; }
+}
+
+@media (max-width: 480px) {
+  main { padding: 0 8px; }
+  .panel-head { padding: 12px; }
+  .card-table tbody tr { padding: 9px 10px; }
+  .card-table .filter-row { padding: 4px 10px 10px; }
+  .card-table td { grid-template-columns: 80px minmax(0, 1fr); gap: 2px 8px; }
+  .card-table td.card-cell-actions .actions { grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); }
+  .modal-body { padding: 12px; }
+}

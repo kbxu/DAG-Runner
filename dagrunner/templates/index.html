@@ -30,7 +30,7 @@
       <aside id="workflowTags" class="workflow-tags" role="group" aria-label="按标签筛选" data-i18n-aria-label="按标签筛选"></aside>
       <section class="panel">
       <div class="panel-head workflow-panel-head">
-        <div><h2 data-i18n>工作流与定时</h2><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p></div>
+        <div><h2 data-i18n>工作流与定时</h2><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p><label class="mobile-sort"><span data-i18n>排序</span><select id="workflowSortMobile" class="ui-select" onchange="setWorkflowSortFromSelect(this.value)"></select></label></div>
         <div id="resourceBar" class="resource-bar" role="group" aria-label="服务器资源" data-i18n-aria-label="服务器资源">
           {% for key, label in [('cpu', 'CPU'), ('memory', '内存'), ('disk', '硬盘')] %}
           <div class="resource-metric" data-resource="{{ key }}">
@@ -42,7 +42,7 @@
         <div class="panel-actions"><button class="button ghost channel-settings-button" onclick="openNotifierSettings()">⚙ <span data-i18n>通知</span></button><button class="button ghost" id="satelliteSettingsButton" onclick="openSatelliteSettings()"><span data-i18n>卫星</span><span id="satelliteStatusDot" class="satellite-dot none"></span></button><button class="button" onclick="openImportWorkflow()" data-i18n>新建工作流</button></div>
       </div>
       <div class="table-wrap">
-        <table class="workflow-list-table">
+        <table class="workflow-list-table card-table">
           <colgroup><col class="workflow-col-name"><col class="workflow-col-schedule"><col class="workflow-col-time"><col class="workflow-col-time"><col class="workflow-col-actions"></colgroup>
           <thead><tr><th data-i18n>工作流</th><th data-i18n>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')"><span data-i18n>上次运行</span> <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')"><span data-i18n>下次运行</span> <span id="nextRunSort"></span></button></th><th data-i18n>操作</th></tr></thead>
           <tbody id="workflowRows"><tr><td colspan="5" class="empty" data-i18n>正在加载…</td></tr></tbody>
@@ -61,7 +61,7 @@
         </div>
       </div>
       <div class="table-wrap">
-        <table class="run-list-table">
+        <table class="run-list-table card-table">
           <colgroup><col class="workflow-col-name"><col class="run-col-trigger"><col class="run-col-status"><col class="run-col-time"><col class="run-col-progress"><col class="run-col-duration"><col class="run-col-actions"></colgroup>
           <thead>
             <tr><th data-i18n>工作流</th><th data-i18n>触发方式</th><th data-i18n>状态</th><th data-i18n>开始时间 / Run ID</th><th data-i18n>任务进度</th><th data-i18n>耗时</th><th data-i18n>操作</th></tr>

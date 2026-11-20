@@ -322,16 +322,30 @@ function renderWorkflows() {
   const visibleWorkflows = workflows.slice(pageStart, pageStart + state.workflowPageSize);
   document.getElementById("lastRunSort").textContent = key === "last_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
   document.getElementById("nextRunSort").textContent = key === "next_run_time" ? (direction === "asc" ? "▲" : "▼") : "";
+  const mobileSort = document.getElementById("workflowSortMobile");
+  if (mobileSort) {
+    const signature = `${currentLanguage}:${key}:${direction}`;
+    if (mobileSort.dataset.sortSignature !== signature) {
+      mobileSort.dataset.sortSignature = signature;
+      const options = [`<option value=""${key ? "" : " selected"}>${t("默认")}</option>`];
+      for (const sortKey of ["last_run_time", "next_run_time"]) {
+        const label = t(sortKey === "last_run_time" ? "上次运行" : "下次运行");
+        options.push(`<option value="${sortKey}:desc"${key === sortKey && direction === "desc" ? " selected" : ""}>${label} ↓</option>`);
+        options.push(`<option value="${sortKey}:asc"${key === sortKey && direction === "asc" ? " selected" : ""}>${label} ↑</option>`);
+      }
+      mobileSort.innerHTML = options.join("");
+    }
+  }
   document.getElementById("workflowRows").innerHTML = visibleWorkflows.map(w => {
       const s = w.schedule;
       const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
       const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
       return `<tr>
-        <td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button>${runnerTag(w.runner, w.runner_locations)}</div><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
-        <td>${scheduleSummary(s)}</td>
-        <td>${fmt(w.last_run_time)}</td>
-        <td>${fmt(s.next_run_time)}</td>
-        <td><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost${s.enabled ? ' schedule-active' : ''}" title="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" aria-label="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" onclick="editSchedule('${esc(w.name)}')">${s.enabled ? '● ' : ''}${t("定时")}</button><button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>${t("通知")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
+        <td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button>${runnerTag(w.runner, w.runner_locations)}</div><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
+        <td data-label="${esc(t("Cron / 时区"))}">${scheduleSummary(s)}</td>
+        <td data-label="${esc(t("上次运行"))}">${fmt(w.last_run_time)}</td>
+        <td data-label="${esc(t("下次运行"))}">${fmt(s.next_run_time)}</td>
+        <td class="card-cell-actions"><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost${s.enabled ? ' schedule-active' : ''}" title="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" aria-label="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" onclick="editSchedule('${esc(w.name)}')">${s.enabled ? '● ' : ''}${t("定时")}</button><button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>${t("通知")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="5" class="empty">${t("还没有导入工作流")}</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>${t("共 {total} 条 · 第 {page} / {pages} 页", {total:workflows.length,page:state.workflowPage,pages:totalPages})}</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">${t("上一页")}</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">${t("下一页")}</button></div>`;
@@ -399,6 +413,13 @@ function setWorkflowSort(key) {
   renderWorkflows();
 }
 
+function setWorkflowSortFromSelect(value) {
+  const [key, direction] = value.split(":");
+  state.workflowSort = key ? { key, direction: direction === "asc" ? "asc" : "desc" } : { key: "", direction: "asc" };
+  state.workflowPage = 1;
+  renderWorkflows();
+}
+
 function changeWorkflowPage(page) {
   const totalPages = Math.max(1, Math.ceil(state.workflows.size / state.workflowPageSize));
   if (page < 1 || page > totalPages || page === state.workflowPage) return;
@@ -429,7 +450,7 @@ async function loadRuns(resetPage=false) {
       }
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
-      return `<tr><td><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td>${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td>${statusBadge(r.status)}</td><td><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td>${duration(r.start_time, r.end_time)}</td><td><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
     renderRunStats(data.stats);
@@ -919,7 +940,7 @@ function closeDeleteConfirmFromBackdrop(event) {
 
 function showTasks(name) {
   const w = state.workflows.get(name); if (!w) return;
-  openModal(`${namedId(w.description, w.name)} · ${t("DAG 任务")}`, `<div class="table-wrap"><table><thead><tr><th>${t("任务")}</th><th>${t("依赖")}</th><th>${t("命令 / 类型")}</th><th>${t("启用")}</th></tr></thead><tbody>${w.tasks.map(task => `<tr><td><div class="primary">${esc(task.description || task.name)}</div><div class="workflow-id mono">${esc(task.name)}</div></td><td>${esc(task.depends.map(id => taskNamedId(w, id)).join(", ") || "—")}</td><td class="mono">${esc(task.type === "condition" ? t("条件分支") : task.command)}</td><td>${task.enabled ? t("是") : t("否")}</td></tr>`).join("")}</tbody></table></div>`);
+  openModal(`${namedId(w.description, w.name)} · ${t("DAG 任务")}`, `<div class="table-wrap"><table class="card-table tasks-table"><thead><tr><th>${t("任务")}</th><th>${t("依赖")}</th><th>${t("命令 / 类型")}</th><th>${t("启用")}</th></tr></thead><tbody>${w.tasks.map(task => `<tr><td class="card-cell-name"><div class="primary">${esc(task.description || task.name)}</div><div class="workflow-id mono">${esc(task.name)}</div></td><td data-label="${esc(t("依赖"))}">${esc(task.depends.map(id => taskNamedId(w, id)).join(", ") || "—")}</td><td data-label="${esc(t("命令 / 类型"))}" class="mono">${esc(task.type === "condition" ? t("条件分支") : task.command)}</td><td data-label="${esc(t("启用"))}">${task.enabled ? t("是") : t("否")}</td></tr>`).join("")}</tbody></table></div>`);
 }
 
 function showDag(name) {
