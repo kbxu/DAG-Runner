@@ -581,6 +581,23 @@ class SatelliteEndToEndTests(unittest.TestCase):
         self.assertEqual(status.status, "offline")
         self.assertIn("版本不一致", status.last_error or "")
 
+    def test_client_reports_fingerprint_mismatch_detail(self) -> None:
+        expected = "ab" * 32
+        client = SatelliteClient(
+            f"https://127.0.0.1:{self.master.port}",
+            token=TOKEN,
+            alias="sat-01",
+            timeout=10,
+            trust=lambda fingerprint: False,
+            expected_fingerprint=expected,
+        )
+        with self.assertRaises(SatelliteHttpError) as caught:
+            client.register(json_body={"alias": "sat-01", "agent_version": AGENT_VERSION})
+        message = str(caught.exception)
+        self.assertIn("fingerprint mismatch", message)
+        self.assertIn("presented", message)
+        self.assertIn(expected, message)
+
     def test_reverse_agent_stops_on_version_mismatch(self) -> None:
         self.manager.agent_version = "9.9.9"
         agent = self._start_agent("reverse")

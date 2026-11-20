@@ -532,13 +532,16 @@ class SatelliteManager:
         if client is not None:
             return client
 
+        current = self.database.get_satellite(config.alias)
+        expected = ((current.cert_fingerprint if current else "") or "").lower()
+
         def trust(fingerprint: str) -> bool:
             current = self.database.get_satellite(config.alias)
-            expected = (current.cert_fingerprint if current else "") or ""
-            if config.host_key_policy == "pinned" and not expected:
+            known = (current.cert_fingerprint if current else "") or ""
+            if config.host_key_policy == "pinned" and not known:
                 return False
-            if expected:
-                return hmac.compare_digest(expected.lower(), fingerprint.lower())
+            if known:
+                return hmac.compare_digest(known.lower(), fingerprint.lower())
             self.database.remember_satellite_fingerprint(config.alias, fingerprint)
             return True
 
@@ -549,6 +552,7 @@ class SatelliteManager:
             timeout=self.timeout,
             trust=trust,
             version=self.agent_version,
+            expected_fingerprint=expected,
         )
         self._clients[config.alias] = client
         return client

@@ -1,7 +1,7 @@
 @echo off
 rem Copy this file to var\start.bat and adjust DAGR_PYTHON to the target interpreter.
 rem Copy var\example_configs\config.example.yaml to var\config.yaml and edit it.
-rem Console output is echoed here; full output is appended to var\logs\*.log.
+rem Program output is mirrored to this console and appended to var\logs\*.log.
 setlocal
 if not defined DAGR_PYTHON set "DAGR_PYTHON=python.exe"
 pushd "%~dp0.."
@@ -18,20 +18,19 @@ if defined CURRENT (
   if exist "%ROOT%\var\versions\%CURRENT%\run_server.py" (
     echo [dagrunner] version: %CURRENT%
     echo [dagrunner] starting, this window stays open while the server runs ...
-    "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_server.py" --config "%ROOT%\var\config.yaml" >> "%LOG_OUT%" 2>> "%LOG_ERR%"
+    "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_tee.py" "%LOG_OUT%" "%LOG_ERR%" "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_server.py" --config "%ROOT%\var\config.yaml"
     if errorlevel 1 goto failed
     echo [dagrunner] server stopped, exit code %errorlevel%.
     goto :eof
   )
 )
 echo [dagrunner] starting, this window stays open while the server runs ...
-"%DAGR_PYTHON%" -m dagrunner.server --config "%ROOT%\var\config.yaml" >> "%LOG_OUT%" 2>> "%LOG_ERR%"
+"%DAGR_PYTHON%" "%ROOT%\run_tee.py" "%LOG_OUT%" "%LOG_ERR%" "%DAGR_PYTHON%" -m dagrunner.server --config "%ROOT%\var\config.yaml"
 if errorlevel 1 goto failed
 echo [dagrunner] server stopped, exit code %errorlevel%.
 goto :eof
 
 :failed
 echo [dagrunner] FAILED to start, error code %errorlevel%.
-echo [dagrunner] see the log files above.
 set /p "_close_=Press Enter to close..."
 exit /b 1

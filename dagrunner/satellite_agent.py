@@ -166,6 +166,11 @@ class SatelliteAgent:
             )
         return self._trust_store.check(fingerprint)
 
+    def _expected_fingerprint(self) -> str:
+        if self.config.host_key_policy == "pinned":
+            return self.config.master_cert_fingerprint or ""
+        return self._trust_store.fingerprint or ""
+
     def _master_client(self) -> SatelliteClient:
         if self._client is None:
             self._client = SatelliteClient(
@@ -176,6 +181,7 @@ class SatelliteAgent:
                 stream_timeout=60,
                 trust=self._trust,
                 version=AGENT_VERSION,
+                expected_fingerprint=self._expected_fingerprint(),
             )
         return self._client
 
@@ -334,17 +340,23 @@ class SatelliteAgent:
                     self._version_mismatch = True
                     if time.monotonic() < self._update_deadline:
                         print(
-                            f"satellite version mismatch while the master catches up: {exc}",
+                            f"satellite version mismatch while the master catches up "
+                            f"({self.config.master_url}): {exc}",
                             file=sys.stderr,
                         )
                         self._stop.wait(5)
                         continue
                     print(
-                        f"satellite reverse channel stopped: {exc}",
+                        f"satellite reverse channel stopped "
+                        f"({self.config.master_url}): {exc}",
                         file=sys.stderr,
                     )
                     return
-                print(f"satellite reverse channel unavailable: {exc}", file=sys.stderr)
+                print(
+                    f"satellite reverse channel unavailable "
+                    f"({self.config.master_url}): {exc}",
+                    file=sys.stderr,
+                )
                 self._stop.wait(
                     5 if self.config.mode == "reverse" else self.config.probe_interval
                 )

@@ -63,6 +63,7 @@ class SatelliteClient:
         nonce_ttl: int = 120,
         register_body: dict | None = None,
         version: str = "",
+        expected_fingerprint: str = "",
     ):
         parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
         if parsed.scheme != "https":
@@ -81,6 +82,7 @@ class SatelliteClient:
         self._nonce_store = NonceStore(ttl_seconds=nonce_ttl)
         self._register_body = register_body or {}
         self.version = version
+        self.expected_fingerprint = str(expected_fingerprint or "").strip().lower()
         self._session_token: str | None = None
 
     # ------------------------------------------------------------------
@@ -99,7 +101,15 @@ class SatelliteClient:
             fingerprint = peer_fingerprint(connection.sock)
             if not self.trust(fingerprint):
                 connection.close()
-                raise SatelliteHttpError("server certificate fingerprint mismatch")
+                presented = fingerprint.lower()
+                if self.expected_fingerprint:
+                    raise SatelliteHttpError(
+                        "server certificate fingerprint mismatch: "
+                        f"presented {presented}, expected {self.expected_fingerprint}"
+                    )
+                raise SatelliteHttpError(
+                    f"server certificate fingerprint mismatch: presented {presented}"
+                )
         return connection
 
     def _fetch_nonce(self, timeout: float | None = None) -> str:

@@ -80,6 +80,11 @@ class SatelliteUpdater:
                     )
                 return trust_store.check(fingerprint)
 
+            expected = (
+                self.master_cert_fingerprint
+                if self.host_key_policy == "pinned"
+                else (trust_store.fingerprint or "")
+            )
             self._client = SatelliteClient(
                 self.master_url,
                 token=self.token,
@@ -87,6 +92,7 @@ class SatelliteUpdater:
                 timeout=self.timeout,
                 trust=trust,
                 version=AGENT_VERSION,
+                expected_fingerprint=expected,
             )
         return self._client
 

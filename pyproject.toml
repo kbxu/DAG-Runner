@@ -23,7 +23,7 @@ classifiers = [
 Homepage = "https://github.com/kbxu/DAG-Runner"
 
 [tool.setuptools]
-py-modules = ["run_server", "run_satellite"]
+py-modules = ["run_server", "run_satellite", "run_tee"]
 
 [tool.setuptools.packages.find]
 include = ["dagrunner*"]
