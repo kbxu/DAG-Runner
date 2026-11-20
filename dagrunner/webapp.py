@@ -743,9 +743,9 @@ def create_app(
         requested_id = str(request.form.get("workflow_id", "")).strip() or None
         if requested_id is not None and not _HASH_WORKFLOW_ID.fullmatch(requested_id):
             raise ServiceError("invalid proposed workflow ID")
+        # The runner is kept as-is: a workflow may reference a satellite that is
+        # not configured yet, and silently resetting it to 本机 would lose data.
         runner = str(request.form.get("runner", "local") or "local").strip() or "local"
-        if runner != "local" and not database.is_satellite(runner):
-            raise ServiceError(f"运行位置不存在：{runner}")
         definition = _apply_runner_to_definition(definition, runner)
         try:
             row = database.create_workflow(display_name, definition, requested_id)
@@ -892,8 +892,6 @@ def create_app(
             str(payload.get("runner", current["runner"] or "local") or "local").strip()
             or "local"
         )
-        if runner != "local" and not database.is_satellite(runner):
-            raise ServiceError(f"运行位置不存在：{runner}")
         definition = _apply_runner_to_definition(definition, runner)
         database.update_workflow(workflow_name, display_name, definition)
         database.update_schedule_description(workflow_name, display_name)

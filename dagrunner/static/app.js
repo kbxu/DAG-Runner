@@ -794,9 +794,23 @@ function onRunnerSelectChange(editorId, runner) {
   queueWorkflowPreview(editorId, 0);
 }
 
+function detectTopLevelRunner(definition) {
+  const match = /^runner\s*:\s*(\S+)\s*$/m.exec(String(definition ?? ""));
+  return match ? match[1] : "";
+}
+
 function runnerOptions(selected) {
   const options = [`<option value="local"${selected==="local"?" selected":""}>${t("本机")}</option>`];
-  for (const satellite of satelliteConfigs) options.push(`<option value="${esc(satellite.alias)}"${selected===satellite.alias?" selected":""}>${esc(satellite.alias)}</option>`);
+  const known = new Set(["local"]);
+  for (const satellite of satelliteConfigs) {
+    known.add(satellite.alias);
+    options.push(`<option value="${esc(satellite.alias)}"${selected===satellite.alias?" selected":""}>${esc(satellite.alias)}</option>`);
+  }
+  // Keep a runner that is not in the current satellite list selectable,
+  // otherwise saving would silently reset it to 本机.
+  if (selected && selected !== "local" && !known.has(selected)) {
+    options.push(`<option value="${esc(selected)}" selected>${esc(selected)}（${t("未配置")}）</option>`);
+  }
   return options.join("");
 }
 function runnerTag(runner, locations) {
@@ -830,7 +844,7 @@ function openWorkflowImportEditor(title, definition, nextId, submitLabel, source
   const split = splitWorkflowName(definition);
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
-  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select" onchange="onRunnerSelectChange('importDefinition', this.value)">${runnerOptions("local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select" onchange="onRunnerSelectChange('importDefinition', this.value)">${runnerOptions(detectTopLevelRunner(split.definition) || "local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
 }
 async function openNewWorkflow() {
   pendingImportFilename = "dagr_example_pipeline.yaml";
@@ -891,7 +905,7 @@ async function editWorkflow(name) {
   try {
     const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
     const split=splitWorkflowName(definition);
-    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select" onchange="onRunnerSelectChange('workflowDefinition', this.value)">${runnerOptions(workflow.runner)}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
+    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select" onchange="onRunnerSelectChange('workflowDefinition', this.value)">${runnerOptions(detectTopLevelRunner(split.definition) || workflow.runner)}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
   } catch(e) { toast(e.message,true); }
 }
 async function saveWorkflow(name) {

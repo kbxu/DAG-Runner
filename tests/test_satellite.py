@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import socket
 import tempfile
@@ -717,6 +718,51 @@ class SatelliteManagementApiTests(unittest.TestCase):
         self.assertFalse(payload["enabled"])
         overview = self.client.get("/api/system/overview").get_json()
         self.assertFalse(overview["satellite_enabled"])
+
+    def test_import_preserves_runner_declared_in_yaml(self) -> None:
+        definition = (
+            "description: wf\nrunner: office\ntasks:\n  a:\n    command: echo a\n"
+        )
+        response = self.client.post(
+            "/api/workflows/import",
+            data={
+                "file": (io.BytesIO(definition.encode()), "wf.yaml"),
+                "runner": "office",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        key = response.get_json()["id"]
+        stored = self.client.get(f"/api/workflows/{key}/yaml").get_data(as_text=True)
+        self.assertIn("runner: office", stored)
+        listing = self.client.get("/api/workflows").get_json()["workflows"][0]
+        self.assertEqual(listing["runner"], "office")
+        self.assertEqual(
+            listing["runner_locations"], [{"alias": "office", "count": 1}]
+        )
+
+    def test_edit_keeps_runner_that_is_not_a_configured_satellite(self) -> None:
+        definition = (
+            "description: wf\nrunner: office\ntasks:\n  a:\n    command: echo a\n"
+        )
+        key = self.database.create_workflow("wf", definition)["workflow_key"]
+        response = self.client.put(
+            f"/api/workflows/{key}",
+            json={"definition": definition, "name": "wf", "runner": "office"},
+        )
+        self.assertEqual(response.status_code, 200)
+        listing = self.client.get("/api/workflows").get_json()["workflows"][0]
+        self.assertEqual(listing["runner"], "office")
+        # Picking 本机 explicitly still clears it.
+        self.client.put(
+            f"/api/workflows/{key}",
+            json={"definition": definition, "name": "wf", "runner": "local"},
+        )
+        listing = self.client.get("/api/workflows").get_json()["workflows"][0]
+        self.assertEqual(listing["runner"], "local")
+        self.assertNotIn(
+            "runner:", self.client.get(f"/api/workflows/{key}/yaml").get_data(as_text=True)
+        )
 
     def test_run_records_runner_locations(self) -> None:
         definition = (

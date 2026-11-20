@@ -272,6 +272,7 @@ const I18N_EN = {
   "删除后无法恢复。": "This cannot be undone.",
   "已删除卫星节点 {alias}": "Deleted satellite node {alias}",
   "本机": "Local",
+  "未配置": "not configured",
   "mixed": "mixed",
   "运行位置": "Run location",
   "更新": "Update",
