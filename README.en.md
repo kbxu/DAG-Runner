@@ -163,18 +163,29 @@ Offline satellites are skipped; a satellite can also be updated on its own with 
 | `update.source` | Update source: `git` / `release` / `auto` | `auto` |
 | `update.release.repo` | GitHub release repository | empty (git source) |
 | `update.enabled` | Allow updates | `true` |
+| `maintenance.enabled` | Enable run-record archiving | `true` |
+| `maintenance.retention_days` | Retention window (days); older terminal runs move to `*_archive` | `60` |
+| `maintenance.hour` / `minute` | Daily archive time | `3:15` |
 
-CLI commands (`python -m dagrunner`, `python -m dagrunner.auth`, `python -m demo.init_demo`) accept `--db-config var/config.yaml` to reuse the `db` entry above; without it they use the SQLite file from `--db`.
+CLI commands (`python -m dagrunner`, `python -m dagrunner.auth`, `python -m dagrunner.accounts`, `python -m dagrunner.maintenance`, `python -m demo.init_demo`) accept `--db-config var/config.yaml` to reuse the `db` entry above; without it they use the SQLite file from `--db`. `python -m dagrunner` is read-only: it inspects runs (`--list-runs` / `--status` / `--show-log`); start workflows from the web console or the scheduler.
+
+### Run-record archiving
+
+Terminal runs older than `maintenance.retention_days` (default 60) are moved in batches by a daily off-peak job into `workflow_runs_archive` / `task_runs_archive`. The backend never reads those tables; they exist for manual inspection. Run `python -m dagrunner.maintenance --archive` to archive on demand. Log files are untouched.
 
 ## Common commands
 
 | Command | Description |
 | --- | --- |
-| `python -m dagrunner --workflow <id>` | Run a workflow |
-| `python -m dagrunner --workflow <id> --from <task>` | Run from a specific task |
-| `python -m dagrunner --workflow <id> --list-runs` | Show run history |
+| `python -m dagrunner --list-runs` | Show run history (all workflows) |
+| `python -m dagrunner --status --run-id <id>` | Show task status for a run |
 | `python -m dagrunner --show-log --run-id <id> --task <task>` | Show a task log |
-| `python -m dagrunner.auth --generate` | Create or reset the login account |
+| `python -m dagrunner.auth --generate` | Create or reset the login account (`--reset` is an alias) |
+| `python -m dagrunner.accounts --list` | List accounts and workflow permissions |
+| `python -m dagrunner.accounts --add <username>` | Create an account (`--password`, `--unrestricted` optional) |
+| `python -m dagrunner.accounts --grant <username> <workflow> <read\|execute\|edit>` | Grant a workflow permission |
+| `python -m dagrunner.accounts --revoke <username> <workflow>` | Remove a workflow permission |
+| `python -m dagrunner.maintenance --archive` | Archive runs older than the retention window |
 | `python -m dagrunner --version` | Print the version |
 | `python -m dagrunner.update --check` | List available versions |
 | `python -m dagrunner.update --to <version>` | Update the master and online satellites from the CLI |
@@ -206,6 +217,8 @@ var/              Database, logs, certificates, versioned installs (local data)
 - The web UI listens on `127.0.0.1` by default; put a reverse proxy with HTTPS in front for public access
 - The satellite channel uses a self-signed certificate with fingerprint pinning (automatic on first contact, or explicit pinned) and a shared-token challenge-response
 - Run tasks under a low-privilege account
+- Accounts: the user named `admin` is the administrator and owns global settings (accounts, email sender, satellites, updates); other accounts get per-workflow grants (read / execute / edit) and cannot see ungranted workflows. Accounts created before this feature keep full workflow access
+- Manual runs record the triggering user; passwords need at least 16 characters, 3 failed sign-ins block an IP for 10 minutes, and disabling or resetting a password signs out its sessions immediately
 
 ## License
 

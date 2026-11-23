@@ -44,18 +44,40 @@ class AuthService:
             "0" * 64, method=PASSWORD_HASH_METHOD
         )
 
-    def authenticate(self, token: str | None) -> str | None:
+    def context(self, token: str | None) -> dict | None:
+        """Return the signed-in user, account flags and workflow grants.
+
+        The session, user row and grants are read in a single query so the
+        per-request authorization check stays at one round trip.
+        """
         if not token:
             return None
         token_hash = _token_hash(token)
-        session = self.database.get_auth_session(token_hash)
-        if session is None:
+        rows = self.database.get_auth_context(token_hash)
+        if not rows:
             return None
-        expires_at = _parse_time(session["expires_at"])
+        expires_at = _parse_time(rows[0]["expires_at"])
         if expires_at <= _now():
             self.database.delete_auth_session(token_hash)
             return None
-        return str(session["username"])
+        username = str(rows[0]["username"])
+        if not rows[0]["enabled"]:
+            self.database.delete_auth_session(token_hash)
+            return None
+        return {
+            "username": username,
+            "enabled": bool(rows[0]["enabled"]),
+            "unrestricted": bool(rows[0]["unrestricted"]),
+            "permissions": {
+                row["workflow_key"]: row["permission"]
+                for row in rows
+                if row["workflow_key"] is not None
+            },
+        }
+
+    def authenticate(self, token: str | None) -> str | None:
+        context = self.context(token)
+        return context["username"] if context is not None else None
 
     def login(self, username: str, client_hash: str, ip_address: str) -> LoginResult:
         now = _now()
@@ -65,12 +87,13 @@ class AuthService:
 
         normalized_hash = client_hash.strip().lower()
         user = self.database.get_user(username) if 1 <= len(username) <= 64 else None
+        enabled = bool(user["enabled"]) if user is not None else False
         stored_hash = user["password_hash"] if user is not None else self._dummy_hash
         valid_shape = bool(CLIENT_HASH_PATTERN.fullmatch(normalized_hash))
         password_matches = check_password_hash(
             stored_hash, normalized_hash if valid_shape else "0" * 64
         )
-        if user is None or not valid_shape or not password_matches:
+        if user is None or not enabled or not valid_shape or not password_matches:
             block_until = now + timedelta(minutes=IP_BLOCK_MINUTES)
             attempts, blocked_until = self.database.record_login_failure(
                 ip_address,
@@ -88,6 +111,7 @@ class AuthService:
             )
 
         self.database.clear_login_failures(ip_address)
+        self.database.record_login(username)
         token = secrets.token_urlsafe(48)
         expires_at = now + timedelta(hours=SESSION_HOURS)
         self.database.create_auth_session(
@@ -116,13 +140,55 @@ def client_password_hash(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def store_password(database: BaseStateDatabase, username: str, password: str) -> None:
+def store_password(
+    database: BaseStateDatabase,
+    username: str,
+    password: str,
+    *,
+    unrestricted: bool = True,
+) -> None:
     if len(password) < 16:
         raise ValueError("password must contain at least 16 characters")
     password_hash = generate_password_hash(
         client_password_hash(password), method=PASSWORD_HASH_METHOD
     )
-    database.upsert_user(username, password_hash)
+    database.upsert_user(username, password_hash, unrestricted=unrestricted)
+
+
+def store_password_hash(
+    database: BaseStateDatabase, username: str, client_hash: str
+) -> None:
+    """Store an already client-hashed password without touching account state."""
+    password_hash = generate_password_hash(client_hash, method=PASSWORD_HASH_METHOD)
+    database.update_password(username, password_hash)
+
+
+def valid_client_hash(value: object) -> bool:
+    return bool(CLIENT_HASH_PATTERN.fullmatch(str(value or "").strip().lower()))
+
+
+def verify_password(
+    database: BaseStateDatabase, username: str, client_hash: str
+) -> bool:
+    user = database.get_user(username)
+    if user is None:
+        return False
+    return check_password_hash(user["password_hash"], client_hash)
+
+
+def ensure_admin_account(
+    database: BaseStateDatabase, username: str = "admin"
+) -> str | None:
+    """Create the admin account when it is missing.
+
+    Returns the generated one-time password, or ``None`` when the account
+    already exists.
+    """
+    if database.get_user(username) is not None:
+        return None
+    password = generate_complex_password()
+    store_password(database, username, password, unrestricted=True)
+    return password
 
 
 def generate_complex_password(length: int = 28) -> str:
@@ -165,8 +231,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--username", default="admin")
     parser.add_argument(
         "--generate",
+        "--reset",
         action="store_true",
-        help="generate and print a strong password instead of prompting",
+        dest="generate",
+        help="generate and print a strong password instead of prompting (--reset is an alias)",
     )
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", args.username):

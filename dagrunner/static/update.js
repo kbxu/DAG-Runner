@@ -42,7 +42,13 @@ function updateModalVisible() {
 
 async function refreshUpdateStatus() {
   try {
-    const data = await api("/api/update/status");
+    let data;
+    if (state.auth?.is_admin) {
+      data = await api("/api/update/status");
+    } else {
+      const overview = await api("/api/system/overview");
+      data = { current_version: overview.version, state: "idle", satellites: {} };
+    }
     updateStatus = data;
     renderVersionBadge(data);
     if (updateModalVisible()) renderUpdateModal();

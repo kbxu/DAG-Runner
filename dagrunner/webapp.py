@@ -14,11 +14,31 @@ import yaml
 import psutil
 from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
-from .auth import AuthService, SESSION_COOKIE, SESSION_HOURS
+from .accounts import (
+    AccountError,
+    AccountService,
+    normalize_permission,
+    permission_at_least,
+)
+from .auth import (
+    AuthService,
+    SESSION_COOKIE,
+    SESSION_HOURS,
+    client_password_hash,
+    ensure_admin_account,
+    store_password_hash,
+    valid_client_hash,
+    verify_password,
+)
 from . import __version__
 from .database import BaseStateDatabase, create_state_database
 from .install import repo_root
 from .logger import TaskLogManager, decode_bytes
+from .maintenance import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_RETENTION_DAYS,
+    MaintenanceService,
+)
 from .notifier import load_email_config, load_notifier, save_email_config
 from .migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
@@ -48,6 +68,55 @@ from .workflow_editor import demo_command, demo_setup, preview_definition, exten
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
 _LOG_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+class AccessDenied(Exception):
+    """Raised when the current user may not perform the requested action."""
+
+    def __init__(self, message: str, status: int = 403):
+        super().__init__(message)
+        self.status = status
+
+
+def _current_permission(workflow_name: str) -> str | None:
+    if getattr(g, "is_admin", False) or getattr(g, "unrestricted", False):
+        return "edit"
+    return getattr(g, "permissions", {}).get(workflow_name)
+
+
+def _require_permission(workflow_name: str, required: str) -> str:
+    permission = _current_permission(workflow_name)
+    if permission is None:
+        raise AccessDenied("workflow not found", 404)
+    if not permission_at_least(permission, required):
+        raise AccessDenied("permission denied", 403)
+    return permission
+
+
+def _require_admin() -> None:
+    if not getattr(g, "is_admin", False):
+        raise AccessDenied("admin only", 403)
+
+
+def _visible_workflow_keys() -> set[str] | None:
+    """None means every workflow is visible (admin or unrestricted account)."""
+    if getattr(g, "is_admin", False) or getattr(g, "unrestricted", False):
+        return None
+    return set(getattr(g, "permissions", {}))
+
+
+def _account_workflow_grants(value: object) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ServiceError("workflows must be a mapping")
+    grants: dict[str, str] = {}
+    for key, permission in value.items():
+        try:
+            grants[str(key)] = normalize_permission(permission)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+    return grants
 
 
 def _log_download_filename(task, fallback_time=None) -> str:
@@ -146,11 +215,15 @@ def _system_resources_payload(state_dir: Path) -> dict:
     }
 
 
-def _run_stats_payload(database: BaseStateDatabase, hours: int) -> dict:
+def _run_stats_payload(
+    database: BaseStateDatabase,
+    hours: int,
+    workflow_keys: set[str] | None = None,
+) -> dict:
     since = (
         datetime.now().astimezone() - timedelta(hours=hours)
     ).isoformat(timespec="milliseconds")
-    counts = database.task_status_counts(since)
+    counts = database.task_status_counts(since, workflow_keys)
     return {
         "window_hours": hours,
         "success": counts.get("SUCCESS", 0),
@@ -178,6 +251,7 @@ def create_app(
     update_config: dict | None = None,
     update_host: str = "",
     update_port: int = 0,
+    maintenance_config: dict | None = None,
 ) -> Flask:
     if language not in {"zh-CN", "en"}:
         raise ValueError("language must be 'zh-CN' or 'en'")
@@ -200,6 +274,7 @@ def create_app(
             )
     registry = WorkflowRegistry(database)
     auth = AuthService(database)
+    account_service = AccountService(database)
     logs = TaskLogManager(logs_path)
     notifier_var_dir = state_dir.resolve()
     notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
@@ -221,11 +296,45 @@ def create_app(
     if start_scheduler:
         executions.recover_orphaned_runs()
         schedules.start()
+        admin_password = ensure_admin_account(database)
+        if admin_password:
+            print(
+                f"created admin account 'admin', one-time password: {admin_password}",
+                flush=True,
+            )
+        maintenance = dict(maintenance_config or {})
+        if maintenance.get("enabled", True):
+            archive_service = MaintenanceService(
+                database,
+                retention_days=int(
+                    maintenance.get("retention_days", DEFAULT_RETENTION_DAYS)
+                ),
+                batch_size=int(maintenance.get("batch_size", DEFAULT_BATCH_SIZE)),
+            )
+
+            def archive_old_runs() -> None:
+                result = archive_service.archive()
+                if result["runs"]:
+                    print(
+                        f"archived {result['runs']} run(s), "
+                        f"{result['tasks']} task record(s)",
+                        flush=True,
+                    )
+
+            schedules.scheduler.add_job(
+                archive_old_runs,
+                "cron",
+                hour=int(maintenance.get("hour", 3)),
+                minute=int(maintenance.get("minute", 15)),
+                id="dagrunner-maintenance-archive",
+                replace_existing=True,
+            )
     update_service.recover()
 
     app.extensions["state_database"] = database
     app.extensions["workflow_registry"] = registry
     app.extensions["auth_service"] = auth
+    app.extensions["account_service"] = account_service
     app.extensions["execution_service"] = executions
     app.extensions["schedule_service"] = schedules
     app.extensions["satellite_manager"] = satellite_manager
@@ -244,9 +353,12 @@ def create_app(
         if request.endpoint in public_endpoints:
             return None
         token = request.cookies.get(SESSION_COOKIE)
-        username = auth.authenticate(token)
-        if username:
-            g.current_user = username
+        context = auth.context(token)
+        if context:
+            g.current_user = context["username"]
+            g.is_admin = account_service.is_admin(g.current_user)
+            g.unrestricted = context["unrestricted"]
+            g.permissions = context["permissions"]
             return None
         return_to = (
             "/"
@@ -288,7 +400,7 @@ def create_app(
 
     @app.get("/login")
     def login_page():
-        if auth.authenticate(request.cookies.get(SESSION_COOKIE)):
+        if auth.context(request.cookies.get(SESSION_COOKIE)):
             return redirect(_safe_next(request.args.get("next")))
         return render_template(
             "login.html",
@@ -359,11 +471,121 @@ def create_app(
         )
         return response
 
+    @app.get("/api/auth/me")
+    def auth_me():
+        return jsonify(
+            {
+                "username": g.current_user,
+                "is_admin": g.is_admin,
+                "unrestricted": g.unrestricted,
+                "workflows": [
+                    {"key": key, "permission": permission}
+                    for key, permission in sorted(g.permissions.items())
+                ],
+            }
+        )
+
+    @app.post("/api/auth/change-password")
+    def api_change_password():
+        payload = request.get_json(silent=True) or {}
+        old_hash = str(payload.get("old_password_hash", ""))
+        new_password = str(payload.get("new_password", ""))
+        if not valid_client_hash(old_hash):
+            raise ServiceError("当前密码不正确")
+        if len(new_password) < 16:
+            raise ServiceError("password must contain at least 16 characters")
+        if not verify_password(database, g.current_user, old_hash):
+            raise ServiceError("当前密码不正确")
+        store_password_hash(database, g.current_user, client_password_hash(new_password))
+        return jsonify({"ok": True, "redirect": url_for("login_page")})
+
+    @app.get("/api/accounts")
+    def list_accounts():
+        _require_admin()
+        return jsonify({"accounts": account_service.list_accounts()})
+
+    @app.post("/api/accounts")
+    def create_account():
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get("username", "")).strip()
+        password = str(payload.get("password", ""))
+        unrestricted = bool(payload.get("unrestricted", False))
+        enabled = bool(payload.get("enabled", True))
+        grants = _account_workflow_grants(payload.get("workflows"))
+        for key in grants:
+            if database.get_workflow(key) is None:
+                raise ServiceError(f"workflow not found: {key}")
+        try:
+            account_service.create_account(
+                username, password, unrestricted=unrestricted, enabled=enabled
+            )
+        except (AccountError, ValueError) as exc:
+            raise ServiceError(str(exc)) from exc
+        try:
+            account_service.set_grants(username, grants)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True}), 201
+
+    @app.put("/api/accounts/<username>")
+    def update_account(username: str):
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        enabled = payload.get("enabled")
+        unrestricted = payload.get("unrestricted")
+        grants = (
+            _account_workflow_grants(payload.get("workflows"))
+            if "workflows" in payload
+            else None
+        )
+        if grants:
+            for key in grants:
+                if database.get_workflow(key) is None:
+                    raise ServiceError(f"workflow not found: {key}")
+        try:
+            account_service.update_account(
+                username,
+                enabled=None if enabled is None else bool(enabled),
+                unrestricted=None if unrestricted is None else bool(unrestricted),
+                workflows=grants,
+            )
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.delete("/api/accounts/<username>")
+    def delete_account(username: str):
+        _require_admin()
+        if username == g.current_user:
+            raise ServiceError("不能删除当前登录的 admin 账号")
+        try:
+            account_service.delete_account(username)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.post("/api/accounts/<username>/password")
+    def reset_account_password(username: str):
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        password = str(payload.get("password", ""))
+        if len(password) < 16:
+            raise ServiceError("password must contain at least 16 characters")
+        try:
+            account_service.reset_password(username, password)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
     @app.get("/")
     def index():
         return render_template(
             "index.html",
             username=g.current_user,
+            is_admin=g.is_admin,
+            can_create=account_service.can_create(g.current_user),
+            allow_insecure_remote_login=allow_insecure_remote_login,
             default_language=language,
         )
 
@@ -383,6 +605,7 @@ def create_app(
 
     @app.get("/api/notifier")
     def notifier_settings():
+        _require_admin()
         try:
             email = load_email_config(
                 notifier_config_path, var_dir=notifier_var_dir
@@ -424,6 +647,7 @@ def create_app(
 
     @app.put("/api/notifier")
     def update_notifier_settings():
+        _require_admin()
         payload = request.get_json(silent=True) or {}
         email = payload.get("email")
         if not isinstance(email, dict):
@@ -463,6 +687,7 @@ def create_app(
 
     @app.get("/api/satellites")
     def list_satellites():
+        _require_admin()
         return jsonify(
             {
                 "satellites": _satellites_payload(database),
@@ -472,6 +697,7 @@ def create_app(
 
     @app.put("/api/satellites/<alias>")
     def upsert_satellite(alias: str):
+        _require_admin()
         payload = request.get_json(silent=True) or {}
         errors = _satellite_field_errors(payload, alias)
         if errors:
@@ -505,6 +731,7 @@ def create_app(
 
     @app.delete("/api/satellites/<alias>")
     def delete_satellite(alias: str):
+        _require_admin()
         used = database.workflows_using_runner(alias)
         if used:
             raise ServiceError(f"卫星被占用，需先解除工作流中的绑定：{', '.join(used)}")
@@ -516,6 +743,7 @@ def create_app(
 
     @app.post("/api/satellites/<alias>/test")
     def test_satellite(alias: str):
+        _require_admin()
         manager = app.extensions.get("satellite_manager")
         if manager is None:
             return jsonify(
@@ -529,6 +757,7 @@ def create_app(
 
     @app.get("/api/satellites/<alias>/config")
     def satellite_config(alias: str):
+        _require_admin()
         config = database.get_satellite(alias)
         if config is None:
             raise ServiceError(f"卫星不存在：{alias}")
@@ -568,10 +797,12 @@ def create_app(
 
     @app.get("/api/update/status")
     def update_status():
+        _require_admin()
         return jsonify(update_service.status())
 
     @app.post("/api/update/check")
     def update_check():
+        _require_admin()
         payload = request.get_json(silent=True) or {}
         try:
             return jsonify(
@@ -584,6 +815,7 @@ def create_app(
 
     @app.post("/api/update")
     def update_apply():
+        _require_admin()
         payload = request.get_json(silent=True) or {}
         target = str(payload.get("target", "")).strip()
         source = str(payload.get("source", ""))
@@ -621,10 +853,12 @@ def create_app(
 
     @app.post("/api/update/abort")
     def update_abort():
+        _require_admin()
         return jsonify(update_service.abort())
 
     @app.post("/api/update/rollback")
     def update_rollback():
+        _require_admin()
         payload = request.get_json(silent=True) or {}
         try:
             result = update_service.rollback(str(payload.get("version", "")))
@@ -635,12 +869,13 @@ def create_app(
 
     @app.get("/api/system/overview")
     def api_system_overview():
+        is_admin = getattr(g, "is_admin", False)
         return jsonify(
             resources=_system_resources_payload(state_dir),
-            satellites=_satellites_payload(database),
-            satellite_enabled=satellite_manager is not None,
+            satellites=_satellites_payload(database) if is_admin else [],
+            satellite_enabled=satellite_manager is not None and is_admin,
             version=__version__,
-            update=update_service.status(),
+            update=update_service.status() if is_admin else {},
         )
 
     @app.get("/api/workflows")
@@ -650,8 +885,11 @@ def create_app(
         schedule_rows = {
             row["workflow_name"]: row for row in database.list_schedules()
         }
+        visible = _visible_workflow_keys()
         result = []
         for name, workflow in sorted(registry.workflows.items()):
+            if visible is not None and name not in visible:
+                continue
             schedule = schedule_rows.get(name)
             stored_crons = (
                 decode_cron_expressions(schedule["cron_expression"])
@@ -682,6 +920,7 @@ def create_app(
                 {
                     "name": name,
                     "db_id": registry.rows[name]["id"],
+                    "permission": _current_permission(name) or "read",
                     "runner": workflow.runner or registry.rows[name]["runner"] or "local",
                     "runner_locations": _runner_locations(workflow),
                     "description": workflow.description,
@@ -719,10 +958,21 @@ def create_app(
                     },
                 }
             )
-        return jsonify({"workflows": result, "config_errors": registry.errors})
+        visible_errors = (
+            registry.errors
+            if visible is None
+            else {
+                name: error
+                for name, error in registry.errors.items()
+                if name in visible
+            }
+        )
+        return jsonify({"workflows": result, "config_errors": visible_errors})
 
     @app.post("/api/workflows/import")
     def import_workflow():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
         uploaded = request.files.get("file")
         if uploaded is None or not uploaded.filename:
             raise ServiceError("请选择 YAML 文件")
@@ -752,6 +1002,8 @@ def create_app(
         except ValueError as exc:
             raise ServiceError(str(exc)) from exc
         workflow_name = row["workflow_key"]
+        if not g.is_admin and not g.unrestricted:
+            database.set_user_workflow(g.current_user, workflow_name, "edit")
         if runner != "local":
             database.set_workflow_runner(workflow_name, runner)
         registry.refresh()
@@ -771,6 +1023,8 @@ def create_app(
 
     @app.post("/api/workflows/import-preview")
     def import_workflow_preview():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
         uploaded = request.files.get("file")
         if uploaded is None or not uploaded.filename:
             raise ServiceError("请选择工作流文件")
@@ -789,6 +1043,8 @@ def create_app(
 
     @app.post("/api/workflows/crontab-preview")
     def crontab_workflow_preview():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
         payload = request.get_json(silent=True) or {}
         line = str(payload.get("line", "")).strip()
         if not line:
@@ -812,10 +1068,14 @@ def create_app(
 
     @app.get("/api/workflows/next-id")
     def next_workflow_id():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
         return jsonify({"id": database.next_workflow_key()})
 
     @app.get("/api/workflows/example-definition")
     def example_workflow_definition():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
         example_path = (
             Path(__file__).resolve().parent.parent
             / "demo"
@@ -834,6 +1094,7 @@ def create_app(
 
     @app.get("/api/workflows/<workflow_name>/yaml")
     def export_workflow_yaml(workflow_name: str):
+        _require_permission(workflow_name, "read")
         definition = registry.definition(workflow_name)
         return Response(
             definition,
@@ -845,6 +1106,7 @@ def create_app(
 
     @app.get("/api/workflows/<workflow_name>/view")
     def workflow_view(workflow_name: str):
+        _require_permission(workflow_name, "read")
         definition = registry.definition(workflow_name)
         workflow = registry.get(workflow_name)
         raw = yaml.safe_load(definition)
@@ -869,6 +1131,7 @@ def create_app(
 
     @app.put("/api/workflows/<workflow_name>")
     def edit_workflow(workflow_name: str):
+        _require_permission(workflow_name, "edit")
         if executions.is_workflow_active(workflow_name):
             raise ServiceError("工作流运行中，不能编辑")
         schedule = database.get_schedule(workflow_name)
@@ -901,6 +1164,7 @@ def create_app(
 
     @app.put("/api/workflows/<workflow_name>/schedule")
     def update_schedule(workflow_name: str):
+        _require_permission(workflow_name, "edit")
         payload = request.get_json(silent=True) or {}
         cron_expressions = payload.get("crons", payload.get("cron", []))
         if isinstance(cron_expressions, str):
@@ -914,6 +1178,7 @@ def create_app(
 
     @app.put("/api/workflows/<workflow_name>/notification")
     def update_notification(workflow_name: str):
+        _require_permission(workflow_name, "edit")
         payload = request.get_json(silent=True) or {}
         send_on = payload.get("send_on", "disabled")
         recipients = payload.get("to", [])
@@ -941,6 +1206,7 @@ def create_app(
 
     @app.post("/api/workflows/<workflow_name>/run")
     def run_workflow(workflow_name: str):
+        _require_permission(workflow_name, "execute")
         payload = request.get_json(silent=True) or {}
         from_task = payload.get("from_task")
         if from_task is not None and not isinstance(from_task, str):
@@ -954,11 +1220,13 @@ def create_app(
             from_task=from_task,
             only_task=only_task,
             trigger_type="manual",
+            trigger_user=g.current_user,
         )
         return jsonify({"ok": True, "run_id": run_id}), 202
 
     @app.delete("/api/workflows/<workflow_name>")
     def delete_workflow(workflow_name: str):
+        _require_permission(workflow_name, "edit")
         if executions.is_workflow_active(workflow_name):
             raise ServiceError("cannot delete a workflow while it is running")
         schedules.delete(workflow_name)
@@ -976,7 +1244,7 @@ def create_app(
         hours = request.args.get("hours", 48, type=int)
         if hours <= 0 or hours > 24 * 30:
             raise ServiceError("hours 必须在 1 到 720 之间")
-        return jsonify(_run_stats_payload(database, hours))
+        return jsonify(_run_stats_payload(database, hours, _visible_workflow_keys()))
 
     @app.get("/api/runs")
     def runs():
@@ -994,6 +1262,7 @@ def create_app(
             raise ServiceError(f"invalid run status filter: {status}")
         if trigger_type and trigger_type not in {"manual", "schedule", "rerun", "resume"}:
             raise ServiceError(f"invalid trigger filter: {trigger_type}")
+        visible_workflows = _visible_workflow_keys()
         rows, total, page = database.search_runs(
             page=page,
             page_size=page_size,
@@ -1001,6 +1270,7 @@ def create_app(
             status=status,
             trigger_type=trigger_type,
             tag=tag,
+            workflow_keys=visible_workflows,
         )
         active_ids = executions.active_run_ids()
         run_rows = []
@@ -1026,7 +1296,7 @@ def create_app(
                     "total": total,
                     "total_pages": max(1, (total + page_size - 1) // page_size),
                 },
-                "stats": _run_stats_payload(database, 48),
+                "stats": _run_stats_payload(database, 48, visible_workflows),
             }
         )
 
@@ -1035,6 +1305,7 @@ def create_app(
         run = database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "read")
         registry.refresh()
         workflow = registry.workflows.get(run["workflow_name"])
         stored = database.get_workflow(run["workflow_name"])
@@ -1097,17 +1368,29 @@ def create_app(
 
     @app.post("/api/runs/<run_id>/stop")
     def stop_run(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "execute")
         executions.stop_run(run_id)
         return jsonify({"ok": True})
 
     @app.post("/api/runs/<run_id>/rerun")
     def rerun(run_id: str):
-        new_id = executions.rerun(run_id)
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "execute")
+        new_id = executions.rerun(run_id, trigger_user=g.current_user)
         return jsonify({"ok": True, "run_id": new_id}), 202
 
     @app.post("/api/runs/<run_id>/resume")
     def resume(run_id: str):
-        new_id = executions.resume_failed(run_id)
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "execute")
+        new_id = executions.resume_failed(run_id, trigger_user=g.current_user)
         return jsonify({"ok": True, "run_id": new_id}), 202
 
     @app.delete("/api/runs/<run_id>")
@@ -1115,6 +1398,7 @@ def create_app(
         run = database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "edit")
         if run_id in executions.active_run_ids():
             raise ServiceError("cannot delete a run while it is active")
         database.delete_run(run_id)
@@ -1126,6 +1410,10 @@ def create_app(
 
     @app.get("/api/runs/<run_id>/tasks/<task_name>/log")
     def task_log(run_id: str, task_name: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "read")
         task = database.get_task(run_id, task_name)
         if task is None:
             raise ServiceError(f"task run not found: {run_id}/{task_name}")
@@ -1194,6 +1482,18 @@ def create_app(
         if field_errors:
             payload["field_errors"] = field_errors
         return jsonify(payload), 400
+
+    @app.errorhandler(AccessDenied)
+    def access_denied(exc):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": _localized_error(str(exc), g.language),
+                }
+            ),
+            exc.status,
+        )
 
     if start_scheduler:
         atexit.register(_shutdown, schedules, executions)
@@ -1429,6 +1729,14 @@ _ENGLISH_ERRORS = {
     "from_task 必须是文本": "from_task must be a string",
     "hours 必须在 1 到 720 之间": "hours must be between 1 and 720",
     "only_task 需要 from_task": "only_task needs from_task",
+    "workflow not found": "Workflow not found",
+    "permission denied": "You do not have permission to perform this action",
+    "admin only": "This action requires the admin account",
+    "当前密码不正确": "The current password is incorrect",
+    "password must contain at least 16 characters": "password must contain at least 16 characters",
+    "workflows must be a mapping": "workflows must be a mapping",
+    "不能删除当前登录的 admin 账号": "You cannot delete the admin account you are signed in with",
+    "username may contain only letters, digits, _, . and -": "username may contain only letters, digits, _, . and -",
 }
 
 _ENGLISH_ERROR_PREFIXES = {
@@ -1437,6 +1745,9 @@ _ENGLISH_ERROR_PREFIXES = {
     "无法识别工作流来源：": "Could not detect the workflow source: ",
     "Crontab 转换失败：": "Crontab conversion failed: ",
     "任务不存在：": "Unknown task: ",
+    "user already exists: ": "Account already exists: ",
+    "user not found: ": "Account not found: ",
+    "workflow not found: ": "Workflow not found: ",
 }
 
 

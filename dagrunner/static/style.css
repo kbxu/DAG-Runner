@@ -516,3 +516,15 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .update-state.failed, .update-state.prepare_failed, .update-state.commit_failed { color: #b42318; background: #fef3f2; }
 .update-state.staged, .update-state.prepared, .update-state.committing, .update-state.preparing { color: #175cd3; background: #eff8ff; }
 .update-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Account management */
+.account-settings { display: flex; flex-direction: column; gap: 14px; }
+.account-toolbar { display: flex; justify-content: flex-end; }
+.account-table { width: 100%; }
+.account-editor { border-top: 1px solid #e4e7ec; padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.account-editor h4 { margin: 0; }
+.account-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #344054; }
+.account-workflows { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow: auto; }
+.account-workflow-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+.account-workflow-row select { min-width: 110px; }
+.account-editor-actions { display: flex; gap: 8px; justify-content: flex-end; }

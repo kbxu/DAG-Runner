@@ -62,3 +62,13 @@ update:
     # 可选：内网镜像地址模板，留空使用 GitHub
     download_url: ""
   rollback_on_failure: true
+
+# 运行记录归档。超过保留期的终态运行记录会移入 *_archive 表；后端服务不读这些表，仅供排查。
+maintenance:
+  enabled: true
+  retention_days: 60
+  # 每天低峰执行时间
+  hour: 3
+  minute: 15
+  # 每批处理的运行数
+  batch_size: 50

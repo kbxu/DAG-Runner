@@ -163,18 +163,29 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | `update.source` | 更新来源：`git` / `release` / `auto` | `auto` |
 | `update.release.repo` | GitHub Release 仓库 | 空（用 git 源） |
 | `update.enabled` | 是否允许更新 | `true` |
+| `maintenance.enabled` | 是否启用运行记录归档 | `true` |
+| `maintenance.retention_days` | 归档保留期（天），超过的终态运行移入 `*_archive` 表 | `60` |
+| `maintenance.hour` / `minute` | 每日归档执行时间 | `3:15` |
 
-CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m demo.init_demo`）加 `--db-config var/config.yaml` 即可复用上面的 `db` 配置；不传时仍用 `--db` 指定的 SQLite 文件。
+CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m dagrunner.accounts`、`python -m dagrunner.maintenance`、`python -m demo.init_demo`）加 `--db-config var/config.yaml` 即可复用上面的 `db` 配置；不传时仍用 `--db` 指定的 SQLite 文件。`python -m dagrunner` 只用于查看运行记录（`--list-runs` / `--status` / `--show-log`），运行工作流请通过 Web 控制台或定时调度。
+
+### 运行记录归档
+
+超过 `maintenance.retention_days`（默认 60 天）的**终态**运行记录，会由每日低峰任务分批移入 `workflow_runs_archive` / `task_runs_archive`。这两个表后端服务不读，只供需要时手动查询排查；也可用 `python -m dagrunner.maintenance --archive` 手动执行。日志文件不受影响。
 
 ## 常用命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `python -m dagrunner --workflow <id>` | 运行工作流 |
-| `python -m dagrunner --workflow <id> --from <task>` | 从指定任务运行 |
-| `python -m dagrunner --workflow <id> --list-runs` | 查看历史 |
+| `python -m dagrunner --list-runs` | 查看运行历史（所有工作流） |
+| `python -m dagrunner --status --run-id <id>` | 查看某次运行的任务状态 |
 | `python -m dagrunner --show-log --run-id <id> --task <task>` | 查看日志 |
-| `python -m dagrunner.auth --generate` | 创建 / 重置登录账号 |
+| `python -m dagrunner.auth --generate` | 创建 / 重置登录账号（`--reset` 为同义入口） |
+| `python -m dagrunner.accounts --list` | 查看账号与工作流权限 |
+| `python -m dagrunner.accounts --add <用户名>` | 新建账号（`--password`、`--unrestricted` 可选） |
+| `python -m dagrunner.accounts --grant <用户名> <工作流> <只读\|执行\|编辑>` | 授予工作流权限 |
+| `python -m dagrunner.accounts --revoke <用户名> <工作流>` | 移除工作流权限 |
+| `python -m dagrunner.maintenance --archive` | 手动归档超过保留期的运行记录 |
 | `python -m dagrunner --version` | 打印版本号 |
 | `python -m dagrunner.update --check` | 查看可用版本 |
 | `python -m dagrunner.update --to <version>` | 命令行更新主程序与在线卫星 |
@@ -206,6 +217,8 @@ var/              数据库、日志、证书、版本化安装（本地数据�
 - Web 默认只监听 `127.0.0.1`；开放到公网请用反向代理加 HTTPS
 - 卫星通道用自签名证书 + 指纹固定（首次自动固定，可改 pinned）与共享令牌挑战-响应
 - 任务请以低权限账户运行
+- 账号体系：用户名 `admin` 为管理员，负责账号管理、通知发件、卫星、版本更新等全局设置；其它账号按工作流单独授权（只读 / 执行 / 编辑），未授权的工作流不可见。旧账号升级后保留全部工作流权限
+- 手动运行会记录触发用户；密码至少 16 位，登录失败 3 次封禁 10 分钟，禁用或重置密码会立即失效其会话
 
 ## License
 

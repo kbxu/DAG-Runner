@@ -685,7 +685,7 @@ class SatelliteManagementApiTests(unittest.TestCase):
         root = Path(self._directory.name)
         self.root = root
         self.database = StateDatabase(root / "scheduler.db")
-        store_password(self.database, "tester", "test-password-1234")
+        store_password(self.database, "admin", "test-password-1234")
         self.app = create_app(
             database_path=root / "scheduler.db",
             logs_path=root / "logs",
@@ -699,7 +699,7 @@ class SatelliteManagementApiTests(unittest.TestCase):
         self.client.post(
             "/api/auth/login",
             json={
-                "username": "tester",
+                "username": "admin",
                 "password_hash": client_password_hash("test-password-1234"),
             },
         )
@@ -820,7 +820,7 @@ class SatelliteManagementApiTests(unittest.TestCase):
         client.post(
             "/api/auth/login",
             json={
-                "username": "tester",
+                "username": "admin",
                 "password_hash": client_password_hash("test-password-1234"),
             },
         )

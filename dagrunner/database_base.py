@@ -158,6 +158,7 @@ SCHEMA: tuple[TableSpec, ...] = (
                 not_null=True,
                 default="'manual'",
             ),
+            ColumnSpec("trigger_user", "TEXT", "VARCHAR(255)"),
             ColumnSpec("scope", "TEXT", "TEXT"),
             ColumnSpec(
                 "runner", "TEXT", "VARCHAR(64)", not_null=True, default="'local'"
@@ -170,6 +171,7 @@ SCHEMA: tuple[TableSpec, ...] = (
         ),
         indexes=(
             IndexSpec("idx_workflow_runs_name_start", ("workflow_name", "start_time DESC")),
+            IndexSpec("idx_workflow_runs_start_time", ("start_time DESC",)),
         ),
     ),
     TableSpec(
@@ -228,17 +230,137 @@ SCHEMA: tuple[TableSpec, ...] = (
         ),
         indexes=(
             IndexSpec("idx_task_runs_lookup", ("workflow_name", "task_name", "run_id")),
+            IndexSpec("idx_task_runs_start_time", ("start_time",)),
         ),
+    ),
+    TableSpec(
+        name="workflow_runs_archive",
+        columns=(
+            ColumnSpec("run_id", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec("workflow_name", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec(
+                "status",
+                "TEXT",
+                "VARCHAR(16)",
+                not_null=True,
+                check="status IN ('RUNNING','SUCCESS','FAILED')",
+            ),
+            ColumnSpec("start_time", "TEXT", "VARCHAR(64)", not_null=True),
+            ColumnSpec("end_time", "TEXT", "VARCHAR(64)"),
+            ColumnSpec("resumed_from_run_id", "TEXT", "VARCHAR(255)"),
+            ColumnSpec("from_task", "TEXT", "VARCHAR(255)"),
+            ColumnSpec("error_message", "TEXT", "TEXT"),
+            ColumnSpec(
+                "trigger_type",
+                "TEXT",
+                "VARCHAR(32)",
+                not_null=True,
+                default="'manual'",
+            ),
+            ColumnSpec("trigger_user", "TEXT", "VARCHAR(255)"),
+            ColumnSpec("scope", "TEXT", "TEXT"),
+            ColumnSpec(
+                "runner", "TEXT", "VARCHAR(64)", not_null=True, default="'local'"
+            ),
+            ColumnSpec("runner_locations", "TEXT", "TEXT"),
+            ColumnSpec("archived_time", "TEXT", "VARCHAR(64)", not_null=True),
+        ),
+        primary_key=("run_id",),
+        indexes=(
+            IndexSpec("idx_workflow_runs_archive_start_time", ("start_time",)),
+        ),
+    ),
+    TableSpec(
+        name="task_runs_archive",
+        columns=(
+            ColumnSpec("run_id", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec("workflow_name", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec("task_name", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec(
+                "status",
+                "TEXT",
+                "VARCHAR(16)",
+                not_null=True,
+                check="status IN ('PENDING','RUNNING','SUCCESS','FAILED','SKIPPED')",
+            ),
+            ColumnSpec("start_time", "TEXT", "VARCHAR(64)"),
+            ColumnSpec("end_time", "TEXT", "VARCHAR(64)"),
+            ColumnSpec("exit_code", "INTEGER", "INT"),
+            ColumnSpec("log_file", "TEXT", "VARCHAR(512)"),
+            ColumnSpec("error_message", "TEXT", "TEXT"),
+            ColumnSpec("reused_from_run_id", "TEXT", "VARCHAR(255)"),
+            ColumnSpec(
+                "task_description",
+                "TEXT",
+                "VARCHAR(512)",
+                not_null=True,
+                default="''",
+            ),
+            ColumnSpec(
+                "depends_json",
+                "TEXT",
+                "VARCHAR(4000)",
+                not_null=True,
+                default="'[]'",
+            ),
+            ColumnSpec(
+                "task_type",
+                "TEXT",
+                "VARCHAR(32)",
+                not_null=True,
+                default="'command'",
+            ),
+            ColumnSpec("condition_result", "TEXT", "VARCHAR(64)"),
+            ColumnSpec("handled_by", "TEXT", "VARCHAR(64)"),
+            ColumnSpec("skip_kind", "TEXT", "VARCHAR(32)"),
+            ColumnSpec(
+                "snapshot_version", "INTEGER", "INT", not_null=True, default="0"
+            ),
+            ColumnSpec("archived_time", "TEXT", "VARCHAR(64)", not_null=True),
+        ),
+        primary_key=("run_id", "task_name"),
+        indexes=(IndexSpec("idx_task_runs_archive_start_time", ("start_time",)),),
     ),
     TableSpec(
         name="users",
         columns=(
             ColumnSpec("username", "TEXT", "VARCHAR(255)", not_null=True),
             ColumnSpec("password_hash", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec(
+                "unrestricted", "INTEGER", "INT", not_null=True, default="1"
+            ),
+            ColumnSpec("enabled", "INTEGER", "INT", not_null=True, default="1"),
             ColumnSpec("created_time", "TEXT", "VARCHAR(64)", not_null=True),
             ColumnSpec("updated_time", "TEXT", "VARCHAR(64)", not_null=True),
+            ColumnSpec("last_login_time", "TEXT", "VARCHAR(64)"),
         ),
         primary_key=("username",),
+    ),
+    TableSpec(
+        name="user_workflows",
+        columns=(
+            ColumnSpec("username", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec("workflow_key", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec(
+                "permission",
+                "TEXT",
+                "VARCHAR(16)",
+                not_null=True,
+                check="permission IN ('read','execute','edit')",
+            ),
+        ),
+        primary_key=("username", "workflow_key"),
+        foreign_keys=(
+            ForeignKeySpec(
+                ("username",), "users", ("username",), on_delete="CASCADE"
+            ),
+            ForeignKeySpec(
+                ("workflow_key",),
+                "workflows",
+                ("workflow_key",),
+                on_delete="CASCADE",
+            ),
+        ),
     ),
     TableSpec(
         name="auth_sessions",
@@ -409,6 +531,10 @@ _ENSURE_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("workflow_runs", "runner_locations", "TEXT", "TEXT"),
     ("workflows", "runner", "TEXT NOT NULL DEFAULT 'local'", "VARCHAR(64) NOT NULL DEFAULT 'local'"),
     ("task_runs", "snapshot_version", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
+    ("users", "unrestricted", "INTEGER NOT NULL DEFAULT 1", "INT NOT NULL DEFAULT 1"),
+    ("users", "enabled", "INTEGER NOT NULL DEFAULT 1", "INT NOT NULL DEFAULT 1"),
+    ("users", "last_login_time", "TEXT", "VARCHAR(64)"),
+    ("workflow_runs", "trigger_user", "TEXT", "VARCHAR(255)"),
 )
 
 # (table, timestamp columns, primary-key columns) for timestamp normalization.
@@ -604,19 +730,146 @@ class BaseStateDatabase:
     # Users / authentication
     # ------------------------------------------------------------------
 
-    def upsert_user(self, username: str, password_hash: str) -> None:
+    def upsert_user(
+        self,
+        username: str,
+        password_hash: str,
+        *,
+        unrestricted: bool = True,
+        enabled: bool = True,
+    ) -> None:
+        self.create_user(
+            username,
+            password_hash,
+            unrestricted=unrestricted,
+            enabled=enabled,
+        )
+
+    def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        *,
+        unrestricted: bool = False,
+        enabled: bool = True,
+    ) -> None:
         now = local_now()
         with self.connect() as connection:
             self._upsert(
                 connection,
                 "users",
-                ("username", "password_hash", "created_time", "updated_time"),
-                (username, password_hash, now, now),
+                (
+                    "username",
+                    "password_hash",
+                    "unrestricted",
+                    "enabled",
+                    "created_time",
+                    "updated_time",
+                ),
+                (
+                    username,
+                    password_hash,
+                    int(unrestricted),
+                    int(enabled),
+                    now,
+                    now,
+                ),
                 ("username",),
-                ("password_hash", "updated_time"),
+                ("password_hash", "unrestricted", "enabled", "updated_time"),
             )
             connection.execute(
                 "DELETE FROM auth_sessions WHERE username = ?", (username,)
+            )
+
+    def update_password(self, username: str, password_hash: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET password_hash = ?, updated_time = ? WHERE username = ?",
+                (password_hash, local_now(), username),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"user not found: {username}")
+            connection.execute(
+                "DELETE FROM auth_sessions WHERE username = ?", (username,)
+            )
+
+    def set_user_enabled(self, username: str, enabled: bool) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET enabled = ?, updated_time = ? WHERE username = ?",
+                (int(enabled), local_now(), username),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"user not found: {username}")
+            if not enabled:
+                connection.execute(
+                    "DELETE FROM auth_sessions WHERE username = ?", (username,)
+                )
+
+    def set_user_unrestricted(self, username: str, unrestricted: bool) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET unrestricted = ?, updated_time = ? WHERE username = ?",
+                (int(unrestricted), local_now(), username),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"user not found: {username}")
+
+    def delete_user(self, username: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM users WHERE username = ?", (username,))
+
+    def list_users(self) -> list[Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM users ORDER BY created_time, username"
+            ).fetchall()
+
+    def record_login(self, username: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_login_time = ? WHERE username = ?",
+                (local_now(), username),
+            )
+
+    def list_user_workflows(self, username: str) -> list[Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT workflow_key, permission FROM user_workflows "
+                "WHERE username = ? ORDER BY workflow_key",
+                (username,),
+            ).fetchall()
+
+    def user_workflow_map(self, username: str) -> dict[str, str]:
+        return {
+            row["workflow_key"]: row["permission"]
+            for row in self.list_user_workflows(username)
+        }
+
+    def set_user_workflow(
+        self, username: str, workflow_key: str, permission: str
+    ) -> None:
+        with self.connect() as connection:
+            self._upsert(
+                connection,
+                "user_workflows",
+                ("username", "workflow_key", "permission"),
+                (username, workflow_key, permission),
+                ("username", "workflow_key"),
+                ("permission",),
+            )
+
+    def delete_user_workflow(self, username: str, workflow_key: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM user_workflows WHERE username = ? AND workflow_key = ?",
+                (username, workflow_key),
+            )
+
+    def clear_user_workflows(self, username: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM user_workflows WHERE username = ?", (username,)
             )
 
     def get_user(self, username: str) -> Row | None:
@@ -644,6 +897,20 @@ class BaseStateDatabase:
             return connection.execute(
                 "SELECT * FROM auth_sessions WHERE token_hash = ?", (token_hash,)
             ).fetchone()
+
+    def get_auth_context(self, token_hash: str) -> list[Row]:
+        """Load the session, user and workflow grants in a single query."""
+        with self.connect() as connection:
+            return connection.execute(
+                """SELECT s.token_hash, s.expires_at,
+                          u.username, u.enabled, u.unrestricted,
+                          w.workflow_key, w.permission
+                   FROM auth_sessions s
+                   JOIN users u ON u.username = s.username
+                   LEFT JOIN user_workflows w ON w.username = u.username
+                   WHERE s.token_hash = ?""",
+                (token_hash,),
+            ).fetchall()
 
     def delete_auth_session(self, token_hash: str) -> None:
         with self.connect() as connection:
@@ -801,6 +1068,7 @@ class BaseStateDatabase:
         resumed_from_run_id: str | None = None,
         from_task: str | None = None,
         trigger_type: str = "manual",
+        trigger_user: str | None = None,
         task_metadata: dict[str, dict[str, object]] | None = None,
         scope: Sequence[str] | None = None,
         runner: str = "local",
@@ -811,8 +1079,8 @@ class BaseStateDatabase:
             connection.execute(
                 """INSERT INTO workflow_runs
                    (run_id, workflow_name, status, start_time, resumed_from_run_id, from_task,
-                    trigger_type, scope, runner, runner_locations)
-                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)""",
+                    trigger_type, trigger_user, scope, runner, runner_locations)
+                   VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id,
                     workflow_name,
@@ -820,6 +1088,7 @@ class BaseStateDatabase:
                     resumed_from_run_id,
                     from_task,
                     trigger_type,
+                    trigger_user,
                     json.dumps(list(scope), ensure_ascii=False) if scope is not None else None,
                     runner or "local",
                     json.dumps(list(runner_locations), ensure_ascii=False)
@@ -940,15 +1209,22 @@ class BaseStateDatabase:
             ).fetchall()
         return {row["task_name"]: row for row in rows}
 
-    def task_status_counts(self, since: str) -> dict[str, int]:
+    def task_status_counts(
+        self, since: str, workflow_keys: Sequence[str] | None = None
+    ) -> dict[str, int]:
         """Count task records per status for runs that started since an ISO timestamp."""
+        sql = """SELECT status, COUNT(*) AS count FROM task_runs
+                   WHERE start_time IS NOT NULL AND start_time >= ?"""
+        parameters: list[object] = [since]
+        if workflow_keys is not None:
+            if not workflow_keys:
+                return {}
+            placeholders = ", ".join("?" for _ in workflow_keys)
+            sql += f" AND workflow_name IN ({placeholders})"
+            parameters.extend(workflow_keys)
+        sql += " GROUP BY status"
         with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT status, COUNT(*) AS count FROM task_runs
-                   WHERE start_time IS NOT NULL AND start_time >= ?
-                   GROUP BY status""",
-                (since,),
-            ).fetchall()
+            rows = connection.execute(sql, parameters).fetchall()
         return {row["status"]: int(row["count"]) for row in rows}
 
     def list_runs(self, workflow_name: str, limit: int = 20) -> list[Row]:
@@ -978,9 +1254,16 @@ class BaseStateDatabase:
         status: str = "",
         trigger_type: str = "",
         tag: str = "",
+        workflow_keys: Sequence[str] | None = None,
     ) -> tuple[list[Row], int, int]:
+        if workflow_keys is not None and not workflow_keys:
+            return [], 0, 1
         conditions: list[str] = []
         parameters: list[object] = []
+        if workflow_keys is not None:
+            placeholders = ", ".join("?" for _ in workflow_keys)
+            conditions.append(f"wr.workflow_name IN ({placeholders})")
+            parameters.extend(workflow_keys)
         if workflow_query:
             conditions.append(
                 "(instr(lower(wr.workflow_name), lower(?)) > 0 OR "
@@ -1052,6 +1335,80 @@ class BaseStateDatabase:
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"run not found: {run_id}")
+
+    # ------------------------------------------------------------------
+    # Archive
+    # ------------------------------------------------------------------
+
+    def list_runs_for_archive(self, cutoff: str, limit: int) -> list[Row]:
+        """Terminal runs that ended before ``cutoff``, oldest first."""
+        with self.connect() as connection:
+            return connection.execute(
+                """SELECT run_id FROM workflow_runs
+                   WHERE status IN ('SUCCESS', 'FAILED')
+                     AND end_time IS NOT NULL AND end_time < ?
+                   ORDER BY end_time, run_id LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+
+    def archive_run_batch(
+        self, run_ids: Sequence[str], archived_time: str
+    ) -> tuple[int, int]:
+        """Copy a batch of runs into the archive tables, then drop them live."""
+        if not run_ids:
+            return 0, 0
+        placeholders = ", ".join("?" for _ in run_ids)
+        prefix = "INSERT OR REPLACE" if self.dialect == "sqlite" else "REPLACE"
+        workflow_columns = (
+            "run_id, workflow_name, status, start_time, end_time, "
+            "resumed_from_run_id, from_task, error_message, trigger_type, "
+            "trigger_user, scope, runner, runner_locations, archived_time"
+        )
+        task_columns = (
+            "run_id, workflow_name, task_name, status, start_time, end_time, "
+            "exit_code, log_file, error_message, reused_from_run_id, "
+            "task_description, depends_json, task_type, condition_result, "
+            "handled_by, skip_kind, snapshot_version, archived_time"
+        )
+        with self.connect() as connection:
+            connection.execute(
+                f"{prefix} INTO workflow_runs_archive ({workflow_columns}) "
+                "SELECT run_id, workflow_name, status, start_time, end_time, "
+                "resumed_from_run_id, from_task, error_message, trigger_type, "
+                "trigger_user, scope, runner, runner_locations, ? "
+                f"FROM workflow_runs WHERE run_id IN ({placeholders})",
+                [archived_time, *run_ids],
+            )
+            connection.execute(
+                f"{prefix} INTO task_runs_archive ({task_columns}) "
+                "SELECT run_id, workflow_name, task_name, status, start_time, "
+                "end_time, exit_code, log_file, error_message, reused_from_run_id, "
+                "task_description, depends_json, task_type, condition_result, "
+                "handled_by, skip_kind, snapshot_version, ? "
+                f"FROM task_runs WHERE run_id IN ({placeholders})",
+                [archived_time, *run_ids],
+            )
+            # Archive rows are debug-only and carry no foreign keys, so drop
+            # references from live rows that point at the archived runs first.
+            connection.execute(
+                "UPDATE workflow_runs SET resumed_from_run_id = NULL "
+                f"WHERE resumed_from_run_id IN ({placeholders})",
+                run_ids,
+            )
+            connection.execute(
+                "UPDATE task_runs SET reused_from_run_id = NULL "
+                f"WHERE reused_from_run_id IN ({placeholders})",
+                run_ids,
+            )
+            cursor = connection.execute(
+                f"DELETE FROM task_runs WHERE run_id IN ({placeholders})", run_ids
+            )
+            tasks = cursor.rowcount
+            cursor = connection.execute(
+                f"DELETE FROM workflow_runs WHERE run_id IN ({placeholders})", run_ids
+            )
+            runs = cursor.rowcount
+            return runs, tasks
 
     # ------------------------------------------------------------------
     # Schedules

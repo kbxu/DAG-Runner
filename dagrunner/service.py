@@ -165,6 +165,7 @@ class ExecutionService:
         from_task: str | None = None,
         only_task: bool = False,
         trigger_type: str = "manual",
+        trigger_user: str | None = None,
         resume_run_id: str | None = None,
     ) -> str:
         if self.update_service is not None and self.update_service.active:
@@ -193,6 +194,7 @@ class ExecutionService:
                     from_task,
                     only_task,
                     trigger_type,
+                    trigger_user,
                     active.cancel_event,
                     resume_run_id,
                     runner_alias,
@@ -229,6 +231,7 @@ class ExecutionService:
         from_task: str | None,
         only_task: bool,
         trigger_type: str,
+        trigger_user: str | None,
         cancel_event: Event,
         resume_run_id: str | None,
         runner_alias: str = "local",
@@ -245,6 +248,7 @@ class ExecutionService:
                 from_task,
                 run_id=run_id,
                 trigger_type=trigger_type,
+                trigger_user=trigger_user,
                 cancel_event=cancel_event,
                 resume_run_id=resume_run_id,
                 only_task=only_task,
@@ -276,13 +280,15 @@ class ExecutionService:
                 )
             active.cancel_event.set()
 
-    def rerun(self, run_id: str) -> str:
+    def rerun(self, run_id: str, trigger_user: str | None = None) -> str:
         run = self.database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
-        return self.start_run(run["workflow_name"], trigger_type="rerun")
+        return self.start_run(
+            run["workflow_name"], trigger_type="rerun", trigger_user=trigger_user
+        )
 
-    def resume_failed(self, run_id: str) -> str:
+    def resume_failed(self, run_id: str, trigger_user: str | None = None) -> str:
         run = self.database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
@@ -292,6 +298,7 @@ class ExecutionService:
         return self.start_run(
             run["workflow_name"],
             trigger_type="resume",
+            trigger_user=trigger_user,
             resume_run_id=run_id,
         )
 

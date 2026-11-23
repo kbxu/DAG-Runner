@@ -174,7 +174,7 @@ class UpdateApiTests(unittest.TestCase):
         self._previous = os.environ.get("DAGRUNNER_ROOT")
         os.environ["DAGRUNNER_ROOT"] = str(self.root)
         self.database = StateDatabase(self.root / "scheduler.db")
-        store_password(self.database, "tester", "test-password-1234")
+        store_password(self.database, "admin", "test-password-1234")
         self.app = create_app(
             database=self.database,
             state_dir=self.root / "var",
@@ -187,7 +187,7 @@ class UpdateApiTests(unittest.TestCase):
         self.client.post(
             "/api/auth/login",
             json={
-                "username": "tester",
+                "username": "admin",
                 "password_hash": client_password_hash("test-password-1234"),
             },
         )

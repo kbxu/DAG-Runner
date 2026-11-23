@@ -23,7 +23,7 @@ from .database import (
 from .executor import TaskExecutor
 from .logger import TaskLogManager
 from .pool import DaemonPool
-from .notifier import Notifier, NullNotifier, TaskFailure, WorkflowEvent, load_notifier
+from .notifier import Notifier, NullNotifier, TaskFailure, WorkflowEvent
 from .workflow import Workflow, WorkflowError
 
 
@@ -64,6 +64,7 @@ class WorkflowRunner:
         *,
         run_id: str | None = None,
         trigger_type: str = "manual",
+        trigger_user: str | None = None,
         cancel_event: Event | None = None,
         resume_run_id: str | None = None,
         only_task: bool = False,
@@ -105,6 +106,7 @@ class WorkflowRunner:
             resumed_from_run_id=previous["run_id"] if previous else None,
             from_task=from_task,
             trigger_type=trigger_type,
+            trigger_user=trigger_user,
             scope=scope,
             runner=self._runner_alias,
             task_metadata={
@@ -592,20 +594,14 @@ def _decode_scope(raw: str | None, order: list[str]) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a database-backed DAG workflow")
+    parser = argparse.ArgumentParser(
+        description="Inspect database-backed DAG workflow runs (read-only)"
+    )
     parser.add_argument(
         "--version",
         action="version",
         version=f"dagrunner {__version__}",
         help="print the dagrunner version and exit",
-    )
-    parser.add_argument(
-        "--workflow", help="imported workflow ID, for example workflow_a1b2c3d4e5f6"
-    )
-    parser.add_argument(
-        "--from",
-        dest="from_task",
-        help="run this task and its descendants (independent of earlier runs)",
     )
     parser.add_argument("--db", type=Path, default=Path("var") / "scheduler.db")
     parser.add_argument(
@@ -614,15 +610,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="startup YAML config; reads its db entry (SQLite path or MySQL 8 mapping)",
     )
-    parser.add_argument("--logs", type=Path, default=Path("var") / "logs")
     parser.add_argument(
-        "--notifier-config",
-        type=Path,
-        help="email notifier YAML/JSON (default: discover beside --db)",
+        "--list-runs",
+        action="store_true",
+        help="show persisted runs for all workflows",
     )
-    parser.add_argument("--list-runs", action="store_true", help="show persisted workflow runs")
     parser.add_argument("--status", action="store_true", help="show tasks for --run-id")
-    parser.add_argument("--show-log", action="store_true", help="print log for --run-id and --task")
+    parser.add_argument(
+        "--show-log",
+        action="store_true",
+        help="print the log for --run-id and --task",
+    )
     parser.add_argument("--run-id")
     parser.add_argument("--task")
     parser.add_argument("--limit", type=int, default=20)
@@ -630,62 +628,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     try:
         if args.db_config is not None:
             database = create_state_database(load_database_config(args.db_config))
         else:
             database = StateDatabase(args.db)
-        state_dir = database.state_dir
         if args.show_log:
             return _show_log(database, args)
         if args.status:
             return _show_status(database, args)
         if args.list_runs:
-            if not args.workflow:
-                raise WorkflowError("--list-runs requires --workflow")
-            _print_rows(database.list_runs(args.workflow, args.limit), RUN_COLUMNS)
+            _print_rows(database.list_all_runs(args.limit), RUN_COLUMNS)
             return 0
-
-        if not args.workflow:
-            raise WorkflowError("provide --workflow with an imported workflow ID")
-        stored = database.get_workflow(args.workflow)
-        if stored is None:
-            raise WorkflowError(f"workflow not found: {args.workflow}")
-        workflow = Workflow.from_yaml(
-            stored["definition"],
-            name_override=stored["workflow_key"],
-            description_override=stored["name"],
-        )
-        runner_alias = workflow.runner or stored["runner"] or "local"
-        from .satellite_master import SatelliteManager
-
-        manager = SatelliteManager(database)
-
-        def executor_resolver(alias: str) -> TaskExecutor:
-            if alias in ("", "local"):
-                return TaskExecutor()
-            if not database.is_satellite(alias):
-                raise WorkflowError(f"卫星不存在：{alias!r}")
-            from .satellite_executor import SatelliteTaskExecutor
-
-            return SatelliteTaskExecutor(manager, alias)
-
-        lock_path = state_dir / "locks" / f"{workflow.name}.lock"
-        with workflow_lock(lock_path):
-            recovered = database.mark_orphaned(workflow.name)
-            if recovered:
-                print(f"recovered {recovered} interrupted run(s)", file=sys.stderr)
-            notifier = load_notifier(args.notifier_config, var_dir=state_dir)
-            run_id, status = WorkflowRunner(
-                database,
-                TaskLogManager(args.logs),
-                notifier=notifier,
-                executor_resolver=executor_resolver,
-            ).run(workflow, args.from_task, runner_alias=runner_alias)
-        print(f"workflow={workflow.name} run_id={run_id} status={status}")
-        return 0 if status == "SUCCESS" else 1
-    except (WorkflowError, AlreadyRunningError, OSError, ValueError, KeyError) as exc:
+        parser.print_help()
+        return 2
+    except (WorkflowError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:

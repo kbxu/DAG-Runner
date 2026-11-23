@@ -9,6 +9,7 @@ const state = {
   runPageSize: 15,
   runPagination: { page: 1, page_size: 15, total: 0, total_pages: 1 },
   runFilters: { workflow: "", status: "", trigger: "", tag: "" },
+  auth: { username: "", is_admin: false, unrestricted: false, workflows: [] },
 };
 let serviceState = "checking";
 let runLoadSequence = 0;
@@ -54,6 +55,24 @@ function setServiceStatus(status) {
 
 function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c])); }
 function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"); }
+const PERMISSION_ORDER = { read: 1, execute: 2, edit: 3 };
+function workflowPermission(name) {
+  const workflow = state.workflows.get(name);
+  if (workflow?.permission) return workflow.permission;
+  return state.auth.is_admin || state.auth.unrestricted ? "edit" : null;
+}
+function canWorkflow(name, required) {
+  const permission = workflowPermission(name);
+  return Boolean(permission) && PERMISSION_ORDER[permission] >= PERMISSION_ORDER[required];
+}
+function canCreateWorkflow() {
+  if (state.auth.is_admin || state.auth.unrestricted) return true;
+  return [...state.workflows.values()].some(workflow => workflow.permission === "edit");
+}
+async function loadAuth() {
+  try { state.auth = await api("/api/auth/me"); }
+  catch (error) { if (!error.loginRequired && !error.offline) toast(error.message, true); }
+}
 function normalizeYamlNewlines(value) {
   const source = String(value ?? "");
   return source.includes("\r") ? source.replace(/\r\n?/g, "\n") : source;
@@ -340,12 +359,21 @@ function renderWorkflows() {
       const s = w.schedule;
       const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
       const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
+      const canExecute = canWorkflow(w.name, "execute");
+      const canEdit = canWorkflow(w.name, "edit");
+      const actions = [];
+      if (canExecute) actions.push(`<button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button>`);
+      if (canEdit) actions.push(`<button class="button ghost${s.enabled ? ' schedule-active' : ''}" title="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" aria-label="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" onclick="editSchedule('${esc(w.name)}')">${s.enabled ? '● ' : ''}${t("定时")}</button>`);
+      if (canEdit) actions.push(`<button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>${t("通知")}</button>`);
+      if (canEdit && !s.enabled) actions.push(`<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`);
+      actions.push(`<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出")}</button>`);
+      if (canEdit && !s.enabled) actions.push(`<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`);
       return `<tr>
         <td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(w.description || w.name)}" onclick="showDag('${esc(w.name)}')">${esc(w.description || w.name)}</button>${runnerTag(w.runner, w.runner_locations)}</div><div class="workflow-id mono" title="${esc(w.name)}">${esc(w.name)}</div></td>
         <td data-label="${esc(t("Cron / 时区"))}">${scheduleSummary(s)}</td>
         <td data-label="${esc(t("上次运行"))}">${fmt(w.last_run_time)}</td>
         <td data-label="${esc(t("下次运行"))}">${fmt(s.next_run_time)}</td>
-        <td class="card-cell-actions"><div class="actions"><button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button><button class="button ghost${s.enabled ? ' schedule-active' : ''}" title="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" aria-label="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" onclick="editSchedule('${esc(w.name)}')">${s.enabled ? '● ' : ''}${t("定时")}</button><button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>${t("通知")}</button>${s.enabled ? "" : `<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`}<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出")}</button>${s.enabled ? "" : `<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`}</div></td>
+        <td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="5" class="empty">${t("还没有导入工作流")}</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>${t("共 {total} 条 · 第 {page} / {pages} 页", {total:workflows.length,page:state.workflowPage,pages:totalPages})}</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">${t("上一页")}</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">${t("下一页")}</button></div>`;
@@ -441,16 +469,21 @@ async function loadRuns(resetPage=false) {
     document.getElementById("runRows").innerHTML = data.runs.map(r => {
       const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.handled_count || 0) + (r.skipped_count || 0);
       const percent = r.task_count ? Math.round(complete * 100 / r.task_count) : 0;
+      const canExecute = canWorkflow(r.workflow_name, "execute");
+      const canEdit = canWorkflow(r.workflow_name, "edit");
       const actions = [];
-      if (r.status === "RUNNING") actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">${t("停止")}</button>`);
-      else {
-        actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">${t("重跑")}</button>`);
-        if (r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" title="${esc(t("按最新配置续跑：从上次失败处继续，已成功的任务不重跑，运行位置以当前配置为准"))}" onclick="runAction('${r.run_id}','resume')">${t("失败续跑")}</button>`);
-        actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">${t("删除")}</button>`);
+      if (r.status === "RUNNING") {
+        if (canExecute) actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">${t("停止")}</button>`);
+      } else {
+        if (canExecute) actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">${t("重跑")}</button>`);
+        if (canExecute && r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" title="${esc(t("按最新配置续跑：从上次失败处继续，已成功的任务不重跑，运行位置以当前配置为准"))}" onclick="runAction('${r.run_id}','resume')">${t("失败续跑")}</button>`);
+        if (canEdit) actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">${t("删除")}</button>`);
       }
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
-      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual")}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
+      const triggerText = esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual");
+      const triggerUser = r.trigger_user ? ` <span class="secondary mono">${esc(r.trigger_user)}</span>` : "";
+      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${triggerText}${triggerUser}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
     renderRunStats(data.stats);
@@ -1329,7 +1362,181 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) for (const poller of pollers.values()) poller.kick();
 });
 
-startPoller("workflows", loadWorkflows, 15000, 60000);
-startPoller("runs", () => loadRuns(), 3000, 30000);
-startPoller("system", loadSystemStatus, 10000, 30000);
+let lastAccounts = [];
+let accountEditing = null;
+let accountWorkflowKeys = [];
+
+function permissionLabel(permission) {
+  return t(permission === "edit" ? "编辑" : permission === "execute" ? "执行" : "只读");
+}
+
+function accountScopeText(account) {
+  if (account.is_admin) return t("全部（admin）");
+  if (account.unrestricted) return t("全部工作流");
+  if (!account.workflows.length) return t("无权限");
+  return account.workflows.map(item => `${item.key}：${permissionLabel(item.permission)}`).join("，");
+}
+
+async function openAccountSettings() {
+  try {
+    const [accountsData, workflowsData] = await Promise.all([
+      api("/api/accounts"), api("/api/workflows"),
+    ]);
+    lastAccounts = accountsData.accounts;
+    accountWorkflowKeys = workflowsData.workflows.map(w => w.name);
+    renderAccountSettings(lastAccounts, null);
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderAccountSettings(accounts, editing) {
+  accountEditing = editing;
+  const rows = accounts.map(account => {
+    let actions;
+    if (account.is_admin) {
+      actions = `<span class="secondary">${t("内置管理员")}</span>`;
+    } else {
+      actions = `<button class="button ghost" onclick="editAccountPanel(${jsArg(account.username)})">${t("编辑")}</button>`
+        + `<button class="button ghost" onclick="resetAccountPasswordPrompt(${jsArg(account.username)})">${t("重置密码")}</button>`
+        + `<button class="button danger" onclick="deleteAccountByUsername(${jsArg(account.username)})">${t("删除")}</button>`;
+    }
+    const badge = account.enabled ? "" : ` <span class="badge">${t("已禁用")}</span>`;
+    return `<tr><td class="card-cell-name"><div>${esc(account.username)}${badge}</div></td><td>${esc(accountScopeText(account))}</td><td class="secondary">${esc(account.last_login_time || "-")}</td><td class="card-cell-actions"><div class="actions">${actions}</div></td></tr>`;
+  }).join("");
+  let editor = "";
+  if (editing === "new") editor = accountEditorHtml(null);
+  else if (editing) {
+    const account = accounts.find(item => item.username === editing);
+    if (account) editor = accountEditorHtml(account);
+  }
+  const body = `<div class="account-settings">
+    <div class="account-toolbar"><button class="button" onclick="addAccountPanel()">${t("新建账号")}</button></div>
+    <table class="account-table card-table"><thead><tr><th>${t("账号")}</th><th>${t("权限")}</th><th>${t("最后登录")}</th><th>${t("操作")}</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">${t("暂无账号")}</td></tr>`}</tbody></table>
+    ${editor}
+  </div>`;
+  openModal(t("账号管理"), body, false, "compact");
+}
+
+function accountEditorHtml(account) {
+  const isNew = !account;
+  const username = account?.username || "";
+  const enabled = account ? account.enabled : true;
+  const unrestricted = Boolean(account?.unrestricted);
+  const grants = {};
+  for (const item of account?.workflows || []) grants[item.key] = item.permission;
+  const options = selected => ["", "read", "execute", "edit"].map(value =>
+    `<option value="${value}"${selected === value ? " selected" : ""}>${value ? permissionLabel(value) : t("无")}</option>`).join("");
+  const workflowRows = accountWorkflowKeys.map(key =>
+    `<label class="account-workflow-row"><span class="mono">${esc(key)}</span><select data-account-workflow="${esc(key)}">${options(grants[key])}</select></label>`).join("");
+  return `<div class="account-editor">
+    <h4>${isNew ? t("新建账号") : t("编辑账号：{name}", {name: username})}</h4>
+    <label>${t("用户名")}<input id="accountUsername" value="${esc(username)}" ${isNew ? "" : "disabled"} maxlength="64"></label>
+    ${isNew ? `<label>${t("密码")}<input id="accountPassword" type="password" autocomplete="new-password" minlength="16"></label>` : ""}
+    <label class="account-check"><input id="accountEnabled" type="checkbox" ${enabled ? "checked" : ""}> ${t("启用")}</label>
+    <label class="account-check"><input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""}> ${t("全部工作流（旧账号兼容）")}</label>
+    <div class="account-workflows">${workflowRows || `<span class="form-hint">${t("暂无工作流")}</span>`}</div>
+    <div class="account-editor-actions">
+      <button class="button" onclick="saveAccountPanel()">${t("保存")}</button>
+      <button class="button ghost" onclick="cancelAccountPanel()">${t("取消")}</button>
+    </div>
+  </div>`;
+}
+
+function addAccountPanel() { renderAccountSettings(lastAccounts, "new"); }
+function editAccountPanel(username) { renderAccountSettings(lastAccounts, username); }
+function cancelAccountPanel() { renderAccountSettings(lastAccounts, null); }
+
+function readAccountPanel() {
+  const payload = {
+    enabled: document.getElementById("accountEnabled").checked,
+    unrestricted: document.getElementById("accountUnrestricted").checked,
+    workflows: {},
+  };
+  document.querySelectorAll("[data-account-workflow]").forEach(select => {
+    if (select.value) payload.workflows[select.dataset.accountWorkflow] = select.value;
+  });
+  if (accountEditing === "new") {
+    payload.username = document.getElementById("accountUsername").value.trim();
+    payload.password = document.getElementById("accountPassword").value;
+  }
+  return payload;
+}
+
+async function saveAccountPanel() {
+  const payload = readAccountPanel();
+  try {
+    if (accountEditing === "new") {
+      if (!payload.username) { toast(t("请输入用户名"), true); return; }
+      if (payload.password.length < 16) { toast(t("密码至少 16 位"), true); return; }
+      await api("/api/accounts", {method: "POST", body: JSON.stringify(payload)});
+      toast(t("账号已创建"));
+    } else {
+      await api(`/api/accounts/${encodeURIComponent(accountEditing)}`, {method: "PUT", body: JSON.stringify(payload)});
+      toast(t("账号已保存"));
+    }
+    await openAccountSettings();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteAccountByUsername(username) {
+  if (!await confirmDelete(t("删除账号：{name}？", {name: username}), t("该账号的登录会话会立即失效。"))) return;
+  try {
+    await api(`/api/accounts/${encodeURIComponent(username)}`, {method: "DELETE"});
+    toast(t("账号已删除"));
+    await openAccountSettings();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function resetAccountPasswordPrompt(username) {
+  openModal(t("重置密码：{name}", {name: username}), `<div class="channel-form-grid">
+    <label>${t("新密码")}<input id="accountResetPassword" type="password" autocomplete="new-password" minlength="16"></label>
+    <span class="form-hint">${t("密码至少 16 位；该账号现有会话会立即失效。")}</span>
+    <button class="button" onclick="saveAccountPasswordReset(${jsArg(username)})">${t("保存")}</button>
+  </div>`, false, "compact");
+}
+
+async function saveAccountPasswordReset(username) {
+  const password = document.getElementById("accountResetPassword").value;
+  if (password.length < 16) { toast(t("密码至少 16 位"), true); return; }
+  try {
+    await api(`/api/accounts/${encodeURIComponent(username)}/password`, {method: "POST", body: JSON.stringify({password})});
+    closeModal();
+    toast(t("密码已重置"));
+  } catch (e) { toast(e.message, true); }
+}
+
+async function openChangePassword() {
+  openModal(t("修改密码"), `<div class="channel-form-grid">
+    <label>${t("当前密码")}<input id="oldPassword" type="password" autocomplete="current-password"></label>
+    <label>${t("新密码")}<input id="newPassword" type="password" autocomplete="new-password" minlength="16"></label>
+    <label>${t("确认新密码")}<input id="confirmPassword" type="password" autocomplete="new-password" minlength="16"></label>
+    <span class="form-hint">${t("密码至少 16 位；修改后会退出登录。")}</span>
+    <button class="button" onclick="saveChangePassword()">${t("保存")}</button>
+  </div>`, false, "compact");
+}
+
+async function saveChangePassword() {
+  const oldPassword = document.getElementById("oldPassword").value;
+  const newPassword = document.getElementById("newPassword").value;
+  const confirm = document.getElementById("confirmPassword").value;
+  if (newPassword.length < 16) { toast(t("密码至少 16 位"), true); return; }
+  if (newPassword !== confirm) { toast(t("两次输入的新密码不一致"), true); return; }
+  try {
+    const oldHash = await sha256Hex(oldPassword);
+    const result = await api("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({old_password_hash: oldHash, new_password: newPassword}),
+    });
+    toast(t("密码已修改，请重新登录"));
+    setTimeout(() => window.location.replace(result.redirect || "/login"), 800);
+  } catch (e) { toast(e.message, true); }
+}
+
 window.addEventListener("resize", positionWorkflowTags);
+loadAuth().finally(() => {
+  startPoller("workflows", loadWorkflows, 15000, 60000);
+  startPoller("runs", () => loadRuns(), 3000, 30000);
+  startPoller("system", loadSystemStatus, 10000, 30000);
+  if (state.auth.is_admin && typeof refreshUpdateStatus === "function") {
+    refreshUpdateStatus();
+  }
+});

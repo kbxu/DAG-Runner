@@ -257,7 +257,7 @@ tasks:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             database = StateDatabase(root / "scheduler.db")
-            store_password(database, "tester", "test-password-1234")
+            store_password(database, "admin", "test-password-1234")
             app = create_app(
                 database_path=database.path,
                 logs_path=root / "logs",
@@ -268,7 +268,7 @@ tasks:
             client.post(
                 "/api/auth/login",
                 json={
-                    "username": "tester",
+                    "username": "admin",
                     "password_hash": client_password_hash("test-password-1234"),
                 },
             )

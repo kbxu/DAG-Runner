@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         update_config=config.get("update") or {},
         update_host=host,
         update_port=port,
+        maintenance_config=config.get("maintenance") or {},
     )
     _install_signal_handlers(app)
     print(f"dag-runner service listening on http://{host}:{port}")

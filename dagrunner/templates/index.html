@@ -7,7 +7,7 @@
   <link rel="icon" href="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body data-default-language="{{ default_language }}">
+<body data-default-language="{{ default_language }}" data-allow-insecure-remote-login="{{ 'true' if allow_insecure_remote_login else 'false' }}">
   <header class="topbar">
     <div class="brand">
       <img class="brand-logo" src="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" alt="DAG Runner">
@@ -19,9 +19,11 @@
     </div>
     <div class="header-actions">
       <span id="versionBadge" class="version-badge" title="">v—</span>
-      <button id="updateButton" class="logout-button" type="button" onclick="openUpdateSettings()"><span data-i18n>更新</span></button>
+      {% if is_admin %}<button id="updateButton" class="logout-button" type="button" onclick="openUpdateSettings()"><span data-i18n>更新</span></button>{% endif %}
       <div id="serviceStatus" class="live checking"><span></span><b data-i18n>正在连接</b></div>
       <span class="signed-in-user">{{ username }}</span>
+      {% if is_admin %}<button id="accountButton" class="logout-button" type="button" onclick="openAccountSettings()" data-i18n>账号</button>{% endif %}
+      <button id="changePasswordButton" class="logout-button" type="button" onclick="openChangePassword()" data-i18n>改密</button>
       <button id="languageToggle" class="logout-button" type="button">EN</button>
       <button class="logout-button" type="button" onclick="logout()" data-i18n>退出</button>
     </div>
@@ -41,7 +43,7 @@
           </div>
           {% endfor %}
         </div>
-        <div class="panel-actions"><button class="button ghost channel-settings-button" onclick="openNotifierSettings()">⚙ <span data-i18n>通知</span></button><button class="button ghost" id="satelliteSettingsButton" onclick="openSatelliteSettings()"><span data-i18n>卫星</span><span id="satelliteStatusDot" class="satellite-dot none"></span></button><button class="button" onclick="openImportWorkflow()" data-i18n>新建工作流</button></div>
+        <div class="panel-actions">{% if is_admin %}<button class="button ghost channel-settings-button" onclick="openNotifierSettings()">⚙ <span data-i18n>通知</span></button><button class="button ghost" id="satelliteSettingsButton" onclick="openSatelliteSettings()"><span data-i18n>卫星</span><span id="satelliteStatusDot" class="satellite-dot none"></span></button>{% endif %}{% if can_create %}<button class="button" onclick="openImportWorkflow()" data-i18n>新建工作流</button>{% endif %}</div>
       </div>
       <div class="table-wrap">
         <table class="workflow-list-table card-table">
@@ -117,6 +119,7 @@
   </div>
   <div id="toast" class="toast hidden"></div>
   <script src="{{ url_for('static', filename='i18n.js') }}"></script>
+  <script src="{{ url_for('static', filename='sha256.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
   <script src="{{ url_for('static', filename='update.js') }}"></script>
   <script src="{{ url_for('static', filename='workflow-editor.js') }}"></script>
