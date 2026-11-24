@@ -25,8 +25,11 @@ def _candidate_encodings() -> tuple[str, ...]:
 
     Chinese ANSI text (GBK/GB18030) is included on every platform because a
     Windows satellite may produce such logs while the master runs elsewhere.
+    UTF-16 is deliberately absent: on ASCII-heavy files its byte pairs look
+    like CJK code points, which outscores the correct decoding. UTF-16 is
+    handled separately by BOM detection and the NUL-pattern sniff below.
     """
-    encodings: list[str] = ["utf-16-le", "utf-16-be"]
+    encodings: list[str] = []
     if os.name == "nt":
         encodings.append("mbcs")
     encodings.extend(("gb18030", "cp936", "big5"))
@@ -90,6 +93,15 @@ def _sniff_utf16(raw: bytes) -> str | None:
     zeros_even = raw[0::2].count(0)
     zeros_odd = raw[1::2].count(0)
     half = length / 2
+    # ASCII inside UTF-16 leaves zero high bytes at one parity only. The 1%
+    # floor keeps a stray NUL in an ordinary text file from triggering this.
+    minimum = max(2, int(half * 0.01))
+    if zeros_odd >= minimum and zeros_even == 0:
+        return "utf-16-le"
+    if zeros_even >= minimum and zeros_odd == 0:
+        return "utf-16-be"
+    # Fallback for content that mixes ASCII and CJK: require a clear majority
+    # of NULs on one side so plain text is never mistaken for UTF-16.
     if zeros_odd >= max(2, half * 0.3) and zeros_even <= zeros_odd * 0.2:
         return "utf-16-le"
     if zeros_even >= max(2, half * 0.3) and zeros_odd <= zeros_even * 0.2:
@@ -98,7 +110,7 @@ def _sniff_utf16(raw: bytes) -> str | None:
 
 
 def decode_bytes(data: bytes, *, strict: bool = False) -> str:
-    """Decode log or upload bytes by BOM first, then by plausibility.
+    """Decode log or upload bytes by BOM, then NUL-sniffed UTF-16, then plausibility.
 
     With ``strict`` set, payloads that do not look like text raise
     UnicodeDecodeError instead of being replaced character by character.
@@ -109,7 +121,12 @@ def decode_bytes(data: bytes, *, strict: bool = False) -> str:
             return raw.decode(encoding, errors="replace")
     sniffed = _sniff_utf16(raw)
     if sniffed is not None:
-        return raw.decode(sniffed, errors="replace")
+        sniffed_text = raw.decode(sniffed, errors="replace")
+        if strict and not _looks_like_text(sniffed_text):
+            raise UnicodeDecodeError(
+                "unknown", raw, 0, 1, "cannot detect text encoding"
+            )
+        return sniffed_text
     # Plain UTF-8 is the common case. A clean decode wins immediately, which
     # keeps ASCII text from being reinterpreted as UTF-16 by the scoring below.
     try:
