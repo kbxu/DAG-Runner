@@ -9,17 +9,17 @@ import time
 import unittest
 from pathlib import Path
 
-from dagrunner.auth import client_password_hash, store_password
+from dagrunner.server.auth import client_password_hash, store_password
 from dagrunner.database import StateDatabase
-from dagrunner.executor import TaskExecutor
-from dagrunner.logger import TaskLogManager
-from dagrunner.runner import WorkflowRunner
-from dagrunner.satellite_agent import (
+from dagrunner.server.executor import TaskExecutor
+from dagrunner.server.logger import TaskLogManager
+from dagrunner.server.runner import WorkflowRunner
+from dagrunner.satellite.agent import (
     SatelliteAgent,
     SatelliteAgentConfig,
     create_satellite_agent_app,
 )
-from dagrunner.satellite_crypto import (
+from dagrunner.satellite.crypto import (
     FileTrustStore,
     NonceStore,
     build_auth_headers,
@@ -31,11 +31,11 @@ from dagrunner.satellite_crypto import (
     sign_auth,
     verify_auth,
 )
-from dagrunner.satellite_executor import SatelliteTaskExecutor
-from dagrunner.satellite_http import SatelliteClient, SatelliteHttpError
-from dagrunner.satellite_master import SatelliteManager, create_satellite_master_app
-from dagrunner.satellite_server import serve_ssl
-from dagrunner.satellite_protocol import (
+from dagrunner.satellite.executor import SatelliteTaskExecutor
+from dagrunner.satellite.http import SatelliteClient, SatelliteHttpError
+from dagrunner.satellite.master import SatelliteManager, create_satellite_master_app
+from dagrunner.satellite.server import serve_ssl
+from dagrunner.satellite.protocol import (
     AGENT_VERSION,
     JOB_FAILED,
     JOB_SUCCESS,
@@ -48,7 +48,7 @@ from dagrunner.satellite_protocol import (
     job_spec_from_task,
     new_job_id,
 )
-from dagrunner.webapp import create_app
+from dagrunner.server.webapp import create_app
 from dagrunner.workflow import Task, Workflow, WorkflowError
 
 

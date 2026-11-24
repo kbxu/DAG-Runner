@@ -18,17 +18,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dagrunner.auth import store_password
+from dagrunner.server.auth import store_password
 from dagrunner.database import (
     BaseStateDatabase,
     create_state_database,
     load_database_config,
     reset_state_database,
 )
-from dagrunner.logger import TaskLogManager
-from dagrunner.runner import WorkflowRunner
-from dagrunner.satellite_protocol import SatelliteConfig
-from dagrunner.service import encode_cron_expressions
+from dagrunner.server.logger import TaskLogManager
+from dagrunner.server.runner import WorkflowRunner
+from dagrunner.satellite.protocol import SatelliteConfig
+from dagrunner.server.service import encode_cron_expressions
 from dagrunner.workflow import Workflow
 
 

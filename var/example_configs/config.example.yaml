@@ -62,6 +62,12 @@ update:
     # 可选：内网镜像地址模板，留空使用 GitHub
     download_url: ""
   rollback_on_failure: true
+  # 分支模式（git clone / 开发部署）：网页选择「git 分支」后可检查 main 是否领先本地，
+  # 确认后写交接请求，由看门狗执行 git pull --ff-only 并重启工作树。
+  # 适用条件：运行目录本身是 git 仓库；发布包安装请继续用上面的 release/git tag 手动更新。
+  branch:
+    remote: origin
+    name: main
 
 # 运行记录归档。超过保留期的终态运行记录会移入 *_archive 表；后端服务不读这些表，仅供排查。
 maintenance:
@@ -72,3 +78,24 @@ maintenance:
   minute: 15
   # 每批处理的运行数
   batch_size: 50
+
+# 进程看门狗。服务崩溃或假死时自动重启；更新提交时接管版本切换与回滚。
+# 启动脚本用 run_tee.py 拉起 python -m dagrunner.watchdog；enabled=false 时回退为直接运行服务。
+watchdog:
+  enabled: true
+  mode: restart                 # restart | notify（只告警不重启）
+  interval: 5                   # 健康检查间隔（秒）
+  timeout: 3                    # 单次健康探测超时（秒）
+  alert_after: 120              # 连续不健康 2 分钟：首次告警
+  unhealthy_after: 300          # 连续不健康 5 分钟：判定假死并重启
+  handoff_wait: 15              # 主动停止后等待更新交接请求的宽限（秒）
+  backoff_base: 5               # 重启退避基数（秒）
+  backoff_max: 300              # 重启退避上限（秒）
+  stable_window: 300            # 稳定运行该时长后清零失败计数（秒）
+  max_consecutive_failures: 0   # 0 = 永不放弃，按 backoff_max 持续重试
+  stop_timeout: 20              # 停止子进程的宽限（秒），超时强杀进程树
+  alert_to: []                  # 告警收件人；空 = 仅记录到 var/logs/watchdog.log
+  alert_cooldown: 3600          # 重复重启告警的最小间隔（秒）
+  health:
+    require_scheduler: true     # 调度器未运行视为不健康
+    require_db: true            # 数据库不可用视为不健康

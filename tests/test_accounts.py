@@ -4,15 +4,15 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from dagrunner.accounts import AccountError, AccountService
-from dagrunner.auth import (
+from dagrunner.server.accounts import AccountError, AccountService
+from dagrunner.server.auth import (
     AuthService,
     client_password_hash,
     ensure_admin_account,
     store_password,
 )
 from dagrunner.database import StateDatabase
-from dagrunner.webapp import create_app
+from dagrunner.server.webapp import create_app
 
 
 ADMIN_PASSWORD = "admin-password-1234"

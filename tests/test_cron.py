@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from dagrunner.service import linux_cron_trigger
+from dagrunner.server.service import linux_cron_trigger
 
 
 class LinuxCronTests(unittest.TestCase):

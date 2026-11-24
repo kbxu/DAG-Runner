@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from dagrunner.database import StateDatabase
-from dagrunner.maintenance import MaintenanceService, main
+from dagrunner.server.maintenance import MaintenanceService, main
 
 
 DEFINITION = "name: One\ntasks:\n  a:\n    command: echo a\n"

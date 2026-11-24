@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from dagrunner.service import ServiceError
-from dagrunner.webapp import _prepare_import_preview
+from dagrunner.server.service import ServiceError
+from dagrunner.server.webapp import _prepare_import_preview
 
 
 DAG_RUNNER_YAML = """name: demo

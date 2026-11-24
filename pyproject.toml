@@ -30,7 +30,7 @@ include = ["dagrunner*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-dagrunner = ["templates/*", "static/*"]
+dagrunner.server = ["templates/*", "static/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "dagrunner.__version__" }

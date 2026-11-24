@@ -8,18 +8,18 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from xml.etree import ElementTree
 
-from dagrunner.auth import client_password_hash, store_password
+from dagrunner.server.auth import client_password_hash, store_password
 from dagrunner.database import StateDatabase
-from dagrunner.migrate_workflows import convert_windows_task_scheduler_definition
-from dagrunner.service import (
+from dagrunner.tools.migrate_workflows import convert_windows_task_scheduler_definition
+from dagrunner.server.service import (
     ScheduleService,
     WorkflowRegistry,
     decode_cron_expressions,
     encode_cron_expressions,
 )
-from dagrunner.server import main as server_main
+from dagrunner.server.app import main as server_main
 from dagrunner.workflow import Workflow, WorkflowError
-from dagrunner.webapp import _prepare_import_preview, create_app
+from dagrunner.server.webapp import _prepare_import_preview, create_app
 
 
 WINDOWS_TASK_WITH_TWO_TRIGGERS = """\
@@ -85,8 +85,8 @@ class MultipleScheduleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.yaml"
             config_path.write_text("language: en\n", encoding="utf-8")
-            with patch("dagrunner.server.create_app") as create, patch(
-                "dagrunner.server.serve"
+            with patch("dagrunner.server.app.create_app") as create, patch(
+                "dagrunner.server.app.serve"
             ) as serve:
                 self.assertEqual(server_main(["--config", str(config_path)]), 0)
                 self.assertEqual(create.call_args.kwargs["language"], "en")

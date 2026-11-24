@@ -1,6 +1,6 @@
 import unittest
 
-from dagrunner.migrate_workflows import convert_crontab_line, dump_workflow_yaml
+from dagrunner.tools.migrate_workflows import convert_crontab_line, dump_workflow_yaml
 from dagrunner.workflow import Workflow
 
 

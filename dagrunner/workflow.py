@@ -9,7 +9,48 @@ from typing import Any
 
 import yaml
 
-from .migrate_workflows import dump_workflow_yaml
+def _lf_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class LiteralDumper(yaml.SafeDumper):
+    """SafeDumper that keeps a requested literal block instead of quoting it."""
+
+    def choose_scalar_style(self):
+        requested = getattr(getattr(self, "event", None), "style", None)
+        if (
+            requested in ("|", ">")
+            and not self.flow_level
+            and not self.simple_key_context
+        ):
+            return requested
+        return super().choose_scalar_style()
+
+
+def _literal_text(value: str) -> str:
+    """Normalize line endings and drop trailing spaces/tabs for literal blocks."""
+    return "\n".join(line.rstrip(" \t") for line in _lf_newlines(value).split("\n"))
+
+
+def _str_presenter(dumper, value):
+    value = _literal_text(value)
+    style = "|" if "\n" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+LiteralDumper.add_representer(str, _str_presenter)
+
+
+def dump_workflow_yaml(config: dict[str, Any]) -> str:
+    """Serialize a workflow definition with readable literal blocks."""
+    content = yaml.dump(
+        config,
+        Dumper=LiteralDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        width=1000,
+    )
+    return _lf_newlines(content)
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]+$")

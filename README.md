@@ -19,6 +19,7 @@
 - **Web 管理**：导入编辑工作流、查看 DAG 与日志、邮件通知
 - **迁移导入**：DolphinScheduler JSON、Windows 计划任务 XML 一键转成 YAML
 - **安全防护**：账号密码登录、失败封禁，卫星通信用 HTTPS + 令牌挑战-响应
+- **进程看门狗**：主服务与卫星崩溃/假死自动重启，指数退避、邮件告警，更新时无缝接管版本切换
 
 ## 快速开始
 
@@ -28,7 +29,7 @@ python -m pip install -r requirements.txt
 ```
 
 ```bash
-python -m dagrunner.auth --generate   # 创建 admin 账号，随机密码只显示一次
+python -m dagrunner.server.auth --generate   # 创建 admin 账号，随机密码只显示一次
 ```
 
 ```bash
@@ -138,7 +139,7 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | `git` | `git archive <tag>` 导出到 `var/versions/<version>/`，不碰工作区，本地未提交改动不会影响更新 |
 | `release` | 从 GitHub Release 下载 `dagrunner-<version>.tar.gz`，校验 sha256 后解压 |
 
-**更新流程**（Web 手动，或命令行 `python -m dagrunner.update`，两者流程一致）：
+**更新流程**（Web 手动，或命令行 `python -m dagrunner.server.update`，两者流程一致）：
 
 1. 预检：有运行中任务、未完成运行记录或未结束的卫星任务时拒绝更新；
 2. 暂存新版本，暂停定时调度；
@@ -146,7 +147,35 @@ python -m dagrunner.satellite --config var/satellite.yaml
 4. 一起提交：卫星先重启，主机最后重启；更新期间错过的定时触发不补跑；
 5. 启动后自动校验各卫星版本，失败自动回滚到上一版本。
 
-离线卫星跳过更新，也可以单独更新卫星：`python -m dagrunner.update --role satellite --to <version>`。有运行中任务时更新会被拒绝。
+离线卫星跳过更新，也可以单独更新卫星：`python -m dagrunner.server.update --role satellite --to <version>`。有运行中任务时更新会被拒绝。
+
+### 分支模式（git clone / 开发部署）
+
+如果服务是从 git 仓库克隆运行的（目录里有 `.git`），Web「版本与更新」的来源可选 **git 分支**：
+
+- 检查更新会对比 `origin/<name>` 与本地 HEAD，显示落后提交数、最新提交的短 sha/标题；
+- 确认后**由看门狗执行 `git pull --ff-only` 并重启**（服务器只写交接请求）；
+- 工作区有未提交改动、本地有未推送提交或远端已变化时会拒绝并提示；
+- 发布包安装（无 `.git`）不支持该模式，请继续用 release/tag 手动更新；
+- 卫星面板会显示每台节点是否具备分支更新条件（`.git` + 远端），实际同步下一期支持。
+
+## 进程看门狗
+
+主服务与卫星各自有一个常驻看门狗（独立 supervisor 进程），由启动脚本经 `run_tee.py` 拉起：
+
+```bash
+python -m dagrunner.watchdog --role master          # 通常由 start.bat / start.sh 调用
+python -m dagrunner.watchdog --role satellite
+python -m dagrunner.watchdog --status --role master  # 查看运行状态
+```
+
+- 子进程异常退出：立即按指数退避重启（`5s → 300s` 封顶），连续稳定运行后清零失败计数；
+- 健康检查连续失败：**第 2 分钟发告警，满 5 分钟才判定假死并重启**，避免误杀长任务；
+- 主动停止（`Ctrl+C` / `SIGTERM`）：先写 intent，看门狗不重启并退出；
+- 更新提交：看门狗接管切版本、校验与回滚；没有看门狗时仍走原有 `watchdog/restart.py`；
+- `mode: notify` 可切换为只告警不重启；单例锁防止重复守护。
+
+默认配置见 `var/example_configs/config.example.yaml` 的 `watchdog` 段。**健康检查失败达到阈值时的自动重启会中断正在运行的任务**，必要时可用 `mode: notify` 人工兜底。
 
 ## 配置速查
 
@@ -162,16 +191,24 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | `satellite.public_url` | 卫星回连主程序的地址 | 按请求推导 |
 | `update.source` | 更新来源：`git` / `release` / `auto` | `auto` |
 | `update.release.repo` | GitHub Release 仓库 | 空（用 git 源） |
+| `update.branch.remote` / `name` | 分支模式的远端与分支名 | `origin` / `main` |
 | `update.enabled` | 是否允许更新 | `true` |
 | `maintenance.enabled` | 是否启用运行记录归档 | `true` |
 | `maintenance.retention_days` | 归档保留期（天），超过的终态运行移入 `*_archive` 表 | `60` |
 | `maintenance.hour` / `minute` | 每日归档执行时间 | `3:15` |
+| `watchdog.enabled` | 是否启用看门狗（false 时启动脚本回退直跑） | `true` |
+| `watchdog.interval` / `timeout` | 健康检查间隔 / 单次探测超时（秒） | `5` / `3` |
+| `watchdog.alert_after` | 连续不健康多久后首次告警（秒） | `120` |
+| `watchdog.unhealthy_after` | 连续不健康多久后才重启（秒） | `300` |
+| `watchdog.backoff_base` / `backoff_max` | 重启退避基数 / 上限（秒） | `5` / `300` |
+| `watchdog.mode` | `restart` 自动重启 / `notify` 只告警 | `restart` |
+| `watchdog.alert_to` | 告警收件人列表，空则仅记日志 | 空 |
 
-CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m dagrunner.accounts`、`python -m dagrunner.maintenance`、`python -m demo.init_demo`）加 `--db-config var/config.yaml` 即可复用上面的 `db` 配置；不传时仍用 `--db` 指定的 SQLite 文件。`python -m dagrunner` 只用于查看运行记录（`--list-runs` / `--status` / `--show-log`），运行工作流请通过 Web 控制台或定时调度。
+CLI（`python -m dagrunner`、`python -m dagrunner.server.auth`、`python -m dagrunner.server.accounts`、`python -m dagrunner.server.maintenance`、`python -m demo.init_demo`）加 `--db-config var/config.yaml` 即可复用上面的 `db` 配置；不传时仍用 `--db` 指定的 SQLite 文件。`python -m dagrunner` 只用于查看运行记录（`--list-runs` / `--status` / `--show-log`），运行工作流请通过 Web 控制台或定时调度。
 
 ### 运行记录归档
 
-超过 `maintenance.retention_days`（默认 60 天）的**终态**运行记录，会由每日低峰任务分批移入 `workflow_runs_archive` / `task_runs_archive`。这两个表后端服务不读，只供需要时手动查询排查；也可用 `python -m dagrunner.maintenance --archive` 手动执行。日志文件不受影响。
+超过 `maintenance.retention_days`（默认 60 天）的**终态**运行记录，会由每日低峰任务分批移入 `workflow_runs_archive` / `task_runs_archive`。这两个表后端服务不读，只供需要时手动查询排查；也可用 `python -m dagrunner.server.maintenance --archive` 手动执行。日志文件不受影响。
 
 ## 常用命令
 
@@ -180,32 +217,49 @@ CLI（`python -m dagrunner`、`python -m dagrunner.auth`、`python -m dagrunner.
 | `python -m dagrunner --list-runs` | 查看运行历史（所有工作流） |
 | `python -m dagrunner --status --run-id <id>` | 查看某次运行的任务状态 |
 | `python -m dagrunner --show-log --run-id <id> --task <task>` | 查看日志 |
-| `python -m dagrunner.auth --generate` | 创建 / 重置登录账号（`--reset` 为同义入口） |
-| `python -m dagrunner.accounts --list` | 查看账号与工作流权限 |
-| `python -m dagrunner.accounts --add <用户名>` | 新建账号（`--password`、`--unrestricted` 可选） |
-| `python -m dagrunner.accounts --grant <用户名> <工作流> <只读\|执行\|编辑>` | 授予工作流权限 |
-| `python -m dagrunner.accounts --revoke <用户名> <工作流>` | 移除工作流权限 |
-| `python -m dagrunner.maintenance --archive` | 手动归档超过保留期的运行记录 |
+| `python -m dagrunner.server.auth --generate` | 创建 / 重置登录账号（`--reset` 为同义入口） |
+| `python -m dagrunner.server.accounts --list` | 查看账号与工作流权限 |
+| `python -m dagrunner.server.accounts --add <用户名>` | 新建账号（`--password`、`--unrestricted` 可选） |
+| `python -m dagrunner.server.accounts --grant <用户名> <工作流> <只读\|执行\|编辑>` | 授予工作流权限 |
+| `python -m dagrunner.server.accounts --revoke <用户名> <工作流>` | 移除工作流权限 |
+| `python -m dagrunner.server.maintenance --archive` | 手动归档超过保留期的运行记录 |
+| `python -m dagrunner.watchdog --status --role master` | 查看看门狗运行状态 |
 | `python -m dagrunner --version` | 打印版本号 |
-| `python -m dagrunner.update --check` | 查看可用版本 |
-| `python -m dagrunner.update --to <version>` | 命令行更新主程序与在线卫星 |
-| `python -m dagrunner.update --role satellite --to <version>` | 单独更新卫星 |
-| `python -m dagrunner.migrate_workflows --source <ds\|windows-task-scheduler> ...` | 导入外部任务 |
+| `python -m dagrunner.server.update --check` | 查看可用版本 |
+| `python -m dagrunner.server.update --to <version>` | 命令行更新主程序与在线卫星 |
+| `python -m dagrunner.server.update --role satellite --to <version>` | 单独更新卫星 |
+| `python -m dagrunner.tools.migrate_workflows --source <ds\|windows-task-scheduler> ...` | 导入外部任务 |
 | `python -m dagrunner.satellite --config <path>` | 启动卫星版 |
 | `python -m demo.init_demo --reset` | 生成演示数据 |
+
+## 模块文档
+
+- [dagrunner 包与共享内核](dagrunner/README.md)
+- [server 主服务](dagrunner/server/README.md)
+- [database 状态存取](dagrunner/database/README.md)
+- [satellite 卫星节点](dagrunner/satellite/README.md)
+- [notifier 通知](dagrunner/notifier/README.md)
+- [watchdog 进程看门狗](dagrunner/watchdog/README.md)
+- [tools 命令行工具](dagrunner/tools/README.md)
+- [看门狗设计文档](dagrunner/watchdog/DESIGN.md)
 
 ## 项目结构
 
 ```text
-dagrunner/        核心代码与 Web 资源
-  server.py         主服务入口（Web + 卫星服务）
-  satellite.py      卫星版入口        satellite_*.py  卫星协议 / 加密 / 执行
-  workflow.py       工作流解析与校验   runner.py        DAG 执行引擎
-  service.py        调度与运行管理     database*.py   状态存取（SQLite / MySQL 8）
-  update.py         版本发现 / 暂存 / 协调更新
-  satellite_update.py 卫星侧下载 / 校验 / 重启
-  restart.py        更新看门狗（切换 var/current 并重启）
-  install.py        版本化安装布局     version.py      语义化版本比较
+dagrunner/
+  __init__.py       版本号              version.py      语义化版本比较
+  install.py        版本化安装布局
+  workflow.py       工作流解析（共用）  scripting.py   脚本封装（共用）
+  cron.py           cron 解析（共用）   package.py     更新归档工具（共用）
+  __main__.py       薄入口（python -m dagrunner）
+  server/           主服务包：app / webapp / service / runner / executor /
+                    pool / accounts / auth / logger / maintenance / update
+                    （含 templates / static）
+  database/         状态存取包：base / sqlite / mysql8（SQLite 与 MySQL 8）
+  satellite/        卫星节点包：agent / 协议 / 加密 / 主机通道 / 更新
+  watchdog/         进程看门狗（状态 / 健康 / 拉起 / 守护循环）+ restart 更新看门狗
+  notifier/         通知包：邮件已实现，飞书等通道接口已预留
+  tools/            命令行工具：cli（运行记录）/ migrate_workflows（导入）/ workflow_editor
 run_server.py       版本目录启动器     run_satellite.py 卫星启动器
 demo/             示例工作流、任务脚本与演示数据初始化
 docs/images/      README 截图
@@ -219,6 +273,7 @@ var/              数据库、日志、证书、版本化安装（本地数据�
 - 任务请以低权限账户运行
 - 账号体系：用户名 `admin` 为管理员，负责账号管理、通知发件、卫星、版本更新等全局设置；其它账号按工作流单独授权（只读 / 执行 / 编辑），未授权的工作流不可见。旧账号升级后保留全部工作流权限
 - 手动运行会记录触发用户；密码至少 16 位，登录失败 3 次封禁 10 分钟，禁用或重置密码会立即失效其会话
+- `/health` 为看门狗探活端点，免登录，只返回版本、调度/数据库可用性与更新状态；管理端口仍请勿直接暴露公网
 
 ## License
 

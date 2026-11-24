@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from dagrunner import runner
+from dagrunner.server import runner
 from dagrunner.database import StateDatabase
 
 

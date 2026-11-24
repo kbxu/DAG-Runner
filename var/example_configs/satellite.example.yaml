@@ -30,4 +30,24 @@ satellite:
   probe_interval: 60
   timeout: 15
   # 主机下发更新时，证书信任策略同 host_key_policy；
-  # 单独更新：python -m dagrunner.update --role satellite --to <version>
+  # 单独更新：python -m dagrunner.server.update --role satellite --to <version>
+
+# 卫星进程看门狗。卫星代理崩溃或假死时自动重启；主机下发更新时接管版本切换。
+watchdog:
+  enabled: true
+  mode: restart                 # restart | notify（只告警不重启）
+  interval: 5
+  timeout: 3
+  alert_after: 120              # 连续不健康 2 分钟：首次告警
+  unhealthy_after: 300          # 连续不健康 5 分钟：判定假死并重启
+  handoff_wait: 15              # 主动停止后等待更新交接请求的宽限（秒）
+  backoff_base: 5
+  backoff_max: 300
+  stable_window: 300
+  max_consecutive_failures: 0
+  stop_timeout: 20
+  alert_to: []
+  alert_cooldown: 3600
+  health:
+    require_db: true
+    # require_scheduler 对卫星无意义，忽略

@@ -18,11 +18,11 @@ from pathlib import Path
 import pymysql
 
 from dagrunner.database import create_state_database
-from dagrunner.database_mysql8 import Mysql8StateDatabase
-from dagrunner.executor import ExecutionResult
-from dagrunner.logger import TaskLogManager
-from dagrunner.runner import WorkflowRunner
-from dagrunner.satellite_protocol import SatelliteConfig
+from dagrunner.database.mysql8 import Mysql8StateDatabase
+from dagrunner.server.executor import ExecutionResult
+from dagrunner.server.logger import TaskLogManager
+from dagrunner.server.runner import WorkflowRunner
+from dagrunner.satellite.protocol import SatelliteConfig
 from dagrunner.workflow import Task, Workflow
 
 MYSQL_CONFIG = {

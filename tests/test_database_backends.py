@@ -11,8 +11,8 @@ from dagrunner.database import (
     load_database_config,
     reset_state_database,
 )
-from dagrunner.database_base import SCHEMA
-from dagrunner.database_mysql8 import _format_placeholders
+from dagrunner.database.base import SCHEMA
+from dagrunner.database.mysql8 import _format_placeholders
 
 
 class DatabaseBackendTests(unittest.TestCase):

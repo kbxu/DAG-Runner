@@ -2,7 +2,7 @@ import unittest
 
 import yaml
 
-from dagrunner.migrate_workflows import dump_workflow_yaml
+from dagrunner.tools.migrate_workflows import dump_workflow_yaml
 from dagrunner.workflow import Workflow, migrate_legacy_env, uniquify_task_ids
 
 

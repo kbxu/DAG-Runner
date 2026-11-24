@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dagrunner.logger import TaskLogManager, decode_bytes
-from dagrunner.webapp import _prepare_import_preview
+from dagrunner.server.logger import TaskLogManager, decode_bytes
+from dagrunner.server.webapp import _prepare_import_preview
 
 
 WINDOWS_TASK_XML = """\
@@ -54,6 +54,32 @@ class DecodeBytesTests(unittest.TestCase):
         raw = "windows - 清洗转换数据\r\n无法识别的名称\r\n".encode("gbk")
         decoded = decode_bytes(raw)
         self.assertIn("清洗转换数据", decoded)
+
+    def test_mostly_ascii_log_with_gbk_output_is_not_utf16(self) -> None:
+        # Satellite logs are mostly ASCII (script header plus cmd echoes) with
+        # GBK bytes appended by the command itself. UTF-16 must not win merely
+        # because ASCII byte pairs resemble CJK code points; test both parities.
+        header = (
+            "Executing command:\n"
+            "set TA_ENV=--env qx\n"
+            "cd /d D:\\work\\trade_assistant\n"
+            "python -m tool --mode nv\n"
+            "\n"
+            "##################################################################\n"
+            "Command output:\n"
+        ).encode("utf-8")
+        body = (
+            "(ta) D:\\work\\trade_assistant>python -m tool --mode nv \n"
+            "更新 累计净值2024-06-12\n"
+            "更新 单位净值2024-06-12\n"
+            "完成\n"
+        ).encode("gbk")
+        for padding in (b"", b"\n"):
+            raw = header + body + padding
+            decoded = decode_bytes(raw)
+            self.assertTrue(decoded.startswith("Executing command:"))
+            self.assertIn("更新 单位净值2024-06-12", decoded)
+            self.assertNotIn("\x00", decoded)
 
     def test_keeps_plain_ascii_and_json_intact(self) -> None:
         raw = b'{"processDefinition": {"name": "daily report"}}\n'

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from dagrunner import __version__
-from dagrunner.auth import client_password_hash, store_password
+from dagrunner.server.auth import client_password_hash, store_password
 from dagrunner.database import StateDatabase
 from dagrunner.install import (
     activate,
@@ -16,10 +16,10 @@ from dagrunner.install import (
     tree_hash,
     versions_dir,
 )
-from dagrunner.service import ServiceError
-from dagrunner.update import GitSource, UpdateError, make_archive
+from dagrunner.server.service import ServiceError
+from dagrunner.server.update import GitSource, UpdateError, make_archive
 from dagrunner.version import compare_versions, is_newer, parse_version
-from dagrunner.webapp import create_app
+from dagrunner.server.webapp import create_app
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -107,7 +107,7 @@ class InstallTests(unittest.TestCase):
         self.assertNotEqual(first, tree_hash(source))
 
     def test_make_archive_roundtrip(self) -> None:
-        from dagrunner.update import extract_archive, strip_single_root
+        from dagrunner.server.update import extract_archive, strip_single_root
 
         source = self.root / "code"
         (source / "dagrunner").mkdir(parents=True)
@@ -120,7 +120,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(tree_hash(source), tree_hash(dest))
 
     def test_strip_single_root(self) -> None:
-        from dagrunner.update import strip_single_root
+        from dagrunner.server.update import strip_single_root
 
         dest = self.root / "staged"
         (dest / "dagrunner-0.2.0" / "dagrunner").mkdir(parents=True)
@@ -279,24 +279,50 @@ class UpdateApiTests(unittest.TestCase):
         spawn.assert_called_once()
         self.assertEqual(spawn.call_args[0][1], "0.1.0")
 
+    def test_commit_hands_off_to_live_watchdog(self) -> None:
+        from datetime import datetime
+        from unittest import mock
+
+        from dagrunner.watchdog import state as watchdog_state
+
+        watchdog_state.update_state(
+            self.root,
+            "master",
+            watchdog_pid=os.getpid(),
+            last_heartbeat=datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        self.service.begin("0.2.0", "git")
+        self.service.prepare()
+        with mock.patch.object(self.service, "_spawn_restart") as spawn:
+            result = self.service.commit()
+        spawn.assert_not_called()
+        self.assertTrue(result["restarting"])
+        handoff = watchdog_state.read_handoff(self.root)
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        self.assertEqual(handoff["version"], "0.2.0")
+        self.assertEqual(self.service.status()["state"], "committing")
+
 
 class RestartHelpersTests(unittest.TestCase):
     def test_process_alive(self) -> None:
         from unittest import mock
 
-        from dagrunner import restart
+        from dagrunner.watchdog import restart
 
-        with mock.patch.object(restart.os, "kill") as kill:
+        self.assertTrue(restart._process_alive(os.getpid()))
+        # Windows-safe implementation lives in watchdog.launch.
+        with mock.patch("dagrunner.watchdog.launch.process_alive", return_value=True) as alive:
             self.assertTrue(restart._process_alive(123))
-            kill.assert_called_once_with(123, 0)
-        with mock.patch.object(restart.os, "kill", side_effect=ProcessLookupError):
+            alive.assert_called_once_with(123)
+        with mock.patch("dagrunner.watchdog.launch.process_alive", return_value=False):
             self.assertFalse(restart._process_alive(123))
         self.assertFalse(restart._process_alive(-1))
 
     def test_port_free(self) -> None:
         from unittest import mock
 
-        from dagrunner import restart
+        from dagrunner.watchdog import restart
 
         with mock.patch.object(restart.socket, "socket") as sock:
             sock.return_value.__enter__.return_value.connect_ex.return_value = 0
@@ -317,13 +343,65 @@ class SatelliteGraceTests(unittest.TestCase):
         import time
 
         from dagrunner.install import write_state
-        from dagrunner.satellite_update import mark_update_done, recover_grace
+        from dagrunner.satellite.update import mark_update_done, recover_grace
 
         self.assertEqual(recover_grace(self.root, 10), 0.0)
         write_state({"state": "committing", "version": "0.2.0"}, self.root)
         self.assertGreater(recover_grace(self.root, 10), time.monotonic())
         mark_update_done(self.root)
         self.assertEqual(recover_grace(self.root, 10), 0.0)
+
+
+class SatelliteHandoffTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self._directory.name)
+
+    def tearDown(self) -> None:
+        self._directory.cleanup()
+
+    def _updater(self):  # noqa: ANN201 - test helper
+        from dagrunner.satellite.update import SatelliteUpdater
+
+        return SatelliteUpdater(
+            root=self.root,
+            alias="moon",
+            master_url="https://127.0.0.1:7120",
+            token="token",
+        )
+
+    def test_commit_falls_back_without_watchdog(self) -> None:
+        from unittest import mock
+
+        updater = self._updater()
+        with mock.patch.object(updater, "_spawn_restart") as spawn:
+            result = updater.commit("0.2.0")
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args[0][0], "0.2.0")
+        self.assertTrue(result["restarting"])
+
+    def test_commit_hands_off_with_live_watchdog(self) -> None:
+        from datetime import datetime
+        from unittest import mock
+
+        from dagrunner.install import read_state
+        from dagrunner.watchdog import state as watchdog_state
+
+        watchdog_state.update_state(
+            self.root,
+            "satellite",
+            watchdog_pid=os.getpid(),
+            last_heartbeat=datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        updater = self._updater()
+        with mock.patch.object(updater, "_spawn_restart") as spawn:
+            updater.commit("0.2.0")
+        spawn.assert_not_called()
+        handoff = watchdog_state.read_handoff(self.root)
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        self.assertEqual(handoff["version"], "0.2.0")
+        self.assertEqual(read_state(self.root)["state"], "committing")
 
 
 if __name__ == "__main__":

@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from dagrunner.auth import client_password_hash, store_password
+from dagrunner.server.auth import client_password_hash, store_password
 from dagrunner.database import StateDatabase
-from dagrunner.webapp import create_app
+from dagrunner.server.webapp import create_app
 
 
 class RunScopeApiTests(unittest.TestCase):

@@ -1,0 +1,1812 @@
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import re
+import secrets
+from datetime import datetime, timedelta
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+from xml.etree import ElementTree
+
+import yaml
+import psutil
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
+
+from .accounts import (
+    AccountError,
+    AccountService,
+    normalize_permission,
+    permission_at_least,
+)
+from .auth import (
+    AuthService,
+    SESSION_COOKIE,
+    SESSION_HOURS,
+    client_password_hash,
+    ensure_admin_account,
+    store_password_hash,
+    valid_client_hash,
+    verify_password,
+)
+from .. import __version__
+from ..database import BaseStateDatabase, create_state_database
+from ..install import repo_root
+from .logger import TaskLogManager, decode_bytes
+from .maintenance import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_RETENTION_DAYS,
+    MaintenanceService,
+)
+from ..notifier import load_email_config, load_notifier, save_email_config
+from ..tools.migrate_workflows import (
+    SOURCE_DOLPHINSCHEDULER,
+    SOURCE_WINDOWS_TASK_SCHEDULER,
+    WINDOWS_TASK_NAMESPACE,
+    convert_crontab_line,
+    convert_dolphinscheduler_definition,
+    convert_windows_task_scheduler_definition,
+    dump_workflow_yaml,
+)
+from ..satellite.master import SatelliteError
+from ..satellite.protocol import PATH_PING, SatelliteConfig
+from .service import (
+    DEFAULT_SCHEDULE_CRON,
+    DEFAULT_SCHEDULE_TIMEZONE,
+    ExecutionService,
+    ScheduleService,
+    ServiceError,
+    WorkflowRegistry,
+    decode_cron_expressions,
+)
+from .update import UpdateError, UpdateService
+from ..workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
+from ..tools.workflow_editor import demo_command, demo_setup, preview_definition, extend_definition
+
+
+_HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
+_LOG_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+class AccessDenied(Exception):
+    """Raised when the current user may not perform the requested action."""
+
+    def __init__(self, message: str, status: int = 403):
+        super().__init__(message)
+        self.status = status
+
+
+def _current_permission(workflow_name: str) -> str | None:
+    if getattr(g, "is_admin", False) or getattr(g, "unrestricted", False):
+        return "edit"
+    return getattr(g, "permissions", {}).get(workflow_name)
+
+
+def _require_permission(workflow_name: str, required: str) -> str:
+    permission = _current_permission(workflow_name)
+    if permission is None:
+        raise AccessDenied("workflow not found", 404)
+    if not permission_at_least(permission, required):
+        raise AccessDenied("permission denied", 403)
+    return permission
+
+
+def _require_admin() -> None:
+    if not getattr(g, "is_admin", False):
+        raise AccessDenied("admin only", 403)
+
+
+def _visible_workflow_keys() -> set[str] | None:
+    """None means every workflow is visible (admin or unrestricted account)."""
+    if getattr(g, "is_admin", False) or getattr(g, "unrestricted", False):
+        return None
+    return set(getattr(g, "permissions", {}))
+
+
+def _account_workflow_grants(value: object) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ServiceError("workflows must be a mapping")
+    grants: dict[str, str] = {}
+    for key, permission in value.items():
+        try:
+            grants[str(key)] = normalize_permission(permission)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+    return grants
+
+
+def _log_download_filename(task, fallback_time=None) -> str:
+    raw = (task["task_name"] or "task").strip()
+    name = _LOG_FILENAME_UNSAFE.sub("_", raw).strip("_")[:80] or "task"
+    stamp = "unknown"
+    start_time = task["start_time"] or fallback_time
+    if start_time:
+        try:
+            stamp = (
+                datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                .astimezone()
+                .strftime("%Y%m%d-%H%M%S")
+            )
+        except ValueError:
+            stamp = _LOG_FILENAME_UNSAFE.sub("_", start_time).strip("_") or "unknown"
+    return f"{name}_{stamp}.txt"
+
+
+def _runner_locations(workflow) -> list[dict]:
+    """Summarise where a workflow's tasks run, satellites first."""
+    return [
+        {"alias": alias, "count": count}
+        for alias, count in workflow.runner_locations()
+    ]
+
+
+def _apply_runner_to_definition(definition: str, runner: str) -> str:
+    """Set the top-level workflow ``runner`` in the YAML text."""
+    output: list[str] = []
+    replaced = False
+    for line in definition.splitlines():
+        if not replaced and re.match(r"^runner\s*:", line):
+            replaced = True
+            if runner != "local":
+                output.append(f"runner: {runner}")
+            continue
+        output.append(line)
+    if not replaced and runner != "local":
+        output.insert(0, f"runner: {runner}")
+    return "\n".join(output) + "\n"
+
+
+def _satellites_payload(database: BaseStateDatabase) -> list[dict]:
+    jobs_by_alias: dict[str, list] = {}
+    for job in database.list_satellite_jobs(limit=200):
+        jobs_by_alias.setdefault(job["satellite_alias"], []).append(job)
+    satellites = []
+    for config in database.list_satellites():
+        satellites.append(
+            {
+                "alias": config.alias,
+                "name": config.name,
+                "mode": config.mode,
+                "url": config.url,
+                "host_key_policy": config.host_key_policy,
+                "cert_fingerprint": config.cert_fingerprint,
+                "has_token": bool(config.token),
+                "status": {
+                    "status": config.status,
+                    "last_seen": config.last_seen,
+                    "last_error": config.last_error,
+                    "platform": config.platform,
+                    "hostname": config.hostname,
+                    "agent_version": config.agent_version,
+                    "branch": _parse_branch_info(config.branch_info),
+                },
+                "jobs": [
+                    {
+                        "job_id": job["job_id"],
+                        "task_name": job["task_name"],
+                        "status": job["status"],
+                        "exit_code": job["exit_code"],
+                        "created_time": job["created_time"],
+                        "finished_time": job["finished_time"],
+                    }
+                    for job in jobs_by_alias.get(config.alias, [])[:10]
+                ],
+            }
+        )
+    return satellites
+
+
+def _parse_branch_info(raw: str) -> dict:
+    if not raw:
+        return {"available": False, "reason": "unknown"}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {"available": False, "reason": "unknown"}
+    return data if isinstance(data, dict) else {"available": False, "reason": "unknown"}
+
+
+def _system_resources_payload(state_dir: Path) -> dict:
+    # A short explicit sample works reliably across request worker threads.
+    cpu = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage(str(Path(state_dir).resolve()))
+    return {
+        "cpu": {"percent": cpu},
+        "memory": {
+            "percent": memory.percent,
+            "used": memory.total - memory.available,
+            "total": memory.total,
+        },
+        "disk": {"percent": disk.percent, "used": disk.used, "total": disk.total},
+    }
+
+
+def _run_stats_payload(
+    database: BaseStateDatabase,
+    hours: int,
+    workflow_keys: set[str] | None = None,
+) -> dict:
+    since = (
+        datetime.now().astimezone() - timedelta(hours=hours)
+    ).isoformat(timespec="milliseconds")
+    counts = database.task_status_counts(since, workflow_keys)
+    return {
+        "window_hours": hours,
+        "success": counts.get("SUCCESS", 0),
+        "running": counts.get("RUNNING", 0),
+        "failed": counts.get("FAILED", 0),
+        "skipped": counts.get("SKIPPED", 0),
+    }
+
+
+def create_app(
+    *,
+    database_path="var/scheduler.db",
+    database_config=None,
+    database=None,
+    state_dir=None,
+    logs_path="var/logs",
+    start_scheduler: bool = True,
+    allow_insecure_remote_login: bool = False,
+    language: str = "zh-CN",
+    notifier_config_path=None,
+    satellite_manager=None,
+    satellite_url: str = "",
+    satellite_port: int = 7120,
+    satellite_fingerprint: str = "",
+    update_config: dict | None = None,
+    update_host: str = "",
+    update_port: int = 0,
+    maintenance_config: dict | None = None,
+) -> Flask:
+    if language not in {"zh-CN", "en"}:
+        raise ValueError("language must be 'zh-CN' or 'en'")
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+    app.config["DEFAULT_LANGUAGE"] = language
+    if database is None:
+        database = create_state_database(
+            database_config if database_config is not None else database_path
+        )
+    if state_dir is None:
+        state_dir = getattr(
+            database, "state_dir", Path(database_path).resolve().parent
+        )
+    state_dir = Path(state_dir)
+    for stored in database.list_workflows():
+        migrated, changed = migrate_legacy_env(stored["definition"])
+        if changed:
+            database.update_workflow(
+                stored["workflow_key"], stored["name"], migrated
+            )
+    registry = WorkflowRegistry(database)
+    auth = AuthService(database)
+    account_service = AccountService(database)
+    logs = TaskLogManager(logs_path)
+    notifier_var_dir = state_dir.resolve()
+    notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
+    executions = ExecutionService(
+        database, registry, logs, notifier=notifier, satellite_manager=satellite_manager
+    )
+    schedules = ScheduleService(database, registry, executions)
+    update_service = UpdateService(
+        config=update_config or {},
+        database=database,
+        executions=executions,
+        schedules=schedules,
+        satellite_manager=satellite_manager,
+        root=repo_root(),
+        verify_host=update_host,
+        verify_port=update_port,
+    )
+    executions.update_service = update_service
+    if start_scheduler:
+        executions.recover_orphaned_runs()
+        schedules.start()
+        admin_password = ensure_admin_account(database)
+        if admin_password:
+            print(
+                f"created admin account 'admin', one-time password: {admin_password}",
+                flush=True,
+            )
+        maintenance = dict(maintenance_config or {})
+        if maintenance.get("enabled", True):
+            archive_service = MaintenanceService(
+                database,
+                retention_days=int(
+                    maintenance.get("retention_days", DEFAULT_RETENTION_DAYS)
+                ),
+                batch_size=int(maintenance.get("batch_size", DEFAULT_BATCH_SIZE)),
+            )
+
+            def archive_old_runs() -> None:
+                result = archive_service.archive()
+                if result["runs"]:
+                    print(
+                        f"archived {result['runs']} run(s), "
+                        f"{result['tasks']} task record(s)",
+                        flush=True,
+                    )
+
+            schedules.scheduler.add_job(
+                archive_old_runs,
+                "cron",
+                hour=int(maintenance.get("hour", 3)),
+                minute=int(maintenance.get("minute", 15)),
+                id="dagrunner-maintenance-archive",
+                replace_existing=True,
+            )
+    update_service.recover()
+
+    app.extensions["state_database"] = database
+    app.extensions["workflow_registry"] = registry
+    app.extensions["auth_service"] = auth
+    app.extensions["account_service"] = account_service
+    app.extensions["execution_service"] = executions
+    app.extensions["schedule_service"] = schedules
+    app.extensions["satellite_manager"] = satellite_manager
+    app.extensions["update_service"] = update_service
+
+    # /health is the watchdog probe and must stay reachable without a session.
+    public_endpoints = {"static", "login_page", "api_login", "health"}
+
+    @app.before_request
+    def require_login():
+        requested_language = request.headers.get("X-DAGRunner-Language", "")
+        g.language = (
+            requested_language
+            if requested_language in {"zh-CN", "en"}
+            else language
+        )
+        if request.endpoint in public_endpoints:
+            return None
+        token = request.cookies.get(SESSION_COOKIE)
+        context = auth.context(token)
+        if context:
+            g.current_user = context["username"]
+            g.is_admin = account_service.is_admin(g.current_user)
+            g.unrestricted = context["unrestricted"]
+            g.permissions = context["permissions"]
+            return None
+        return_to = (
+            "/"
+            if request.path.startswith("/api/") or request.method != "GET"
+            else request.full_path.rstrip("?")
+        )
+        login_url = url_for(
+            "login_page",
+            next=return_to,
+        )
+        if request.path.startswith("/api/") and request.headers.get(
+            "Sec-Fetch-Mode"
+        ) != "navigate":
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": _localized_error("登录已失效，请重新登录", g.language),
+                    "login_url": login_url,
+                }
+            ), 401
+        return redirect(login_url)
+
+    @app.after_request
+    def prevent_private_response_caching(response):
+        if request.endpoint != "static":
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.endpoint == "login_page":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                "form-action 'self'"
+            )
+        return response
+
+    @app.get("/login")
+    def login_page():
+        if auth.context(request.cookies.get(SESSION_COOKIE)):
+            return redirect(_safe_next(request.args.get("next")))
+        return render_template(
+            "login.html",
+            next_url=_safe_next(request.args.get("next")),
+            allow_insecure_remote_login=allow_insecure_remote_login,
+            default_language=language,
+        )
+
+    @app.post("/api/auth/login")
+    def api_login():
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get("username", "")).strip()
+        password_hash = str(payload.get("password_hash", ""))
+        ip_address = request.remote_addr or "unknown"
+        result = auth.login(username, password_hash, ip_address)
+        if result.status == "blocked":
+            response = jsonify(
+                {
+                    "ok": False,
+                    "error": _localized_error(
+                        "登录失败次数过多，请在 10 分钟后重试", g.language
+                    ),
+                    "retry_after": result.retry_after,
+                }
+            )
+            response.status_code = 429
+            response.headers["Retry-After"] = str(result.retry_after)
+            return response
+        if result.status != "success":
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": _localized_error("账号或密码错误", g.language),
+                    "remaining_attempts": result.remaining_attempts,
+                }
+            ), 401
+        assert result.token is not None and result.expires_at is not None
+        response = jsonify(
+            {
+                "ok": True,
+                "username": username,
+                "redirect": _safe_next(payload.get("next")),
+                "expires_in": SESSION_HOURS * 3600,
+            }
+        )
+        response.set_cookie(
+            SESSION_COOKIE,
+            result.token,
+            max_age=SESSION_HOURS * 3600,
+            expires=result.expires_at,
+            httponly=True,
+            secure=_secure_cookie_enabled(allow_insecure_remote_login),
+            samesite="Strict",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/auth/logout")
+    def api_logout():
+        auth.logout(request.cookies.get(SESSION_COOKIE))
+        response = jsonify({"ok": True, "redirect": url_for("login_page")})
+        response.delete_cookie(
+            SESSION_COOKIE,
+            path="/",
+            httponly=True,
+            secure=_secure_cookie_enabled(allow_insecure_remote_login),
+            samesite="Strict",
+        )
+        return response
+
+    @app.get("/api/auth/me")
+    def auth_me():
+        return jsonify(
+            {
+                "username": g.current_user,
+                "is_admin": g.is_admin,
+                "unrestricted": g.unrestricted,
+                "workflows": [
+                    {"key": key, "permission": permission}
+                    for key, permission in sorted(g.permissions.items())
+                ],
+            }
+        )
+
+    @app.post("/api/auth/change-password")
+    def api_change_password():
+        payload = request.get_json(silent=True) or {}
+        old_hash = str(payload.get("old_password_hash", ""))
+        new_password = str(payload.get("new_password", ""))
+        if not valid_client_hash(old_hash):
+            raise ServiceError("当前密码不正确")
+        if len(new_password) < 16:
+            raise ServiceError("password must contain at least 16 characters")
+        if not verify_password(database, g.current_user, old_hash):
+            raise ServiceError("当前密码不正确")
+        store_password_hash(database, g.current_user, client_password_hash(new_password))
+        return jsonify({"ok": True, "redirect": url_for("login_page")})
+
+    @app.get("/api/accounts")
+    def list_accounts():
+        _require_admin()
+        return jsonify({"accounts": account_service.list_accounts()})
+
+    @app.post("/api/accounts")
+    def create_account():
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get("username", "")).strip()
+        password = str(payload.get("password", ""))
+        unrestricted = bool(payload.get("unrestricted", False))
+        enabled = bool(payload.get("enabled", True))
+        grants = _account_workflow_grants(payload.get("workflows"))
+        for key in grants:
+            if database.get_workflow(key) is None:
+                raise ServiceError(f"workflow not found: {key}")
+        try:
+            account_service.create_account(
+                username, password, unrestricted=unrestricted, enabled=enabled
+            )
+        except (AccountError, ValueError) as exc:
+            raise ServiceError(str(exc)) from exc
+        try:
+            account_service.set_grants(username, grants)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True}), 201
+
+    @app.put("/api/accounts/<username>")
+    def update_account(username: str):
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        enabled = payload.get("enabled")
+        unrestricted = payload.get("unrestricted")
+        grants = (
+            _account_workflow_grants(payload.get("workflows"))
+            if "workflows" in payload
+            else None
+        )
+        if grants:
+            for key in grants:
+                if database.get_workflow(key) is None:
+                    raise ServiceError(f"workflow not found: {key}")
+        try:
+            account_service.update_account(
+                username,
+                enabled=None if enabled is None else bool(enabled),
+                unrestricted=None if unrestricted is None else bool(unrestricted),
+                workflows=grants,
+            )
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.delete("/api/accounts/<username>")
+    def delete_account(username: str):
+        _require_admin()
+        if username == g.current_user:
+            raise ServiceError("不能删除当前登录的 admin 账号")
+        try:
+            account_service.delete_account(username)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.post("/api/accounts/<username>/password")
+    def reset_account_password(username: str):
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        password = str(payload.get("password", ""))
+        if len(password) < 16:
+            raise ServiceError("password must contain at least 16 characters")
+        try:
+            account_service.reset_password(username, password)
+        except AccountError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.get("/")
+    def index():
+        return render_template(
+            "index.html",
+            username=g.current_user,
+            is_admin=g.is_admin,
+            can_create=account_service.can_create(g.current_user),
+            allow_insecure_remote_login=allow_insecure_remote_login,
+            default_language=language,
+        )
+
+    @app.get("/health")
+    def health():
+        return jsonify(
+            {
+                "ok": True,
+                "version": __version__,
+                "scheduler_running": schedules.scheduler.running,
+                "db_ok": database.ping(),
+                "active_runs": len(executions.active_run_ids()),
+                "update": {
+                    "active": update_service.active,
+                    "state": update_service.status()["state"],
+                },
+            }
+        )
+
+    @app.get("/api/notifier")
+    def notifier_settings():
+        _require_admin()
+        try:
+            email = load_email_config(
+                notifier_config_path, var_dir=notifier_var_dir
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        if email is None:
+            return jsonify(
+                {
+                    "email": {
+                        "configured": False,
+                        "host": "",
+                        "port": 465,
+                        "username": "",
+                        "has_password": False,
+                        "from": "",
+                        "security": "ssl",
+                        "timeout": 10,
+                        "subject_prefix": "[DAG Runner]",
+                    }
+                }
+            )
+        security = "ssl" if email.use_ssl else "starttls" if email.starttls else "plain"
+        return jsonify(
+            {
+                "email": {
+                    "configured": True,
+                    "host": email.host,
+                    "port": email.port,
+                    "username": email.username or "",
+                    "has_password": bool(email.password),
+                    "from": email.sender,
+                    "security": security,
+                    "timeout": email.timeout,
+                    "subject_prefix": email.subject_prefix,
+                }
+            }
+        )
+
+    @app.put("/api/notifier")
+    def update_notifier_settings():
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        email = payload.get("email")
+        if not isinstance(email, dict):
+            raise ServiceError("email notifier settings must be a mapping")
+        security = email.get("security", "ssl")
+        if security not in {"ssl", "starttls", "plain"}:
+            raise ServiceError("email security must be ssl, starttls, or plain")
+        try:
+            current = load_email_config(
+                notifier_config_path, var_dir=notifier_var_dir
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        password = email.get("password", "")
+        if password == "" and current is not None:
+            password = current.password or ""
+        try:
+            saved = save_email_config(
+                {
+                    "host": email.get("host"),
+                    "port": email.get("port"),
+                    "username": email.get("username", ""),
+                    "password": password,
+                    "from": email.get("from"),
+                    "use_ssl": security == "ssl",
+                    "starttls": security == "starttls",
+                    "timeout": email.get("timeout", 10),
+                    "subject_prefix": email.get("subject_prefix", "[DAG Runner]"),
+                },
+                notifier_config_path,
+                var_dir=notifier_var_dir,
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        executions.notifier = saved
+        return jsonify({"ok": True})
+
+    @app.get("/api/satellites")
+    def list_satellites():
+        _require_admin()
+        return jsonify(
+            {
+                "satellites": _satellites_payload(database),
+                "enabled": satellite_manager is not None,
+            }
+        )
+
+    @app.put("/api/satellites/<alias>")
+    def upsert_satellite(alias: str):
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        errors = _satellite_field_errors(payload, alias)
+        if errors:
+            raise ServiceError("卫星配置校验失败", field_errors=errors)
+        existing = database.get_satellite(alias)
+        token = str(payload.get("token", "") or "").strip()
+        if bool(payload.get("generate_token")):
+            token = secrets.token_urlsafe(24)
+            returned_token = token
+        elif not token and existing is None:
+            token = secrets.token_urlsafe(24)
+            returned_token = token
+        else:
+            if not token and existing is not None:
+                token = existing.token
+            returned_token = None
+        database.upsert_satellite(
+            SatelliteConfig(
+                alias=alias,
+                name=str(payload.get("name", "") or "").strip(),
+                mode=str(payload.get("mode", "auto")),
+                url=str(payload.get("url", "") or "").strip(),
+                token=token,
+                host_key_policy=str(payload.get("host_key_policy", "accept-new")),
+                cert_fingerprint=str(payload.get("cert_fingerprint", "") or "")
+                .strip()
+                .lower(),
+            )
+        )
+        return jsonify({"ok": True, "token": returned_token})
+
+    @app.delete("/api/satellites/<alias>")
+    def delete_satellite(alias: str):
+        _require_admin()
+        used = database.workflows_using_runner(alias)
+        if used:
+            raise ServiceError(f"卫星被占用，需先解除工作流中的绑定：{', '.join(used)}")
+        try:
+            database.delete_satellite(alias)
+        except KeyError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True})
+
+    @app.post("/api/satellites/<alias>/test")
+    def test_satellite(alias: str):
+        _require_admin()
+        manager = app.extensions.get("satellite_manager")
+        if manager is None:
+            return jsonify(
+                {"ok": True, "reachable": False, "error_message": "卫星服务未启用"}
+            )
+        try:
+            result = manager.test_connection(alias)
+        except SatelliteError as exc:
+            raise ServiceError(str(exc)) from exc
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/satellites/<alias>/config")
+    def satellite_config(alias: str):
+        _require_admin()
+        config = database.get_satellite(alias)
+        if config is None:
+            raise ServiceError(f"卫星不存在：{alias}")
+        if satellite_url:
+            master_url = satellite_url
+        else:
+            host = request.host.rsplit(":", 1)[0] if ":" in request.host else request.host
+            master_url = f"https://{host}:{satellite_port}"
+        lines = [
+            "# DAG Runner 卫星版配置",
+            "satellite:",
+            f"  alias: {config.alias}",
+            f"  master_url: {master_url}",
+            f'  token: "{config.token}"',
+            f"  mode: {config.mode}",
+            "  listen_host: 0.0.0.0",
+            "  listen_port: 7121",
+            "  cert: var/satellite-certs/cert.pem",
+            "  key: var/satellite-certs/key.pem",
+            f"  host_key_policy: {config.host_key_policy}",
+            f'  master_cert_fingerprint: "{satellite_fingerprint}"',
+            '  workdir: ""',
+            "  log_dir: var/satellite-logs",
+        ]
+        text = "\n".join(lines) + "\n"
+        return Response(
+            text,
+            mimetype="text/yaml",
+            headers={
+                "Content-Disposition": f"attachment; filename=satellite-{config.alias}.yaml"
+            },
+        )
+
+    @app.get("/api/system/resources")
+    def api_system_resources():
+        return jsonify(_system_resources_payload(state_dir))
+
+    @app.get("/api/update/status")
+    def update_status():
+        _require_admin()
+        return jsonify(update_service.status())
+
+    @app.post("/api/update/check")
+    def update_check():
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(
+                update_service.check(
+                    str(payload.get("target", "")), str(payload.get("source", ""))
+                )
+            )
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+
+    @app.post("/api/update")
+    def update_apply():
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        target = str(payload.get("target", "")).strip()
+        source = str(payload.get("source", ""))
+        if source == "branch":
+            try:
+                result = update_service.begin_branch(target)
+            except UpdateError as exc:
+                raise ServiceError(str(exc)) from exc
+            _schedule_restart()
+            return jsonify({"ok": True, "restarting": True, "branch": True, **result})
+        if not target:
+            raise ServiceError("缺少目标版本")
+        try:
+            checked = update_service.check(target, source)
+            staged = update_service.begin(checked["target"], source)
+            prepared = update_service.prepare()
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+        if prepared["state"] != "prepared":
+            update_service.abort()
+            return jsonify(
+                {
+                    "ok": False,
+                    "state": prepared["state"],
+                    "satellites": prepared["satellites"],
+                    "error": "部分卫星准备失败，已中止",
+                }
+            )
+        try:
+            update_service.commit()
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+        _schedule_restart()
+        return jsonify(
+            {
+                "ok": True,
+                "restarting": True,
+                "version": staged["version"],
+                "satellites": prepared["satellites"],
+            }
+        )
+
+    @app.post("/api/update/abort")
+    def update_abort():
+        _require_admin()
+        return jsonify(update_service.abort())
+
+    @app.post("/api/update/rollback")
+    def update_rollback():
+        _require_admin()
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = update_service.rollback(str(payload.get("version", "")))
+        except UpdateError as exc:
+            raise ServiceError(str(exc)) from exc
+        _schedule_restart()
+        return jsonify(result)
+
+    @app.get("/api/system/overview")
+    def api_system_overview():
+        is_admin = getattr(g, "is_admin", False)
+        return jsonify(
+            resources=_system_resources_payload(state_dir),
+            satellites=_satellites_payload(database) if is_admin else [],
+            satellite_enabled=satellite_manager is not None and is_admin,
+            version=__version__,
+            update=update_service.status() if is_admin else {},
+        )
+
+    @app.get("/api/workflows")
+    def workflows():
+        registry.refresh()
+        last_run_times = database.latest_run_times()
+        schedule_rows = {
+            row["workflow_name"]: row for row in database.list_schedules()
+        }
+        visible = _visible_workflow_keys()
+        result = []
+        for name, workflow in sorted(registry.workflows.items()):
+            if visible is not None and name not in visible:
+                continue
+            schedule = schedule_rows.get(name)
+            stored_crons = (
+                decode_cron_expressions(schedule["cron_expression"])
+                if schedule
+                else ()
+            )
+            schedule_entries = schedules.schedule_entries(name, stored_crons)
+            serialized_entries = [
+                {
+                    "cron": entry["cron"],
+                    "next_run_time": (
+                        entry["next_run_time"].isoformat()
+                        if entry["next_run_time"]
+                        else None
+                    ),
+                }
+                for entry in schedule_entries
+            ]
+            next_entry = min(
+                (entry for entry in serialized_entries if entry["next_run_time"]),
+                key=lambda entry: entry["next_run_time"],
+                default=None,
+            )
+            displayed_entry = next_entry or (
+                serialized_entries[0] if serialized_entries else None
+            )
+            result.append(
+                {
+                    "name": name,
+                    "db_id": registry.rows[name]["id"],
+                    "permission": _current_permission(name) or "read",
+                    "runner": workflow.runner or registry.rows[name]["runner"] or "local",
+                    "runner_locations": _runner_locations(workflow),
+                    "description": workflow.description,
+                    "last_run_time": last_run_times.get(name),
+                    "task_count": len(workflow.tasks),
+                    "notification": {
+                        "email": {
+                            "send_on": workflow.email_notification.send_on,
+                            "to": list(workflow.email_notification.recipients),
+                        }
+                    },
+                    "tasks": [
+                        {
+                            "name": task.name,
+                            "description": task.description,
+                            "depends": list(task.depends),
+                            "enabled": task.enabled,
+                            "command": _command_text(task.command, task.args),
+                            "type": task.task_type,
+                            "success": list(task.success),
+                            "failure": list(task.failure),
+                            "runner": workflow.task_runner(task),
+                        }
+                        for task in workflow.tasks.values()
+                    ],
+                    "schedule": {
+                        "cron": displayed_entry["cron"] if displayed_entry else "",
+                        "crons": list(stored_crons),
+                        "entries": serialized_entries,
+                        "timezone": schedule["timezone"] if schedule else "Asia/Shanghai",
+                        "enabled": bool(schedule["enabled"]) if schedule else False,
+                        "next_run_time": (
+                            next_entry["next_run_time"] if next_entry else None
+                        ),
+                    },
+                }
+            )
+        visible_errors = (
+            registry.errors
+            if visible is None
+            else {
+                name: error
+                for name, error in registry.errors.items()
+                if name in visible
+            }
+        )
+        return jsonify({"workflows": result, "config_errors": visible_errors})
+
+    @app.post("/api/workflows/import")
+    def import_workflow():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            raise ServiceError("请选择 YAML 文件")
+        try:
+            definition = uploaded.read().decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ServiceError("YAML 文件必须使用 UTF-8 编码") from exc
+        fallback_name = uploaded.filename.rsplit(".", 1)[0]
+        definition, _ = _unique_import_definition(
+            definition, fallback_name, registry
+        )
+        parsed = Workflow.from_yaml(definition, fallback_name=fallback_name)
+        display_name = (
+            str(request.form.get("name", "")).strip()
+            or parsed.description.strip()
+            or parsed.name
+        )
+        requested_id = str(request.form.get("workflow_id", "")).strip() or None
+        if requested_id is not None and not _HASH_WORKFLOW_ID.fullmatch(requested_id):
+            raise ServiceError("invalid proposed workflow ID")
+        # The runner is kept as-is: a workflow may reference a satellite that is
+        # not configured yet, and silently resetting it to 本机 would lose data.
+        runner = str(request.form.get("runner", "local") or "local").strip() or "local"
+        definition = _apply_runner_to_definition(definition, runner)
+        try:
+            row = database.create_workflow(display_name, definition, requested_id)
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        workflow_name = row["workflow_key"]
+        if not g.is_admin and not g.unrestricted:
+            database.set_user_workflow(g.current_user, workflow_name, "edit")
+        if runner != "local":
+            database.set_workflow_runner(workflow_name, runner)
+        registry.refresh()
+        schedule = parsed.schedule
+        try:
+            schedules.update(
+                workflow_name,
+                schedule.crons if schedule else [DEFAULT_SCHEDULE_CRON],
+                schedule.timezone if schedule else DEFAULT_SCHEDULE_TIMEZONE,
+                False,
+            )
+        except Exception:
+            database.delete_workflow(workflow_name)
+            registry.refresh()
+            raise
+        return jsonify({"ok": True, "id": workflow_name, "name": display_name}), 201
+
+    @app.post("/api/workflows/import-preview")
+    def import_workflow_preview():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            raise ServiceError("请选择工作流文件")
+        try:
+            preview = _prepare_import_preview(uploaded.filename, uploaded.read())
+        except UnicodeDecodeError as exc:
+            raise ServiceError(
+                "工作流文件编码无法识别（请使用 UTF-8 或 UTF-16）"
+            ) from exc
+        definition, replacements = _unique_import_definition(
+            str(preview["definition"]), Path(str(preview["filename"])).stem, registry
+        )
+        preview["definition"] = definition
+        preview["task_id_replacements"] = replacements
+        return jsonify(preview)
+
+    @app.post("/api/workflows/crontab-preview")
+    def crontab_workflow_preview():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        payload = request.get_json(silent=True) or {}
+        line = str(payload.get("line", "")).strip()
+        if not line:
+            raise ServiceError("请粘贴 crontab 任务")
+        try:
+            config, warnings = convert_crontab_line(line)
+        except ValueError as exc:
+            raise ServiceError(f"Crontab 转换失败：{exc}") from exc
+        definition = dump_workflow_yaml(config)
+        definition, replacements = _unique_import_definition(
+            definition, str(config.get("name") or "crontab"), registry
+        )
+        return jsonify({
+            "source": "crontab",
+            "source_label": "Crontab",
+            "definition": definition,
+            "warnings": warnings,
+            "filename": "dagr_crontab.yaml",
+            "task_id_replacements": replacements,
+        })
+
+    @app.get("/api/workflows/next-id")
+    def next_workflow_id():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        return jsonify({"id": database.next_workflow_key()})
+
+    @app.get("/api/workflows/example-definition")
+    def example_workflow_definition():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        example_path = (
+            Path(__file__).resolve().parent.parent
+            / "demo"
+            / "examples"
+            / "dagr_example_pipeline.yaml"
+        )
+        try:
+            definition = example_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ServiceError("示例工作流文件不可用") from exc
+        definition = _platform_example_definition(definition)
+        definition, _ = _unique_import_definition(
+            definition, example_path.stem, registry
+        )
+        return Response(definition, mimetype="application/yaml")
+
+    @app.get("/api/workflows/<workflow_name>/yaml")
+    def export_workflow_yaml(workflow_name: str):
+        _require_permission(workflow_name, "read")
+        definition = registry.definition(workflow_name)
+        return Response(
+            definition,
+            mimetype="application/yaml",
+            headers={
+                "Content-Disposition": f'attachment; filename="{workflow_name}.yaml"'
+            },
+        )
+
+    @app.get("/api/workflows/<workflow_name>/view")
+    def workflow_view(workflow_name: str):
+        _require_permission(workflow_name, "read")
+        definition = registry.definition(workflow_name)
+        workflow = registry.get(workflow_name)
+        raw = yaml.safe_load(definition)
+        return jsonify({
+            "name": workflow_name,
+            "description": workflow.description,
+            "definition": definition,
+            "runner": workflow.runner or "local",
+            "runner_locations": _runner_locations(workflow),
+            "tasks": [
+                {
+                    "name": task.name, "description": task.description,
+                    "depends": list(task.depends), "enabled": task.enabled,
+                    "type": task.task_type, "success": list(task.success),
+                    "failure": list(task.failure),
+                    "runner": workflow.task_runner(task),
+                    "code": dump_workflow_yaml({task.name: raw["tasks"][task.name]}),
+                }
+                for task in workflow.tasks.values()
+            ],
+        })
+
+    @app.put("/api/workflows/<workflow_name>")
+    def edit_workflow(workflow_name: str):
+        _require_permission(workflow_name, "edit")
+        if executions.is_workflow_active(workflow_name):
+            raise ServiceError("工作流运行中，不能编辑")
+        schedule = database.get_schedule(workflow_name)
+        if schedule and schedule["enabled"]:
+            raise ServiceError("请先下线定时，再编辑工作流")
+        payload = request.get_json(silent=True) or {}
+        definition = str(payload.get("definition", ""))
+        current = database.get_workflow(workflow_name)
+        if current is None:
+            raise ServiceError(f"workflow not found: {workflow_name}")
+        parsed = Workflow.from_yaml(
+            definition,
+            name_override=workflow_name,
+        )
+        display_name = (
+            str(payload.get("name", "")).strip()
+            or parsed.description.strip()
+            or current["name"]
+        )
+        runner = (
+            str(payload.get("runner", current["runner"] or "local") or "local").strip()
+            or "local"
+        )
+        definition = _apply_runner_to_definition(definition, runner)
+        database.update_workflow(workflow_name, display_name, definition)
+        database.update_schedule_description(workflow_name, display_name)
+        database.set_workflow_runner(workflow_name, runner)
+        registry.refresh()
+        return jsonify({"ok": True})
+
+    @app.put("/api/workflows/<workflow_name>/schedule")
+    def update_schedule(workflow_name: str):
+        _require_permission(workflow_name, "edit")
+        payload = request.get_json(silent=True) or {}
+        cron_expressions = payload.get("crons", payload.get("cron", []))
+        if isinstance(cron_expressions, str):
+            cron_expressions = [cron_expressions]
+        if not isinstance(cron_expressions, list):
+            raise ServiceError("crons must be a list")
+        timezone_name = str(payload.get("timezone", "Asia/Shanghai")).strip()
+        enabled = bool(payload.get("enabled", False))
+        schedules.update(workflow_name, cron_expressions, timezone_name, enabled)
+        return jsonify({"ok": True, "next_run_time": schedules.next_run_time(workflow_name)})
+
+    @app.put("/api/workflows/<workflow_name>/notification")
+    def update_notification(workflow_name: str):
+        _require_permission(workflow_name, "edit")
+        payload = request.get_json(silent=True) or {}
+        send_on = payload.get("send_on", "disabled")
+        recipients = payload.get("to", [])
+        current = database.get_workflow(workflow_name)
+        if current is None:
+            raise ServiceError(f"workflow not found: {workflow_name}")
+        try:
+            config = yaml.safe_load(current["definition"])
+        except yaml.YAMLError as exc:
+            raise ServiceError(f"invalid workflow YAML: {exc}") from exc
+        if not isinstance(config, dict):
+            raise ServiceError("workflow YAML must be a mapping")
+        notification = config.get("notification")
+        if notification is None:
+            notification = {}
+            config["notification"] = notification
+        if not isinstance(notification, dict):
+            raise ServiceError("workflow 'notification' must be a mapping")
+        notification["email"] = {"send_on": send_on, "to": recipients}
+        definition = dump_workflow_yaml(config)
+        Workflow.from_yaml(definition, name_override=workflow_name)
+        database.update_workflow(workflow_name, current["name"], definition)
+        registry.refresh()
+        return jsonify({"ok": True})
+
+    @app.post("/api/workflows/<workflow_name>/run")
+    def run_workflow(workflow_name: str):
+        _require_permission(workflow_name, "execute")
+        payload = request.get_json(silent=True) or {}
+        from_task = payload.get("from_task")
+        if from_task is not None and not isinstance(from_task, str):
+            raise ServiceError("from_task 必须是文本")
+        from_task = from_task.strip() if from_task else None
+        only_task = bool(payload.get("only_task", False))
+        if only_task and not from_task:
+            raise ServiceError("only_task 需要 from_task")
+        run_id = executions.start_run(
+            workflow_name,
+            from_task=from_task,
+            only_task=only_task,
+            trigger_type="manual",
+            trigger_user=g.current_user,
+        )
+        return jsonify({"ok": True, "run_id": run_id}), 202
+
+    @app.delete("/api/workflows/<workflow_name>")
+    def delete_workflow(workflow_name: str):
+        _require_permission(workflow_name, "edit")
+        if executions.is_workflow_active(workflow_name):
+            raise ServiceError("cannot delete a workflow while it is running")
+        schedules.delete(workflow_name)
+        registry.delete(workflow_name)
+        try:
+            logs.delete_workflow(workflow_name)
+        except (OSError, ValueError) as exc:
+            raise ServiceError(
+                f"workflow and run records deleted, but logs could not be removed: {exc}"
+            ) from exc
+        return jsonify({"ok": True})
+
+    @app.get("/api/runs/stats")
+    def run_stats():
+        hours = request.args.get("hours", 48, type=int)
+        if hours <= 0 or hours > 24 * 30:
+            raise ServiceError("hours 必须在 1 到 720 之间")
+        return jsonify(_run_stats_payload(database, hours, _visible_workflow_keys()))
+
+    @app.get("/api/runs")
+    def runs():
+        registry.refresh()
+        page = max(request.args.get("page", 1, type=int), 1)
+        requested_page_size = request.args.get(
+            "page_size", request.args.get("limit", 20, type=int), type=int
+        )
+        page_size = min(max(requested_page_size or 20, 1), 20)
+        workflow_query = request.args.get("workflow", "").strip()
+        status = request.args.get("status", "").strip().upper()
+        trigger_type = request.args.get("trigger", "").strip().lower()
+        tag = request.args.get("tag", "").strip()
+        if status and status not in {"RUNNING", "SUCCESS", "FAILED"}:
+            raise ServiceError(f"invalid run status filter: {status}")
+        if trigger_type and trigger_type not in {"manual", "schedule", "rerun", "resume"}:
+            raise ServiceError(f"invalid trigger filter: {trigger_type}")
+        visible_workflows = _visible_workflow_keys()
+        rows, total, page = database.search_runs(
+            page=page,
+            page_size=page_size,
+            workflow_query=workflow_query,
+            status=status,
+            trigger_type=trigger_type,
+            tag=tag,
+            workflow_keys=visible_workflows,
+        )
+        active_ids = executions.active_run_ids()
+        run_rows = []
+        for row in rows:
+            item = {**_row_dict(row), "active": row["run_id"] in active_ids}
+            item["workflow_description"] = (
+                row["workflow_description"] or row["workflow_name"]
+            )
+            # The run label reflects the environment recorded when the run
+            # started, not the workflow's current configuration.
+            item["runner"] = row["runner"] or "local"
+            stored_locations = row["runner_locations"]
+            item["runner_locations"] = (
+                json.loads(stored_locations) if stored_locations else []
+            )
+            run_rows.append(item)
+        return jsonify(
+            {
+                "runs": run_rows,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": max(1, (total + page_size - 1) // page_size),
+                },
+                "stats": _run_stats_payload(database, 48, visible_workflows),
+            }
+        )
+
+    @app.get("/api/runs/<run_id>")
+    def run_detail(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "read")
+        registry.refresh()
+        workflow = registry.workflows.get(run["workflow_name"])
+        stored = database.get_workflow(run["workflow_name"])
+        raw_tasks = yaml.safe_load(stored["definition"]).get("tasks", {}) if stored and workflow else {}
+        run_data = _row_dict(run)
+        run_data["workflow_description"] = (
+            workflow.description
+            if workflow and workflow.description
+            else run["workflow_name"]
+        )
+        tasks = []
+        graph_tasks = []
+        # Keep the table in DAG order so out-of-scope tasks stay where they belong.
+        order = workflow.topological_order() if workflow else []
+        position = {name: index for index, name in enumerate(order)}
+        rows = sorted(
+            database.task_states(run_id).values(),
+            key=lambda row: position.get(row["task_name"], len(position)),
+        )
+        for row in rows:
+            task = _row_dict(row)
+            definition = workflow.tasks.get(row["task_name"]) if workflow else None
+            snapshot = bool(row["snapshot_version"])
+            description = (
+                row["task_description"]
+                if snapshot
+                else definition.description if definition else ""
+            )
+            depends = (
+                json.loads(row["depends_json"])
+                if snapshot
+                else list(definition.depends) if definition else []
+            )
+            task["task_description"] = description or row["task_name"]
+            task["runner"] = (
+                workflow.task_runner(definition) if definition else "local"
+            )
+            tasks.append(task)
+            graph_tasks.append(
+                {
+                    "name": row["task_name"],
+                    "description": description,
+                    "depends": depends,
+                    "runner": task["runner"],
+                    "enabled": definition.enabled if definition else True,
+                    "status": row["status"],
+                    "type": row["task_type"] if snapshot else (
+                        definition.task_type if definition else "command"
+                    ),
+                    "condition_result": row["condition_result"],
+                    "handled_by": row["handled_by"],
+                    "skip_kind": row["skip_kind"],
+                    "code": dump_workflow_yaml({row["task_name"]: raw_tasks[row["task_name"]]}) if row["task_name"] in raw_tasks else None,
+                    "code_source": "current",
+                    "success": list(definition.success) if definition else [],
+                    "failure": list(definition.failure) if definition else [],
+                }
+            )
+        return jsonify({"run": run_data, "tasks": tasks, "graph_tasks": graph_tasks})
+
+    @app.post("/api/runs/<run_id>/stop")
+    def stop_run(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "execute")
+        executions.stop_run(run_id)
+        return jsonify({"ok": True})
+
+    @app.post("/api/runs/<run_id>/rerun")
+    def rerun(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "execute")
+        new_id = executions.rerun(run_id, trigger_user=g.current_user)
+        return jsonify({"ok": True, "run_id": new_id}), 202
+
+    @app.post("/api/runs/<run_id>/resume")
+    def resume(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "execute")
+        new_id = executions.resume_failed(run_id, trigger_user=g.current_user)
+        return jsonify({"ok": True, "run_id": new_id}), 202
+
+    @app.delete("/api/runs/<run_id>")
+    def delete_run(run_id: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "edit")
+        if run_id in executions.active_run_ids():
+            raise ServiceError("cannot delete a run while it is active")
+        database.delete_run(run_id)
+        try:
+            logs.delete_run(run["workflow_name"], run_id)
+        except (OSError, ValueError) as exc:
+            raise ServiceError(f"run record deleted, but logs could not be removed: {exc}") from exc
+        return jsonify({"ok": True})
+
+    @app.get("/api/runs/<run_id>/tasks/<task_name>/log")
+    def task_log(run_id: str, task_name: str):
+        run = database.get_run(run_id)
+        if run is None:
+            raise ServiceError(f"run not found: {run_id}")
+        _require_permission(run["workflow_name"], "read")
+        task = database.get_task(run_id, task_name)
+        if task is None:
+            raise ServiceError(f"task run not found: {run_id}/{task_name}")
+        if not task["log_file"]:
+            raise ServiceError("task has no log file")
+        if "download" in request.args:
+            run = database.get_run(run_id)
+            text = TaskLogManager.read(task["log_file"])
+            # Prepend a UTF-8 BOM so Windows Notepad reliably detects the
+            # encoding instead of falling back to the local ANSI codepage.
+            if not text.startswith("\ufeff"):
+                text = "\ufeff" + text
+            response = Response(text, mimetype="text/plain")
+            response.headers["Content-Disposition"] = (
+                "attachment; filename*=UTF-8''"
+                f"{quote(_log_download_filename(task, run['start_time'] if run else None))}"
+            )
+            return response
+        offset = request.args.get("offset", default=None, type=int)
+        limit = request.args.get("limit", default=None, type=int)
+        if offset is None and limit is None:
+            return Response(TaskLogManager.read(task["log_file"]), mimetype="text/plain")
+        lines = TaskLogManager.read_lines(task["log_file"])
+        offset = max(0, offset or 0)
+        limit = min(max(1, limit or 200), 1000)
+        return jsonify(
+            {
+                "run_id": run_id,
+                "task_name": task_name,
+                "start_time": task["start_time"],
+                "offset": offset,
+                "limit": limit,
+                "total": len(lines),
+                "lines": lines[offset : offset + limit],
+                "has_more": offset + limit < len(lines),
+            }
+        )
+
+    @app.post("/api/workflows/editor-preview")
+    def editor_preview():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise ServiceError("请求必须是 JSON 对象")
+        name = payload.get("workflow_name")
+        if name is not None and not isinstance(name, str):
+            raise ServiceError("工作流 ID 必须是文本")
+        definition = payload.get("definition")
+        try:
+            if "add" in payload:
+                addition = payload["add"]
+                if not isinstance(addition, dict):
+                    raise ServiceError("新增节点参数必须是对象")
+                return jsonify(extend_definition(
+                    definition, addition.get("parent"), addition.get("kind"),
+                    addition.get("branch"), name,
+                ))
+            return jsonify(preview_definition(definition, name))
+        except (TypeError, RecursionError) as exc:
+            raise ServiceError("工作流字段类型错误或 YAML 嵌套过深") from exc
+
+    @app.errorhandler(ServiceError)
+    @app.errorhandler(WorkflowError)
+    def expected_error(exc):
+        payload = {"ok": False, "error": _localized_error(str(exc), g.language)}
+        field_errors = getattr(exc, "field_errors", None)
+        if field_errors:
+            payload["field_errors"] = field_errors
+        return jsonify(payload), 400
+
+    @app.errorhandler(AccessDenied)
+    def access_denied(exc):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": _localized_error(str(exc), g.language),
+                }
+            ),
+            exc.status,
+        )
+
+    if start_scheduler:
+        atexit.register(_shutdown, schedules, executions)
+    return app
+
+
+def _shutdown(schedules: ScheduleService, executions: ExecutionService) -> None:
+    schedules.shutdown()
+    executions.shutdown()
+
+
+def _schedule_restart(delay: float = 1.5) -> None:
+    """Exit the process after the HTTP response has been flushed.
+
+    The restart watchdog is already running detached; exiting releases the port
+    so it can switch ``var/current`` and start the new version.
+    """
+    import threading
+
+    def _exit() -> None:
+        os._exit(0)
+
+    threading.Timer(delay, _exit).start()
+
+
+def _platform_example_definition(definition: str) -> str:
+    """Trim the bundled example to this platform and expand the demo commands."""
+    try:
+        data = yaml.safe_load(definition)
+    except yaml.YAMLError:
+        return definition
+    if not isinstance(data, dict):
+        return definition
+    data["setup"] = demo_setup()
+    default_shell = "cmd" if os.name == "nt" else "bash"
+    tasks = data.get("tasks")
+    if isinstance(tasks, dict):
+        for name, task in list(tasks.items()):
+            if not isinstance(task, dict) or "command" not in task:
+                continue
+            command = demo_command(
+                str(task.get("description") or ""),
+                _example_python_command(task["command"]),
+            )
+            # Rebuild so the shell key sits right before command in the YAML.
+            rebuilt = {}
+            for key, value in task.items():
+                if key == "command":
+                    rebuilt["shell"] = default_shell
+                rebuilt[key] = value
+            rebuilt["command"] = command
+            tasks[name] = rebuilt
+        # Keep the quick-start demo short: only the first two tasks.
+        kept = list(tasks)[:2]
+        data["tasks"] = {name: tasks[name] for name in kept}
+    return dump_workflow_yaml(data)
+
+
+def _example_python_command(command: object) -> str:
+    """Keep the python step of an example command; other lines are regenerated."""
+    if isinstance(command, str):
+        lines = [line.strip() for line in command.splitlines() if line.strip()]
+        return lines[-1] if lines else command.strip()
+    if isinstance(command, (list, tuple)):
+        return " ".join(str(item) for item in command)
+    return str(command)
+
+
+def _unique_import_definition(
+    definition: str, fallback_name: str, registry: WorkflowRegistry
+) -> tuple[str, dict[str, str]]:
+    """Validate an import and namespace colliding task IDs with hash IDs."""
+    Workflow.from_yaml(definition, fallback_name=fallback_name)
+    registry.refresh()
+    unavailable = {
+        task_id
+        for workflow in registry.workflows.values()
+        for task_id in workflow.tasks
+    }
+    rewritten, replacements = uniquify_task_ids(definition, unavailable)
+    if replacements:
+        Workflow.from_yaml(rewritten, fallback_name=fallback_name)
+    return rewritten, replacements
+
+
+def _parse_workflow_xml(
+    content: str | bytes, text: str | None = None
+) -> ElementTree.Element | None:
+    """Parse workflow XML, letting expat detect the byte-level encoding."""
+    if isinstance(content, bytes):
+        try:
+            return ElementTree.fromstring(content)
+        except (ElementTree.ParseError, ValueError):
+            if text is None:
+                return None
+        source = text
+    else:
+        source = content
+    stripped = source.lstrip()
+    if not stripped.startswith("<"):
+        return None
+    # ElementTree rejects str input that still carries an encoding declaration.
+    cleaned = re.sub(
+        r"(<\?xml\b[^>]*?)\s+encoding\s*=\s*(['\"])[^'\"]*\2",
+        r"\1",
+        stripped,
+        count=1,
+    )
+    try:
+        return ElementTree.fromstring(cleaned)
+    except (ElementTree.ParseError, ValueError):
+        return None
+
+
+def _prepare_import_preview(filename: str, content: str | bytes) -> dict[str, object]:
+    """Detect an import source and convert external exports entirely in memory.
+
+    ``content`` may be raw upload bytes (preferred, so XML keeps its own
+    encoding information) or an already-decoded string.
+    """
+    if isinstance(content, bytes):
+        text = decode_bytes(content, strict=True)
+    else:
+        text = content
+    stripped = text.strip()
+    if not stripped:
+        raise ServiceError("工作流文件不能为空")
+
+    root = _parse_workflow_xml(content, text)
+    if root is not None:
+        if root.tag != f"{{{WINDOWS_TASK_NAMESPACE}}}Task":
+            raise ServiceError("无法识别的 XML 工作流格式")
+        try:
+            configs, warnings = convert_windows_task_scheduler_definition(
+                root,
+                Path(filename).stem,
+            )
+        except ValueError as exc:
+            raise ServiceError(f"Windows Task Scheduler 转换失败：{exc}") from exc
+        return {
+            "source": SOURCE_WINDOWS_TASK_SCHEDULER,
+            "source_label": "Windows Task Scheduler",
+            "definition": dump_workflow_yaml(configs[0]),
+            "warnings": warnings,
+            "filename": f"dagr_{Path(filename).stem}.yaml",
+        }
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    definitions = payload if isinstance(payload, list) else [payload]
+    is_dolphinscheduler = bool(definitions) and all(
+        isinstance(item, dict)
+        and "processDefinition" in item
+        and "taskDefinitionList" in item
+        for item in definitions
+    )
+    if is_dolphinscheduler:
+        if len(definitions) != 1:
+            raise ServiceError(
+                "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入"
+            )
+        try:
+            config, warnings = convert_dolphinscheduler_definition(definitions[0])
+        except ValueError as exc:
+            raise ServiceError(f"DolphinScheduler 转换失败：{exc}") from exc
+        return {
+            "source": SOURCE_DOLPHINSCHEDULER,
+            "source_label": "DolphinScheduler",
+            "definition": dump_workflow_yaml(config),
+            "warnings": warnings,
+            "filename": f"dagr_{Path(filename).stem}.yaml",
+        }
+
+    try:
+        Workflow.from_yaml(text, fallback_name=Path(filename).stem)
+    except WorkflowError as exc:
+        raise ServiceError(f"无法识别工作流来源：{exc}") from exc
+    return {
+        "source": "dag-runner",
+        "source_label": "DAG Runner YAML",
+        "definition": text,
+        "warnings": [],
+        "filename": filename,
+    }
+
+
+def _row_dict(row) -> dict:
+    return {key: row[key] for key in row.keys()}
+
+
+def _command_text(command, args) -> str:
+    if command is None:
+        return "条件分支"
+    base = command if isinstance(command, str) else " ".join(command)
+    return " ".join([base, *args]).strip()
+
+
+def _safe_next(value) -> str:
+    candidate = str(value or "/")
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not candidate.startswith("/")
+        or candidate.startswith("//")
+        or "\\" in candidate
+        or any(ord(character) < 32 for character in candidate)
+        or candidate.startswith("/login")
+        or candidate.startswith("/api/auth/")
+    ):
+        return "/"
+    return candidate
+
+
+_ENGLISH_ERRORS = {
+    "登录已失效，请重新登录": "Your session has expired. Please sign in again",
+    "登录失败次数过多，请在 10 分钟后重试": "Too many failed sign-in attempts. Try again in 10 minutes",
+    "账号或密码错误": "Incorrect username or password",
+    "请选择 YAML 文件": "Select a YAML file",
+    "YAML 文件必须使用 UTF-8 编码": "The YAML file must use UTF-8 encoding",
+    "请选择工作流文件": "Select a workflow file",
+    "工作流文件必须使用 UTF-8 编码": "The workflow file must use UTF-8 encoding",
+    "工作流文件编码无法识别（请使用 UTF-8 或 UTF-16）": "Could not detect the workflow file encoding (use UTF-8 or UTF-16)",
+    "示例工作流文件不可用": "The example workflow is unavailable",
+    "工作流运行中，不能编辑": "A running workflow cannot be edited",
+    "请先下线定时，再编辑工作流": "Disable the schedule before editing the workflow",
+    "工作流文件不能为空": "The workflow file cannot be empty",
+    "无法识别的 XML 工作流格式": "Unrecognized XML workflow format",
+    "DolphinScheduler 导出文件包含多个工作流，请拆分后逐个导入": "The DolphinScheduler export contains multiple workflows; split it and import each workflow separately",
+    "请粘贴 crontab 任务": "Paste a crontab task",
+    "from_task 必须是文本": "from_task must be a string",
+    "hours 必须在 1 到 720 之间": "hours must be between 1 and 720",
+    "only_task 需要 from_task": "only_task needs from_task",
+    "workflow not found": "Workflow not found",
+    "permission denied": "You do not have permission to perform this action",
+    "admin only": "This action requires the admin account",
+    "当前密码不正确": "The current password is incorrect",
+    "password must contain at least 16 characters": "password must contain at least 16 characters",
+    "workflows must be a mapping": "workflows must be a mapping",
+    "不能删除当前登录的 admin 账号": "You cannot delete the admin account you are signed in with",
+    "username may contain only letters, digits, _, . and -": "username may contain only letters, digits, _, . and -",
+}
+
+_ENGLISH_ERROR_PREFIXES = {
+    "Windows Task Scheduler 转换失败：": "Windows Task Scheduler conversion failed: ",
+    "DolphinScheduler 转换失败：": "DolphinScheduler conversion failed: ",
+    "无法识别工作流来源：": "Could not detect the workflow source: ",
+    "Crontab 转换失败：": "Crontab conversion failed: ",
+    "任务不存在：": "Unknown task: ",
+    "user already exists: ": "Account already exists: ",
+    "user not found: ": "Account not found: ",
+    "workflow not found: ": "Workflow not found: ",
+}
+
+
+def _localized_error(message: str, language: str) -> str:
+    if language != "en":
+        return message
+    if message in _ENGLISH_ERRORS:
+        return _ENGLISH_ERRORS[message]
+    for prefix, translation in _ENGLISH_ERROR_PREFIXES.items():
+        if message.startswith(prefix):
+            return translation + message[len(prefix):]
+    return message
+
+
+def _satellite_field_errors(payload: dict, alias: str):
+    errors: dict[str, str] = {}
+    if not _ALIAS_PATTERN.fullmatch(alias):
+        errors["alias"] = "别名只能包含字母、数字、_ . -"
+    mode = str(payload.get("mode", "auto")).strip()
+    if mode not in ("auto", "forward", "reverse"):
+        errors["mode"] = "模式必须是 auto / forward / reverse"
+    url = str(payload.get("url", "") or "").strip()
+    if url:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            errors["url"] = "URL 必须是 https:// 开头"
+    policy = str(payload.get("host_key_policy", "accept-new")).strip()
+    if policy not in ("accept-new", "pinned"):
+        errors["host_key_policy"] = "主机密钥策略必须是 accept-new 或 pinned"
+    fingerprint = str(payload.get("cert_fingerprint", "") or "").strip()
+    if fingerprint and not re.fullmatch(r"[0-9a-fA-F]{64}", fingerprint):
+        errors["cert_fingerprint"] = "证书指纹必须是 64 位十六进制字符串"
+    return errors
+
+
+def _secure_cookie_enabled(allow_insecure_remote_login: bool = False) -> bool:
+    configured = os.getenv("DAGRUNNER_COOKIE_SECURE", "").strip().lower()
+    return request.is_secure or (
+        not allow_insecure_remote_login
+        and configured in {"1", "true", "yes", "on"}
+    )
