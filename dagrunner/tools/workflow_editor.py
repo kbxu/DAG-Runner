@@ -132,6 +132,45 @@ def extend_definition(definition, parent, kind, branch, workflow_name=None):
         # Copy the list so YAML aliases cannot mutate another branch by accident.
         tasks[parent] = dict(tasks[parent])
         tasks[parent][branch] = [*tasks[parent].get(branch, []), added]
+
+    # Keep the generated YAML readable: put the new module(s) directly under the
+    # selected module instead of appending them at the end of the file. When the
+    # selected module already has child modules, place them after the last one.
+    inserted = [(added, tasks[added])]
+    if kind == "condition":
+        inserted.extend([(success, tasks[success]), (failure, tasks[failure])])
+    inserted_names = {name for name, _ in inserted}
+
+    def references_target(node, target):
+        if not isinstance(node, dict):
+            return False
+        for field in ("depends", "success", "failure"):
+            value = node.get(field)
+            if value == target:
+                return True
+            if isinstance(value, (list, tuple)) and target in value:
+                return True
+        return False
+
+    child_keys = [
+        key
+        for key, value in tasks.items()
+        if key != parent and key not in inserted_names and references_target(value, parent)
+    ]
+    order = list(tasks.keys())
+    anchor = order.index(parent)
+    if child_keys:
+        anchor = max(anchor, max(order.index(key) for key in child_keys))
+    reordered = {}
+    for index, key in enumerate(order):
+        if key in inserted_names:
+            continue
+        reordered[key] = tasks[key]
+        if index == anchor:
+            for name, value in inserted:
+                reordered[name] = value
+    data["tasks"] = reordered
+
     definition = yaml.dump(
         data, Dumper=LiteralDumper, allow_unicode=True, sort_keys=False, width=1000
     )

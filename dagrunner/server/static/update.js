@@ -82,142 +82,105 @@ function updateSatelliteRows(satellites) {
   }).join("");
 }
 
+function branchRefText() {
+  const configured = updateStatus?.branch?.configured || {};
+  return `${configured.remote || "origin"}/${configured.name || "main"}`;
+}
+
+function updateBranchHint() {
+  const info = updateBranch;
+  if (!info || !Object.keys(info).length) {
+    return updateStatus?.branch?.available
+      ? t("正在检查远端分支…")
+      : t("分支更新不可用：{reason}", { reason: t("不是 git 仓库") });
+  }
+  if (!info.available) return t("分支更新不可用：{reason}", { reason: info.reason || "unknown" });
+  if (info.dirty) return t("工作区有未提交改动，无法更新");
+  if (Number(info.behind) > 0) {
+    return t("落后 {count} 个提交", { count: info.behind })
+      + (info.latest_subject ? ` · ${info.latest_subject}` : "")
+      + (info.remote_sha ? ` · ${info.remote_sha.slice(0, 8)}` : "");
+  }
+  return t("本地已是最新");
+}
+
+function updateReady() {
+  const info = updateBranch || {};
+  return Boolean(info.available && !info.dirty && Number(info.behind) > 0);
+}
+
 function renderUpdateModal() {
   const data = updateStatus || {};
   const current = data.current_version || "—";
-  const target = data.target_version || "";
-  const versionOptions = updateVersions
-    .map((version) => `<option value="${esc(version)}"${version === target ? " selected" : ""}>${esc(version)}</option>`)
-    .join("");
-  const sourceSelect = `
-    <label>${t("更新源")}<select id="updateSource" class="ui-select">
-      <option value=""${updateSource === "" ? " selected" : ""}>${t("自动")}</option>
-      <option value="release"${updateSource === "release" ? " selected" : ""}>GitHub Release</option>
-      <option value="git"${updateSource === "git" ? " selected" : ""}>git</option>
-      <option value="branch"${updateSource === "branch" ? " selected" : ""}>${t("git 分支")}</option>
-    </select></label>`;
+  // 其它更新入口（更新源 / 目标版本 / 发布包安装 / 回滚）已暂时从界面隐藏；
+  // 后端接口与旧逻辑仍保留，恢复时把对应 UI 加回来即可。
   openModal(t("版本与更新"), `<div class="update-panel" id="updatePanel">
     <div class="update-current">
       <span>${t("当前版本")}</span><b class="mono">v${esc(current)}</b>
       ${updateStateBadge(data.state)}
       ${data.skipped_schedules ? `<span class="form-hint">${t("更新期间跳过了 {count} 次定时触发", { count: data.skipped_schedules })}</span>` : ""}
     </div>
-    <div class="update-form">
-      ${sourceSelect}
-      <label id="updateTargetLabel">${t("目标版本")}<select id="updateTarget" class="ui-select"><option value="">${t("最新版本")}</option>${versionOptions}</select></label>
-      <div id="branchBox" class="form-hint" style="display:none"></div>
-      <button class="button ghost" type="button" onclick="checkUpdate()">${t("检查更新")}</button>
+    <div class="update-branch">
+      <span class="update-branch-label">${t("更新方式")}</span>
+      <b class="mono">git pull · ${esc(branchRefText())}</b>
     </div>
+    <div id="branchBox" class="form-hint">${updateBranchHint()}</div>
     <div class="update-satellites">${updateSatelliteRows(knownSatellites(data))}</div>
     ${data.message ? `<p class="form-hint">${esc(data.message)}</p>` : ""}
     <div class="update-actions">
-      <button class="button" type="button" onclick="applyUpdate()">${t("更新")}</button>
-      <button class="button ghost" type="button" onclick="abortUpdate()">${t("中止")}</button>
-      <button class="button ghost" type="button" onclick="rollbackUpdate()">${t("回滚")}</button>
+      <button class="button" type="button" onclick="applyUpdate()"${updateReady() ? "" : " disabled"}>${t("更新")}</button>
+      ${data.active ? `<button class="button ghost" type="button" onclick="abortUpdate()">${t("中止")}</button>` : ""}
       <button class="button ghost" type="button" onclick="closeUpdateModal()">${t("关闭")}</button>
     </div>
   </div>`, false, "compact");
-  syncBranchUi();
-}
-
-function syncBranchUi() {
-  const isBranch = updateSource === "branch";
-  const box = document.getElementById("branchBox");
-  const label = document.getElementById("updateTargetLabel");
-  const select = document.getElementById("updateTarget");
-  if (label) label.style.display = isBranch ? "none" : "";
-  if (select) select.disabled = isBranch;
-  if (!box) return;
-  if (!isBranch) {
-    box.style.display = "none";
-    return;
-  }
-  const info = updateBranch || {};
-  if (!info.available) {
-    box.textContent = t("分支更新不可用：{reason}", { reason: info.reason || "unknown" });
-  } else if (info.dirty) {
-    box.textContent = t("工作区有未提交改动，无法更新");
-  } else if (info.behind > 0) {
-    box.textContent = t("落后 {count} 个提交", { count: info.behind }) +
-      (info.latest_subject ? ` · ${info.latest_subject}` : "") +
-      (info.remote_sha ? ` · ${info.remote_sha.slice(0, 8)}` : "");
-  } else {
-    box.textContent = t("本地已是最新");
-  }
-  box.style.display = "";
 }
 
 function openUpdateSettings() {
   renderUpdateModal();
   refreshUpdateStatus();
+  checkBranchUpdate();
 }
 
 function closeUpdateModal() {
   closeModal();
 }
 
-async function checkUpdate() {
-  const source = document.getElementById("updateSource")?.value || "";
-  const target = document.getElementById("updateTarget")?.value || "";
+async function checkBranchUpdate() {
   try {
     const data = await api("/api/update/check", {
       method: "POST",
-      body: JSON.stringify({ source, target }),
+      body: JSON.stringify({ source: "branch", target: "" }),
     });
-    if (data.source === "branch") {
-      updateBranch = data.branch || {};
-      updateVersions = [];
-      updateSource = "branch";
-      updateStatus = { ...updateStatus, target_version: data.target || "" };
-      renderUpdateModal();
-      toast(updateBranch.behind > 0
-        ? t("落后 {count} 个提交", { count: updateBranch.behind })
-        : t("本地已是最新"));
-      return;
-    }
-    updateBranch = null;
-    updateVersions = data.versions || [];
-    updateSource = data.source || "";
-    updateStatus = { ...updateStatus, target_version: data.target || data.latest || "" };
-    renderUpdateModal();
-    toast(t("发现 {count} 个可用版本", { count: updateVersions.length }));
+    updateBranch = data.branch || {};
+    updateVersions = [];
+    updateSource = "branch";
+    updateStatus = { ...updateStatus, target_version: data.target || "" };
+    if (updateModalVisible()) renderUpdateModal();
+    toast(updateBranch.behind > 0
+      ? t("落后 {count} 个提交", { count: updateBranch.behind })
+      : t("本地已是最新"));
   } catch (e) {
+    updateBranch = { available: false, reason: e.message };
+    if (updateModalVisible()) renderUpdateModal();
     toast(e.message, true);
   }
 }
 
 async function applyUpdate() {
-  const source = document.getElementById("updateSource")?.value || "";
-  let target = document.getElementById("updateTarget")?.value || "";
-  let title;
-  let body;
-  if (source === "branch") {
-    target = updateStatus?.target_version || updateBranch?.remote_sha || "";
-    if (!target) {
-      toast(t("请先检查更新"), true);
-      return;
-    }
-    const ref = updateBranch?.name || "main";
-    title = t("同步 {ref} 分支？", { ref });
-    body = t("将执行 git pull --ff-only 并重启主程序；工作区必须干净，本地不能有未推送提交。");
-  } else {
-    if (!target) {
-      toast(t("请先检查更新并选择目标版本"), true);
-      return;
-    }
-    title = t("更新到 v{version}？", { version: target });
-    body = t("更新期间定时任务会跳过，已运行的任务必须已结束；主程序与在线卫星会同时重启。");
+  const target = updateStatus?.target_version || updateBranch?.remote_sha || "";
+  if (!target) {
+    toast(t("请先检查更新"), true);
+    return;
   }
-  if (!await confirmDelete(title, body)) return;
+  const ref = updateBranch?.name || updateStatus?.branch?.configured?.name || "main";
+  if (!await confirmDelete(t("同步 {ref} 分支？", { ref }), t("将执行 git pull --ff-only 并重启主程序；工作区必须干净，本地不能有未推送提交。"))) return;
   try {
     const data = await api("/api/update", {
       method: "POST",
-      body: JSON.stringify({ target, source }),
+      body: JSON.stringify({ target, source: "branch" }),
     });
     if (data.ok) {
-      toast(source === "branch"
-        ? t("正在同步分支并重启，请稍候…")
-        : t("正在重启，请稍候…"));
+      toast(t("正在同步分支并重启，请稍候…"));
       setTimeout(() => window.location.reload(), 4000);
     } else {
       toast(data.error || t("更新已中止"), true);

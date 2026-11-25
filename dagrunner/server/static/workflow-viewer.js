@@ -123,6 +123,7 @@ function renderViewerGraph() {
     graph.scrollTop = scrollTop;
     graph.scrollLeft = scrollLeft;
   }
+  if (typeof fitMaximizedCardWidth === "function") fitMaximizedCardWidth();
   document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === view.selected));
   if (view.kind === 'workflow' && !graph.dataset.blankClick) {
     graph.dataset.blankClick = '1';

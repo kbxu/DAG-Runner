@@ -557,6 +557,59 @@ document.addEventListener('mousedown', event => {
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') closeTaskRunMenu();
 });
+
+function toggleGearMenu(event) {
+  event.stopPropagation();
+  const dropdown = document.getElementById("gearDropdown");
+  const button = document.getElementById("gearButton");
+  if (!dropdown || !button) return;
+  const willOpen = dropdown.classList.contains("hidden");
+  dropdown.classList.toggle("hidden", !willOpen);
+  button.setAttribute("aria-expanded", String(willOpen));
+}
+
+function closeGearMenu() {
+  const dropdown = document.getElementById("gearDropdown");
+  const button = document.getElementById("gearButton");
+  if (!dropdown || dropdown.classList.contains("hidden")) return;
+  dropdown.classList.add("hidden");
+  if (button) button.setAttribute("aria-expanded", "false");
+}
+
+document.addEventListener("click", event => {
+  const menu = document.getElementById("gearMenu");
+  if (menu && !menu.contains(event.target)) closeGearMenu();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closeGearMenu();
+});
+
+function updateGearLanguageMeta() {
+  const meta = document.getElementById("gearLanguageMeta");
+  if (meta) meta.textContent = currentLanguage === "zh-CN" ? "English" : "中文";
+}
+
+async function openAbout() {
+  closeGearMenu();
+  try {
+    const data = await api("/api/system/overview");
+    const version = data?.version || "";
+    const rows = (data?.satellites || []).map(item => {
+      const state = item.status?.status === "online" ? "online" : item.status?.status === "error" ? "error" : "offline";
+      const label = state === "online" ? t("在线") : state === "error" ? t("异常") : t("离线");
+      const agent = item.status?.agent_version;
+      return `<div class="about-satellite-row"><span class="mono">${esc(item.alias)}</span><span class="secondary">${esc(agent ? `v${agent}` : "—")}</span><span class="satellite-status ${state}">${label}</span></div>`;
+    }).join("");
+    openModal(t("关于"), `<div class="about-panel">
+      <div class="about-brand"><img src="/static/dagrunner-logo-refined.svg" alt=""><div><strong>DAG Runner Console</strong><span class="form-hint">${t("工作流、定时计划和运行状态集中管理")}</span></div></div>
+      <div class="about-version"><span>${t("当前版本")}</span><b>${esc(version ? `v${version}` : "—")}</b></div>
+      ${rows ? `<div class="about-satellites">${rows}</div>` : ""}
+    </div>`, false, "compact");
+  } catch (e) { toast(e.message, true); }
+}
+
+updateGearLanguageMeta();
+
 async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
 
 async function openNotifierSettings() {
@@ -1249,6 +1302,46 @@ async function copyLog() {
 }
 
 let modalBackdropClosable = true;
+function resetMaximizedCard(card) {
+  card.style.width = "";
+  card.style.maxWidth = "";
+  const layout = card.querySelector(".workflow-editor-layout");
+  if (layout) layout.style.gridTemplateColumns = "";
+}
+
+// 最大化时如果示意图宽度不够，就把弹窗加宽（不超过页面宽度），
+// 让 .dag-scroll 不再出现左右滚动条。
+function fitMaximizedCardWidth() {
+  const card = document.querySelector("#modal .modal-card");
+  if (!card || !card.classList.contains("maximized")) return;
+  const layout = card.querySelector(".workflow-editor-layout");
+  const vertical = Boolean(layout?.classList.contains("workflow-editor-vertical"));
+  const limit = Math.max(320, Math.floor(window.innerWidth - 40));
+  if (card.style.width && card.getBoundingClientRect().width > limit + 1) {
+    // 视口变窄时先回到样式表基准宽度，再按内容重新适配。
+    resetMaximizedCard(card);
+  }
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const scroller = card.querySelector(".dag-scroll");
+    if (!scroller) return;
+    const overflow = scroller.scrollWidth - scroller.clientWidth;
+    if (overflow <= 1) return;
+    const rect = card.getBoundingClientRect();
+    // 先按当前网格比例记录左右两列宽度，再改卡片宽度，避免左栏跟着变宽。
+    const cols = (vertical && layout)
+      ? getComputedStyle(layout).gridTemplateColumns.split(/\s+/).filter(Boolean).map(parseFloat)
+      : [];
+    const grow = Math.min(overflow, limit - Math.round(rect.width));
+    if (grow <= 0) return;
+    const next = Math.round(rect.width + grow);
+    if (vertical && cols.length > 1) {
+      layout.style.gridTemplateColumns = `${Math.round(cols[0])}px ${Math.round(cols[1] + grow)}px`;
+    }
+    card.style.width = `${next}px`;
+    card.style.maxWidth = `${next}px`;
+  }
+}
+
 function toggleModalMaximize() {
   const card = document.querySelector("#modal .modal-card");
   if (!card) return;
@@ -1259,6 +1352,8 @@ function toggleModalMaximize() {
     button.textContent = maximized ? "⤡" : "⤢";
     button.title = t(maximized ? "还原" : "最大化");
   }
+  if (card.classList.contains("maximized")) fitMaximizedCardWidth();
+  else resetMaximizedCard(card);
 }
 function openModal(title, body, closeOnBackdrop=true, size="default") {
   disposeWorkflowViewer();
@@ -1267,9 +1362,11 @@ function openModal(title, body, closeOnBackdrop=true, size="default") {
   const modal=document.getElementById("modal");
   const card = modal.querySelector(".modal-card");
   card.classList.remove("maximized");
+  resetMaximizedCard(card);
   const maximizeButton = document.getElementById("modalMaximize");
   if (maximizeButton) { maximizeButton.textContent = "⤢"; maximizeButton.title = t("最大化"); }
   card.classList.toggle("compact-modal-card", size === "compact");
+  card.classList.toggle("account-modal-card", size === "account");
   document.getElementById("modalTitle").textContent=title;
   document.getElementById("modalBody").innerHTML=body;
   modal.classList.remove("hidden");
@@ -1288,6 +1385,7 @@ window.addEventListener("dagrunner-language-change", () => {
   renderSatelliteStatus(satelliteConfigs, satelliteServiceEnabled);
   renderWorkflows();
   loadRuns();
+  updateGearLanguageMeta();
 });
 
 let resourceSnapshot = null;
@@ -1365,16 +1463,22 @@ document.addEventListener("visibilitychange", () => {
 let lastAccounts = [];
 let accountEditing = null;
 let accountWorkflowKeys = [];
+let accountWorkflowTitles = {};
 
 function permissionLabel(permission) {
   return t(permission === "edit" ? "编辑" : permission === "execute" ? "执行" : "只读");
+}
+
+function accountWorkflowLabel(key) {
+  const title = accountWorkflowTitles[key];
+  return title && title !== key ? `${title}（${key}）` : key;
 }
 
 function accountScopeText(account) {
   if (account.is_admin) return t("全部（admin）");
   if (account.unrestricted) return t("全部工作流");
   if (!account.workflows.length) return t("无权限");
-  return account.workflows.map(item => `${item.key}：${permissionLabel(item.permission)}`).join("，");
+  return account.workflows.map(item => `${accountWorkflowLabel(item.key)}：${permissionLabel(item.permission)}`).join("，");
 }
 
 async function openAccountSettings() {
@@ -1384,6 +1488,7 @@ async function openAccountSettings() {
     ]);
     lastAccounts = accountsData.accounts;
     accountWorkflowKeys = workflowsData.workflows.map(w => w.name);
+    accountWorkflowTitles = Object.fromEntries(workflowsData.workflows.map(w => [w.name, w.description]));
     renderAccountSettings(lastAccounts, null);
   } catch (e) { toast(e.message, true); }
 }
@@ -1395,12 +1500,15 @@ function renderAccountSettings(accounts, editing) {
     if (account.is_admin) {
       actions = `<span class="secondary">${t("内置管理员")}</span>`;
     } else {
-      actions = `<button class="button ghost" onclick="editAccountPanel(${jsArg(account.username)})">${t("编辑")}</button>`
-        + `<button class="button ghost" onclick="resetAccountPasswordPrompt(${jsArg(account.username)})">${t("重置密码")}</button>`
-        + `<button class="button danger" onclick="deleteAccountByUsername(${jsArg(account.username)})">${t("删除")}</button>`;
+      actions = `<button class="button ghost" onclick='editAccountPanel(${jsArg(account.username)})'>${t("编辑")}</button>`
+        + `<button class="button ghost" onclick='resetAccountPasswordPrompt(${jsArg(account.username)})'>${t("重置密码")}</button>`
+        + `<button class="button danger" onclick='deleteAccountByUsername(${jsArg(account.username)})'>${t("删除")}</button>`;
     }
     const badge = account.enabled ? "" : ` <span class="badge">${t("已禁用")}</span>`;
-    return `<tr><td class="card-cell-name"><div>${esc(account.username)}${badge}</div></td><td>${esc(accountScopeText(account))}</td><td class="secondary">${esc(account.last_login_time || "-")}</td><td class="card-cell-actions"><div class="actions">${actions}</div></td></tr>`;
+    return `<tr><td class="card-cell-name" data-label="${t("账号")}"><div class="account-name">${esc(account.username)}${badge}</div></td>`
+      + `<td data-label="${t("权限")}"><div class="account-scope">${esc(accountScopeText(account))}</div></td>`
+      + `<td class="secondary" data-label="${t("最后登录")}">${esc(account.last_login_time || "-")}</td>`
+      + `<td class="card-cell-actions" data-label="${t("操作")}"><div class="actions">${actions}</div></td></tr>`;
   }).join("");
   let editor = "";
   if (editing === "new") editor = accountEditorHtml(null);
@@ -1408,12 +1516,11 @@ function renderAccountSettings(accounts, editing) {
     const account = accounts.find(item => item.username === editing);
     if (account) editor = accountEditorHtml(account);
   }
-  const body = `<div class="account-settings">
-    <div class="account-toolbar"><button class="button" onclick="addAccountPanel()">${t("新建账号")}</button></div>
-    <table class="account-table card-table"><thead><tr><th>${t("账号")}</th><th>${t("权限")}</th><th>${t("最后登录")}</th><th>${t("操作")}</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">${t("暂无账号")}</td></tr>`}</tbody></table>
-    ${editor}
-  </div>`;
-  openModal(t("账号管理"), body, false, "compact");
+  const toolbar = editor ? "" : `<div class="account-toolbar"><button class="button" onclick="addAccountPanel()">${t("新建账号")}</button></div>`;
+  const body = `<div class="account-settings">${toolbar}${editor}`
+    + `<table class="account-table card-table"><thead><tr><th>${t("账号")}</th><th>${t("权限")}</th><th>${t("最后登录")}</th><th>${t("操作")}</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">${t("暂无账号")}</td></tr>`}</tbody></table>`
+    + `</div>`;
+  openModal(t("账号管理"), body, false, "account");
 }
 
 function accountEditorHtml(account) {
@@ -1425,18 +1532,30 @@ function accountEditorHtml(account) {
   for (const item of account?.workflows || []) grants[item.key] = item.permission;
   const options = selected => ["", "read", "execute", "edit"].map(value =>
     `<option value="${value}"${selected === value ? " selected" : ""}>${value ? permissionLabel(value) : t("无")}</option>`).join("");
-  const workflowRows = accountWorkflowKeys.map(key =>
-    `<label class="account-workflow-row"><span class="mono">${esc(key)}</span><select data-account-workflow="${esc(key)}">${options(grants[key])}</select></label>`).join("");
+  const workflowRows = accountWorkflowKeys.map(key => {
+    const title = accountWorkflowTitles[key];
+    const name = title && title !== key
+      ? `<strong title="${esc(title)}">${esc(title)}</strong><span class="mono" title="${esc(key)}">${esc(key)}</span>`
+      : `<strong class="mono" title="${esc(key)}">${esc(key)}</strong>`;
+    return `<div class="account-workflow-row"><div class="account-workflow-name">${name}</div><select class="ui-select" data-account-workflow="${esc(key)}">${options(grants[key])}</select></div>`;
+  }).join("");
   return `<div class="account-editor">
     <h4>${isNew ? t("新建账号") : t("编辑账号：{name}", {name: username})}</h4>
-    <label>${t("用户名")}<input id="accountUsername" value="${esc(username)}" ${isNew ? "" : "disabled"} maxlength="64"></label>
-    ${isNew ? `<label>${t("密码")}<input id="accountPassword" type="password" autocomplete="new-password" minlength="16"></label>` : ""}
-    <label class="account-check"><input id="accountEnabled" type="checkbox" ${enabled ? "checked" : ""}> ${t("启用")}</label>
-    <label class="account-check"><input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""}> ${t("全部工作流（旧账号兼容）")}</label>
-    <div class="account-workflows">${workflowRows || `<span class="form-hint">${t("暂无工作流")}</span>`}</div>
+    <div class="account-form-grid">
+      <label${isNew ? "" : ` class="account-full"`}>${t("用户名")}<input id="accountUsername" value="${esc(username)}" ${isNew ? "" : "disabled"} maxlength="64"></label>
+      ${isNew ? `<label>${t("密码")}<input id="accountPassword" type="password" autocomplete="new-password" minlength="16"></label>` : ""}
+    </div>
+    <div class="account-checks">
+      <label class="account-check"><input id="accountEnabled" type="checkbox" ${enabled ? "checked" : ""}> ${t("启用")}</label>
+      <label class="account-check"><input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""}> ${t("全部工作流（旧账号兼容）")}</label>
+    </div>
+    <div class="account-workflows">
+      <div class="account-workflows-head"><span>${t("工作流权限")}</span><span class="form-hint">${t("未列出的工作流不可访问")}</span></div>
+      <div class="account-workflows-list">${workflowRows || `<span class="form-hint">${t("暂无工作流")}</span>`}</div>
+    </div>
     <div class="account-editor-actions">
-      <button class="button" onclick="saveAccountPanel()">${t("保存")}</button>
       <button class="button ghost" onclick="cancelAccountPanel()">${t("取消")}</button>
+      <button class="button" onclick="saveAccountPanel()">${t("保存")}</button>
     </div>
   </div>`;
 }
@@ -1487,10 +1606,10 @@ async function deleteAccountByUsername(username) {
 }
 
 async function resetAccountPasswordPrompt(username) {
-  openModal(t("重置密码：{name}", {name: username}), `<div class="channel-form-grid">
+  openModal(t("重置密码：{name}", {name: username}), `<div class="form-stack">
     <label>${t("新密码")}<input id="accountResetPassword" type="password" autocomplete="new-password" minlength="16"></label>
     <span class="form-hint">${t("密码至少 16 位；该账号现有会话会立即失效。")}</span>
-    <button class="button" onclick="saveAccountPasswordReset(${jsArg(username)})">${t("保存")}</button>
+    <div class="form-actions"><button class="button" onclick='saveAccountPasswordReset(${jsArg(username)})'>${t("保存")}</button></div>
   </div>`, false, "compact");
 }
 
@@ -1505,12 +1624,12 @@ async function saveAccountPasswordReset(username) {
 }
 
 async function openChangePassword() {
-  openModal(t("修改密码"), `<div class="channel-form-grid">
+  openModal(t("修改密码"), `<div class="form-stack">
     <label>${t("当前密码")}<input id="oldPassword" type="password" autocomplete="current-password"></label>
     <label>${t("新密码")}<input id="newPassword" type="password" autocomplete="new-password" minlength="16"></label>
     <label>${t("确认新密码")}<input id="confirmPassword" type="password" autocomplete="new-password" minlength="16"></label>
     <span class="form-hint">${t("密码至少 16 位；修改后会退出登录。")}</span>
-    <button class="button" onclick="saveChangePassword()">${t("保存")}</button>
+    <div class="form-actions"><button class="button" onclick="saveChangePassword()">${t("保存")}</button></div>
   </div>`, false, "compact");
 }
 
@@ -1531,7 +1650,10 @@ async function saveChangePassword() {
   } catch (e) { toast(e.message, true); }
 }
 
-window.addEventListener("resize", positionWorkflowTags);
+window.addEventListener("resize", () => {
+  positionWorkflowTags();
+  fitMaximizedCardWidth();
+});
 loadAuth().finally(() => {
   startPoller("workflows", loadWorkflows, 15000, 60000);
   startPoller("runs", () => loadRuns(), 3000, 30000);

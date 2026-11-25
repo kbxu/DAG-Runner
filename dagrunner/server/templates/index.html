@@ -18,14 +18,29 @@
       </div>
     </div>
     <div class="header-actions">
-      <span id="versionBadge" class="version-badge" title="">v—</span>
-      {% if is_admin %}<button id="updateButton" class="logout-button" type="button" onclick="openUpdateSettings()"><span data-i18n>更新</span></button>{% endif %}
       <div id="serviceStatus" class="live checking"><span></span><b data-i18n>正在连接</b></div>
-      <span class="signed-in-user">{{ username }}</span>
-      {% if is_admin %}<button id="accountButton" class="logout-button" type="button" onclick="openAccountSettings()" data-i18n>账号</button>{% endif %}
-      <button id="changePasswordButton" class="logout-button" type="button" onclick="openChangePassword()" data-i18n>改密</button>
-      <button id="languageToggle" class="logout-button" type="button">EN</button>
-      <button class="logout-button" type="button" onclick="logout()" data-i18n>退出</button>
+      <div class="gear-menu" id="gearMenu">
+        <button id="gearButton" class="logout-button gear-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="gearDropdown" data-i18n-aria-label="设置" onclick="toggleGearMenu(event)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <div id="gearDropdown" class="gear-dropdown hidden" role="menu" aria-labelledby="gearButton">
+          <div class="gear-user">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
+            <span class="gear-user-name">{{ username }}</span>
+          </div>
+          {% if is_admin and update_git_available %}
+          <button class="gear-item" type="button" role="menuitem" onclick="openUpdateSettings(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg><span data-i18n>更新</span></button>
+          {% endif %}
+          {% if is_admin %}
+          <button class="gear-item" type="button" role="menuitem" onclick="openAccountSettings(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg><span data-i18n>账号</span></button>
+          {% endif %}
+          <button class="gear-item" type="button" role="menuitem" onclick="openChangePassword(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span data-i18n>修改密码</span></button>
+          <button class="gear-item" type="button" role="menuitem" onclick="toggleLanguage()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg><span data-i18n>语言</span><span class="gear-item-meta" id="gearLanguageMeta">English</span></button>
+          <button class="gear-item" type="button" role="menuitem" onclick="openAbout(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span data-i18n>关于</span></button>
+          <div class="gear-separator"></div>
+          <button class="gear-item danger" type="button" role="menuitem" onclick="logout()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg><span data-i18n>登出</span></button>
+        </div>
+      </div>
     </div>
   </header>
 

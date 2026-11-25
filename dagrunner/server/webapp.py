@@ -592,6 +592,7 @@ def create_app(
 
     @app.get("/")
     def index():
+        branch_info = (update_service.status().get("branch") or {})
         return render_template(
             "index.html",
             username=g.current_user,
@@ -599,6 +600,7 @@ def create_app(
             can_create=account_service.can_create(g.current_user),
             allow_insecure_remote_login=allow_insecure_remote_login,
             default_language=language,
+            update_git_available=bool(branch_info.get("available")),
         )
 
     @app.get("/health")

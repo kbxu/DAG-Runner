@@ -75,6 +75,7 @@ function toggleWorkflowView(direction) {
     document.getElementById('previewGraph').innerHTML = buildDagSvg(editor.tasks, '工作流预览', false, true, editor.direction);
     editor.panel.querySelectorAll('.dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === editor.selected));
   }
+  if (typeof fitMaximizedCardWidth === "function") fitMaximizedCardWidth();
 }
 
 function updateEditorControls() {
@@ -125,6 +126,7 @@ async function refreshWorkflowPreview(editor, addition=null) {
     editor.source = editor.input.value;
     editor.valid = true;
     document.getElementById('previewGraph').innerHTML = svg;
+    if (typeof fitMaximizedCardWidth === "function") fitMaximizedCardWidth();
     const status = document.getElementById('previewStatus');
     status.classList.remove('preview-error');
     status.textContent = `校验通过 · ${data.tasks.length} 个节点 · 尚未保存`;
