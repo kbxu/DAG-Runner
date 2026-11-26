@@ -582,6 +582,85 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
   .account-editor { padding: 12px; }
 }
 
+/* 表单模式：紧凑任务卡片（旧 YAML 编辑器保留在 YAML 模式） */
+.modal-card.form-mode .yaml-editor-label { display: none; }
+.task-form-panel { display: flex; flex-direction: column; gap: 10px; }
+.tf-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.tf-section-head { color: #344054; font-size: 12px; font-weight: 700; }
+.tf-panel { padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+details.tf-collapse { padding: 0; overflow: hidden; }
+details.tf-collapse > summary { list-style: none; cursor: pointer; margin: 0; padding: 10px 12px; }
+details.tf-collapse > summary::-webkit-details-marker { display: none; }
+details.tf-collapse > summary.tf-panel-head { margin-bottom: 0; }
+.tf-collapse-body { display: flex; flex-direction: column; gap: 8px; padding: 0 12px 12px; }
+.tf-head-caret { color: #98a2b3; font-size: 10px; transition: transform .15s; }
+details.tf-collapse[open] > summary .tf-head-caret { transform: rotate(90deg); }
+.tf-collapse-body > label.switch { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; color: #344054; font-size: 12px; font-weight: 600; }
+.schedule-enabled { margin-bottom: 4px; }
+.schedule-check { display: inline-flex; align-items: center; gap: 6px; color: #344054; font-size: 12px; cursor: pointer; }
+.schedule-note { color: var(--muted); font-size: 11px; }
+.schedule-check input { width: auto; height: auto; margin: 0; accent-color: var(--teal); cursor: pointer; }
+.tf-panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 8px; margin-bottom: 6px; }
+.tf-panel-head .tf-subhint { margin-left: 6px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.tf-panel-head .tf-toolbar { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.tf-panel-head .tf-toolbar .button { padding: 4px 8px; font-size: 11px; }
+.tf-section-head .tf-subhint { margin-left: 6px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.tf-section-gap { margin-top: 10px; }
+.task-form-panel input[type="checkbox"], .task-form-panel input[type="radio"] { width: auto; height: auto; padding: 0; margin: 0; }
+.tf-schedule > label.switch { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; color: #344054; font-size: 12px; font-weight: 600; }
+.workflow-node-controls #previewStatus { height: auto; min-height: 0; padding: 0; }
+.tf-note { color: var(--muted); font-size: 12px; }
+.tf-tasks { display: flex; flex-direction: column; }
+details.tf-task { border-top: 1px solid #edf0f2; }
+details.tf-task:first-of-type { border-top: 0; }
+details.tf-task > summary { display: grid; grid-template-columns: max-content 14px minmax(0, 1fr) minmax(0, 1.2fr); align-items: center; gap: 8px; padding: 7px 8px; cursor: pointer; list-style: none; }
+details.tf-task > summary::-webkit-details-marker { display: none; }
+details.tf-task > summary:hover { background: #fbfcfc; }
+details.tf-task[open] > summary { background: #f8fbfb; border-bottom: 1px dashed var(--line); }
+.tf-tags { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.tf-tag { padding: 2px 5px; border-radius: 99px; font-size: 10px; font-weight: 700; text-align: center; white-space: nowrap; }
+.tf-tag.command { color: #067647; background: #ecfdf3; }
+.tf-tag.condition { color: #175cd3; background: #eff8ff; }
+.tf-tag.disabled { color: #b54708; background: #fffaeb; }
+.tf-caret { color: #98a2b3; font-size: 10px; transition: transform .15s; }
+details.tf-task[open] .tf-caret { transform: rotate(90deg); }
+.tf-heading { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; }
+.tf-title { min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-id { flex: 0 0 auto; color: #98a2b3; font-size: 10px; }
+.tf-deps { display: flex; justify-content: flex-end; min-width: 0; color: var(--muted); font-size: 11px; }
+.tf-deps-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-body { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; }
+.tf-grid2 { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px 12px; }
+.tf-grid2 > label.switch { justify-self: end; margin-top: 3px; min-height: 30px; box-sizing: border-box; }
+.tf-block { display: flex; flex-direction: column; gap: 6px; }
+.tf-body .subhead { display: flex; align-items: center; justify-content: space-between; color: #475467; font-size: 11px; font-weight: 700; }
+.tf-checklist { display: grid; gap: 3px; max-height: 172px; overflow: auto; padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; }
+.tf-checklist label { display: flex; align-items: center; gap: 6px; color: #344054; font-size: 12px; font-weight: 500; line-height: 1.35; }
+.tf-checklist input { accent-color: var(--teal); }
+.tf-command, .tf-setup { width: 100%; margin-top: 3px; padding: 7px 8px; border: 1px solid #ccd3da; border-radius: 6px; font: 12px/1.5 "Cascadia Code", Consolas, monospace; resize: vertical; }
+.tf-command { min-height: 76px; }
+.tf-setup { height: 24px; min-height: 24px; overflow: hidden; resize: none; }
+.tf-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.tf-chip { padding: 1px 6px; border-radius: 99px; background: #eef2f5; color: #475467; font-size: 11px; }
+.tf-actions { display: flex; justify-content: flex-end; }
+.tf-schedule { gap: 6px; }
+.schedule-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.schedule-row > input { flex: 0 1 230px; width: 230px; max-width: 100%; height: 28px; margin: 0; padding: 4px 8px; font-size: 12px; line-height: 1.3; }
+.schedule-label { flex: 0 0 46px; color: #475467; font-size: 11px; font-weight: 650; }
+.schedule-actions { display: flex; align-items: center; gap: 2px; }
+.schedule-actions .icon-button { padding: 2px; line-height: 0; }
+.schedule-actions svg { display: block; }
+.schedule-empty { padding: 2px 0; }
+.task-form-panel .schedule-row.schedule-tz { margin-bottom: 4px; }
+.task-form-panel .schedule-row.schedule-tz input { flex: 0 0 130px; width: 130px; max-width: none; }
+/* 只读表单（工作流查看） */
+.tf-ro-block { display: flex; gap: 8px; padding: 3px 0; font-size: 12px; }
+.tf-ro-label { flex: 0 0 72px; color: var(--muted); font-weight: 650; }
+.tf-ro-value { min-width: 0; overflow-wrap: anywhere; }
+.tf-ro-code { margin: 2px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; font: 12px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+.tf-readonly-list details.tf-task > summary { cursor: default; }
+.tf-task.tf-focus > summary { box-shadow: inset 3px 0 var(--teal); background: #f0faf8; }
+
 /* About */
 .about-panel { display: flex; flex-direction: column; gap: 16px; }
 .about-brand { display: flex; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }

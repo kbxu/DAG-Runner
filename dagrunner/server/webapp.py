@@ -62,7 +62,14 @@ from .service import (
 )
 from .update import UpdateError, UpdateService
 from ..workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
-from ..tools.workflow_editor import demo_command, demo_setup, preview_definition, extend_definition
+from ..tools.workflow_editor import (
+    build_model,
+    demo_command,
+    demo_setup,
+    extend_definition,
+    merge_model,
+    preview_definition,
+)
 
 
 _HASH_WORKFLOW_ID = re.compile(r"^workflow_[0-9a-f]{12}$")
@@ -1151,6 +1158,47 @@ def create_app(
                 for task in workflow.tasks.values()
             ],
         })
+
+    @app.get("/api/workflows/<workflow_name>/model")
+    def workflow_model(workflow_name: str):
+        _require_permission(workflow_name, "read")
+        try:
+            return jsonify(build_model(registry.definition(workflow_name)))
+        except WorkflowError as exc:
+            raise ServiceError(str(exc)) from exc
+
+    @app.post("/api/workflows/<workflow_name>/model-preview")
+    def workflow_model_preview(workflow_name: str):
+        _require_permission(workflow_name, "edit")
+        payload = request.get_json(silent=True) or {}
+        try:
+            merged = merge_model(registry.definition(workflow_name), payload)
+            return jsonify({"definition": merged, **preview_definition(merged)})
+        except WorkflowError as exc:
+            raise ServiceError(str(exc)) from exc
+
+    @app.post("/api/workflows/import-model")
+    def import_workflow_model():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        payload = request.get_json(silent=True) or {}
+        definition = str(payload.get("definition", ""))
+        try:
+            return jsonify(build_model(definition))
+        except WorkflowError as exc:
+            raise ServiceError(str(exc)) from exc
+
+    @app.post("/api/workflows/import-model-preview")
+    def import_workflow_model_preview():
+        if not account_service.can_create(g.current_user):
+            raise AccessDenied("permission denied", 403)
+        payload = request.get_json(silent=True) or {}
+        definition = str(payload.get("definition", ""))
+        try:
+            merged = merge_model(definition, payload.get("model") or {})
+            return jsonify({"definition": merged, **preview_definition(merged)})
+        except WorkflowError as exc:
+            raise ServiceError(str(exc)) from exc
 
     @app.put("/api/workflows/<workflow_name>")
     def edit_workflow(workflow_name: str):

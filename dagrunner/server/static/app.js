@@ -386,9 +386,15 @@ function renderWorkflows() {
       const canEdit = canWorkflow(w.name, "edit");
       const actions = [];
       if (canExecute) actions.push(`<button class="button" onclick="runWorkflow('${esc(w.name)}')">${t("运行")}</button>`);
-      if (canEdit) actions.push(`<button class="button ghost${s.enabled ? ' schedule-active' : ''}" title="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" aria-label="${t('定时')} · ${s.enabled ? t('已启用') : t('未启用')}" onclick="editSchedule('${esc(w.name)}')">${s.enabled ? '● ' : ''}${t("定时")}</button>`);
-      if (canEdit) actions.push(`<button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>${t("通知")}</button>`);
-      if (canEdit && !s.enabled) actions.push(`<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`);
+      if (canEdit) {
+        if (s.enabled) {
+          actions.push(`<button class="button ghost schedule-active" onclick='setWorkflowOnline(${jsArg(w.name)}, false)'>${t("下线")}</button>`);
+        } else {
+          actions.push(`<button class="button ghost" onclick='setWorkflowOnline(${jsArg(w.name)}, true)'>${t("上线")}</button>`);
+          actions.push(`<button class="button ghost" onclick="editWorkflow('${esc(w.name)}')">${t("编辑")}</button>`);
+        }
+        actions.push(`<button class="button ghost${notificationClass}" onclick='editNotification(${jsArg(w.name)})'>${t("通知")}</button>`);
+      }
       actions.push(`<button class="button ghost" onclick="exportYaml('${esc(w.name)}')">${t("导出")}</button>`);
       if (canEdit && !s.enabled) actions.push(`<button class="button danger" onclick="deleteWorkflow('${esc(w.name)}')">${t("删除")}</button>`);
       return `<tr>
@@ -955,7 +961,7 @@ function openWorkflowImportEditor(title, definition, nextId, submitLabel, source
   const split = splitWorkflowName(definition);
   const source = sourceInfo ? `<div class="import-source"><span>${t("识别来源")}</span><b>${esc(sourceInfo.source_label)}</b></div>` : "";
   const warnings = sourceInfo?.warnings?.length ? `<div class="import-warnings"><b>${t("转换提示")}</b>${sourceInfo.warnings.map(warning => `<span>${esc(warning)}</span>`).join("")}</div>` : "";
-  openModal(title, `<div class="form-stack">${source}${warnings}<label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}<label>${t("运行位置")}<select id="importRunner" class="ui-select" onchange="onRunnerSelectChange('importDefinition', this.value)">${runnerOptions(detectTopLevelRunner(split.definition) || "local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
+  openModal(title, `<div class="form-stack">${source}${warnings}<div class="form-grid"><label>${t("拟分配 ID")}<input value="${esc(nextId)}" readonly></label>${workflowNameInput("importWorkflowName",split.name)}</div><label>${t("运行位置")}<select id="importRunner" class="ui-select" onchange="onRunnerSelectChange('importDefinition', this.value)">${runnerOptions(detectTopLevelRunner(split.definition) || "local")}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("importDefinition",split.definition,true)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会在导入或运行时使用；migration 仅作来源信息，导入后的定时由数据库单独管理。")}</span><button class="button" onclick="submitImportWorkflow()">${esc(submitLabel)}</button></div>`, false);
 }
 async function openNewWorkflow() {
   pendingImportFilename = "dagr_example_pipeline.yaml";
@@ -1005,21 +1011,74 @@ async function submitCrontabImport() {
   } catch(e) { toast(t("识别或转换 crontab 失败：{error}",{error:e.message}),true); }
 }
 async function submitImportWorkflow() {
+  if (typeof findDuplicateCrons === "function" && findDuplicateCrons().length) {
+    toast(t("定时配置存在重复的 Cron，请修改后再保存"), true);
+    return;
+  }
+  try { await flushWorkflowModelSync(); } catch (e) { toast(e.message, true); return; }
   if (!workflowEditorCanSave()) return;
   const definition=normalizeYamlNewlines(document.getElementById("importDefinition").value);
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
   const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId); form.append("name",document.getElementById("importWorkflowName").value.trim()); form.append("runner",document.getElementById("importRunner")?.value || "local");
   try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { toast(e.message,true); }
 }
+function openWorkflowFormModal(name, definition, description, readOnly) {
+  const split = splitWorkflowName(definition);
+  const title = readOnly ? namedId(description, name) : `${namedId(description, name)} · ${t("编辑")}`;
+  const disabled = readOnly ? " disabled" : "";
+  const submit = readOnly ? "" : `<button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button>`;
+  openModal(title, `<div class="form-stack">
+    <div class="form-grid">
+      <label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>
+      <label>${t("工作流名称")}<input id="workflowDisplayName" value="${esc(description || split.name)}"${disabled} placeholder="${t("用于列表和通知显示")}"></label>
+    </div>
+    <label>${t("运行位置")}<select id="workflowRunner" class="ui-select"${disabled} onchange="onRunnerSelectChange('workflowDefinition', this.value)">${runnerOptions(detectTopLevelRunner(split.definition) || "local")}</select></label>
+    <label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition,false,readOnly)}</label>
+    <span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span>
+    ${submit}
+  </div>`, false);
+}
+
 async function editWorkflow(name) {
-  const workflow=state.workflows.get(name); if (!workflow || workflow.schedule.enabled) return toast(t("请先下线定时"),true);
+  const workflow=state.workflows.get(name); if (!workflow) return toast(t("工作流不存在"),true);
   try {
     const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
-    const split=splitWorkflowName(definition);
-    openModal(`${namedId(workflow.description,name)} · ${t("编辑")}`, `<div class="form-stack"><label>${t("工作流 ID")}<input value="${esc(name)}" readonly></label>${workflowNameInput("workflowDisplayName",workflow.description || split.name)}<label>${t("运行位置")}<select id="workflowRunner" class="ui-select" onchange="onRunnerSelectChange('workflowDefinition', this.value)">${runnerOptions(detectTopLevelRunner(split.definition) || workflow.runner)}</select></label><label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition)}</label><span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span><button class="button" onclick='saveWorkflow(${jsArg(name)})'>${t("保存")}</button></div>`, false);
+    openWorkflowFormModal(name, definition, workflow.description || "", false);
   } catch(e) { toast(e.message,true); }
 }
+
+async function openReadOnlyWorkflow(name) {
+  const workflow=state.workflows.get(name); if (!workflow) return toast(t("工作流不存在"),true);
+  try {
+    const definition=await api(`/api/workflows/${encodeURIComponent(name)}/yaml`);
+    openWorkflowFormModal(name, definition, workflow.description || "", true);
+  } catch(e) { toast(e.message,true); }
+}
+
+async function setWorkflowOnline(name, online) {
+  try {
+    const model = await api(`/api/workflows/${encodeURIComponent(name)}/model`);
+    const schedule = model.schedule || {};
+    const crons = (schedule.crons || []).filter(Boolean);
+    if (!crons.length) {
+      toast(t("请先配置定时后再上线"), true);
+      return;
+    }
+    await api(`/api/workflows/${encodeURIComponent(name)}/schedule`, {
+      method: "PUT",
+      body: JSON.stringify({crons, timezone: schedule.timezone || "Asia/Shanghai", enabled: online}),
+    });
+    toast(t(online ? "已上线，定时调度已启用" : "已下线，定时调度已停用"));
+    await loadWorkflows();
+  } catch (e) { toast(e.message, true); }
+}
 async function saveWorkflow(name) {
+  if (typeof findDuplicateCrons === "function" && findDuplicateCrons().length) {
+    toast(t("定时配置存在重复的 Cron，请修改后再保存"), true);
+    return;
+  }
+  try { await flushWorkflowModelSync(); } catch (e) { toast(e.message, true); return; }
+  try { await flushScheduleServerSync(); } catch (e) { toast(e.message, true); return; }
   if (!workflowEditorCanSave()) return;
   try {
     await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:normalizeYamlNewlines(document.getElementById("workflowDefinition").value),name:document.getElementById("workflowDisplayName").value.trim(),runner:document.getElementById("workflowRunner")?.value || "local"})});
@@ -1387,6 +1446,7 @@ function openModal(title, body, closeOnBackdrop=true, size="default") {
   const modal=document.getElementById("modal");
   const card = modal.querySelector(".modal-card");
   card.classList.remove("maximized");
+  card.classList.remove("form-mode");
   resetMaximizedCard(card);
   const maximizeButton = document.getElementById("modalMaximize");
   if (maximizeButton) { maximizeButton.textContent = "⤢"; maximizeButton.title = t("最大化"); }

@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工作流 YAML 编辑器 · 紧凑表单 Demo</title>
+<style>
+  :root {
+    --ink: #17202a;
+    --muted: #677281;
+    --line: #e4e9ee;
+    --paper: #ffffff;
+    --canvas: #f3f6f7;
+    --teal: #087f78;
+    --teal-dark: #075e59;
+    --navy: #17324d;
+    --danger: #b42318;
+    --bg-soft: #f8fafc;
+    --chip: #eef2f5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); background: var(--canvas); font: 13px/1.5 Inter, "Segoe UI", Arial, sans-serif; }
+  .topbar { padding: 14px 22px; color: #fff; background: linear-gradient(120deg, #112b43, #0d5251); }
+  .topbar h1 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .topbar p { margin: 2px 0 0; color: #c7dbdf; font-size: 11px; }
+  .demo-stage { display: flex; align-items: flex-start; gap: 16px; width: 100%; max-width: 1440px; margin: 0 auto; padding: 0 16px; }
+  .preview-placeholder { flex: 1 1 auto; min-width: 0; margin-top: 18px; height: calc(100vh - 90px); position: sticky; top: 16px; display: grid; place-items: center; border: 1.5px dashed #c3d0d8; border-radius: 10px; background: #fbfcfd; color: #98a2b3; font-size: 12px; text-align: center; padding: 12px; }
+  .wrap { flex: 0 0 45%; width: auto; max-width: 620px; min-width: 340px; margin: 18px 0 60px; padding: 0; display: grid; gap: 14px; }
+  .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--paper); box-shadow: 0 2px 10px #17324d0b; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--bg-soft); border-radius: 10px 10px 0 0; }
+  .panel-head b { font-size: 12px; }
+  .panel-head .hint { color: var(--muted); font-size: 11px; font-weight: 400; }
+  .panel-body { padding: 10px 12px; }
+  .schedule-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .schedule-row input { flex: 0 1 340px; width: 340px; max-width: 100%; }
+  .schedule-label { flex: 0 0 46px; color: #475467; font-size: 11px; font-weight: 650; }
+  .schedule-actions { display: flex; align-items: center; gap: 2px; }
+  .schedule-actions .icon-button { padding: 2px; line-height: 0; }
+  .schedule-actions svg { display: block; }
+  .schedule-tools { margin-bottom: 8px; }
+  .schedule-tools .switch { display: inline-flex; margin-bottom: 8px; }
+  .schedule-row.schedule-tz { margin-bottom: 6px; }
+  .schedule-row.schedule-tz input { flex: 0 0 160px; width: 160px; max-width: none; }
+  .schedule-empty { padding: 4px 0 2px; }
+  .toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .button { padding: 4px 9px; border: 0; border-radius: 6px; color: #fff; background: var(--teal); cursor: pointer; font: inherit; font-size: 11px; font-weight: 650; }
+  .button:hover { background: var(--teal-dark); }
+  .button.ghost { color: #344054; border: 1px solid #d0d5dd; background: #fff; }
+  .button.ghost:hover { background: #f2f4f7; }
+  .button.danger { background: var(--danger); }
+  .button.small { padding: 3px 7px; }
+  label.f { display: block; color: #475467; font-size: 11px; font-weight: 650; }
+  label.f > span.req { color: var(--danger); font-weight: 400; }
+  input[type=text], select, textarea { width: 100%; margin-top: 3px; padding: 5px 7px; border: 1px solid #ccd3da; border-radius: 6px; font: inherit; font-size: 12px; color: var(--ink); background: #fff; }
+  input[type=text]:focus, select:focus, textarea:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px #087f7820; }
+  textarea.code { font: 11px/1.5 "Cascadia Code", Consolas, monospace; min-height: 76px; resize: vertical; white-space: pre; }
+  .task-body input:disabled { color: #667085; background: #f2f4f7; cursor: not-allowed; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; align-items: end; }
+  .task-body .grid-2 { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+  .task-body .grid-2 > label:last-child { justify-self: end; }
+  .task-body .grid-2 .switch { margin-top: 3px; min-height: 30px; box-sizing: border-box; }
+  .switch { display: inline-flex; align-items: center; gap: 6px; color: #344054; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .switch input { accent-color: var(--teal); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 99px; background: var(--chip); color: #475467; font-size: 10px; font-weight: 600; }
+  .chip.mono { font-family: Consolas, monospace; font-weight: 500; }
+  .task { border-top: 1px solid #edf0f2; }
+  .task:first-of-type { border-top: 0; }
+  .task > summary { display: grid; grid-template-columns: 46px 14px minmax(0, 1fr) minmax(0, 1.2fr); align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; list-style: none; }
+  .task > summary::-webkit-details-marker { display: none; }
+  .tag-type { flex: 0 0 auto; padding: 2px 6px; border-radius: 99px; font-size: 10px; font-weight: 700; text-align: center; }
+  .tag-type.command { color: #067647; background: #ecfdf3; }
+  .tag-type.condition { color: #175cd3; background: #eff8ff; }
+  .task > summary:hover { background: #fbfcfc; }
+  .task[open] > summary { background: #f8fbfb; border-bottom: 1px dashed var(--line); }
+  .caret { color: #98a2b3; transition: transform .15s; font-size: 10px; }
+  .task[open] .caret { transform: rotate(90deg); }
+  .summary-heading { min-width: 0; display: flex; align-items: baseline; gap: 6px; overflow: hidden; }
+  .summary-title { min-width: 0; flex: 0 1 auto; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .summary-id { flex: 0 0 auto; color: #98a2b3; font: 10px Consolas, monospace; }
+  .summary-deps { min-width: 0; display: flex; justify-content: flex-end; color: var(--muted); font-size: 11px; }
+  .deps-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-body { padding: 10px 12px 12px; display: grid; gap: 10px; }
+  .subhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 0 6px; color: #475467; font-size: 11px; font-weight: 700; }
+  .checklist { display: grid; gap: 4px; max-height: 168px; overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-soft); }
+  .checklist.depends-list { max-height: 172px; padding: 5px; gap: 3px; }
+  .checklist label { display: flex; align-items: center; gap: 6px; color: #344054; font-size: 11px; font-weight: 500; line-height: 1.35; }
+  .checklist input { accent-color: var(--teal); }
+  .cond-item { display: grid; grid-template-columns: minmax(0, 1fr) 96px 24px; align-items: center; gap: 6px; }
+  .icon-button { border: 0; color: #667085; background: transparent; cursor: pointer; font-size: 14px; }
+  .icon-button:hover { color: var(--danger); }
+  .raw-yaml { margin: 0; padding: 10px; max-height: 320px; overflow: auto; border-radius: 7px; background: #102537; color: #dbeafe; font: 11px/1.55 Consolas, monospace; white-space: pre; }
+  .note { color: var(--muted); font-size: 11px; }
+  @media (max-width: 980px) {
+    .preview-placeholder { display: none; }
+  }
+  @media (max-width: 720px) {
+    .wrap { width: calc(100% - 24px); min-width: 0; }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .summary-deps { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <h1>工作流编辑器 · 紧凑表单原型</h1>
+  <p>界面 Demo：任务默认折叠，展开后编辑；数据来自 workflow_000017 (1).yaml（仅用于预览，不改动项目代码）</p>
+</header>
+
+<div class="demo-stage">
+<div class="wrap">
+  <section class="panel">
+    <div class="panel-head">
+      <b>定时配置</b>
+      <span class="hint">仅 Maintainer（edit）可修改</span>
+    </div>
+    <div class="panel-body">
+      <div class="schedule-tools">
+        <label class="switch"><input type="checkbox" id="enabled"> 启用全部自动调度</label>
+        <div class="schedule-row schedule-tz">
+          <span class="schedule-label">时区</span>
+          <input type="text" id="timezone">
+        </div>
+      </div>
+      <div id="scheduleRows"></div>
+      <p class="note" style="margin:6px 0 0">Cron 使用 5 个字段。每小时第 10 分钟：10 * * * *；每天 10:00：0 10 * * *；工作日 9-15 点的 26/50 分：26,50 9-15 * * mon-fri。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <b>Setup 脚本</b>
+      <span class="hint">公共环境准备</span>
+    </div>
+    <div class="panel-body">
+      <label class="f">脚本内容<textarea class="code" id="setup" spellcheck="false"></textarea></label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <b>任务列表</b>
+      <div class="toolbar">
+        <button class="button ghost small" onclick="toggleAll(true)">全部展开</button>
+        <button class="button ghost small" onclick="toggleAll(false)">全部折叠</button>
+        <button class="button small" onclick="addTask('command')">＋ 新增普通任务</button>
+        <button class="button small" onclick="addTask('condition')">＋ 新增条件任务</button>
+      </div>
+    </div>
+    <div class="panel-body" style="padding:0 12px 12px">
+      <div id="tasks"></div>
+      <p class="note" style="margin:8px 2px 0">折叠行左侧为类型标签与任务名，右侧为依赖；展开后可编辑描述、依赖、命令/条件与分支。</p>
+    </div>
+  </section>
+
+  <details class="panel">
+    <summary style="padding:9px 12px;cursor:pointer;font-size:12px;font-weight:650">查看原始 YAML</summary>
+    <div class="panel-body"><pre class="raw-yaml" id="rawYaml"></pre></div>
+  </details>
+</div>
+<aside class="preview-placeholder">实时工作流预览区（占位）<br><span style="font-size:11px">实际弹窗中右侧为 DAG 示意图</span></aside>
+</div>
+
+<script>
+/* 由附件 YAML 预解析得到的演示数据 */
+const RAW_YAML = `setup: |-
+  export PYTHONUNBUFFERED=1
+
+  cd "/opt/software/trade_assistant"
+  CONDA_EXE="/opt/software/miniconda3/condabin/conda"
+  CONDA_ENV="ta"
+  eval "$("$CONDA_EXE" shell.bash activate "$CONDA_ENV")"
+tasks:
+  task_157092353025600:
+    description: 是否交易日
+    command: |-
+      #!/bin/bash
+
+      python ./stock_tushare/is_trade_date.py \${TA_ENV}
+    depends: []
+  task_157092376187456:
+    type: condition
+    description: 是否执行
+    depends:
+    - task_157092353025600
+    condition:
+      relation: AND
+      groups:
+      - relation: AND
+        items:
+        - task: task_157092353025600
+          status: SUCCESS
+    success:
+    - task_157092403642944
+    failure:
+    - task_157092578820672
+  task_157092403642944:
+    description: 更新涨停概念
+    command: |-
+      #!/bin/bash
+
+      set -e
+
+      # sleep 1800
+
+      python ./stock_info/limitup_explanations.py --source xgb \${TA_ENV}
+    depends:
+    - task_157092376187456
+  task_157092444435008:
+    description: 获取实时行情
+    command: |-
+      #!/bin/bash
+
+      python ./stock_info/sina_today_k.py \${TA_ENV}
+    depends:
+    - task_157092403642944
+  task_157092532280896:
+    description: 计算板块轮动指数
+    command: |-
+      #!/bin/bash
+
+      python ./stock_calc/calc_sector_rotation.py \${TA_ENV}
+    depends:
+    - task_157092444435008
+  task_157092578820672:
+    description: 不执行
+    command: echo ooo
+    depends:
+    - task_157092376187456
+schedule:
+  cron: 26,50 9-15 * * mon,tue,wed,thu,fri
+  timezone: Asia/Shanghai
+  enabled: false
+migration:
+  source_process_code: 157092615370304
+  source_process_name: 计算板块轮动
+  dolphinscheduler_crontab: 0 26,50 9-15 ? * MON,TUE,WED,THU,FRI *
+  timezone: Asia/Shanghai
+  source_schedule_release_state: OFFLINE
+  requires_manual_review: false
+`;
+
+const state = {
+  schedule: { crons: ["26,50 9-15 * * mon,tue,wed,thu,fri"], timezone: "Asia/Shanghai", enabled: false },
+  setup: 'export PYTHONUNBUFFERED=1\n\ncd "/opt/software/trade_assistant"\nCONDA_EXE="/opt/software/miniconda3/condabin/conda"\nCONDA_ENV="ta"\neval "$("$CONDA_EXE" shell.bash activate "$CONDA_ENV")"',
+  tasks: [
+    { id: "task_157092353025600", description: "是否交易日", type: "command", enabled: true, depends: [],
+      command: "#!/bin/bash\n\npython ./stock_tushare/is_trade_date.py ${TA_ENV}", success: [], failure: [], condition: null },
+    { id: "task_157092376187456", description: "是否执行", type: "condition", enabled: true, depends: ["task_157092353025600"],
+      command: "", success: ["task_157092403642944"], failure: ["task_157092578820672"],
+      condition: { relation: "AND", groups: [{ relation: "AND", items: [{ task: "task_157092353025600", status: "SUCCESS" }] }] } },
+    { id: "task_157092403642944", description: "更新涨停概念", type: "command", enabled: true, depends: ["task_157092376187456"],
+      command: "#!/bin/bash\n\nset -e\n\n# sleep 1800\n\npython ./stock_info/limitup_explanations.py --source xgb ${TA_ENV}", success: [], failure: [], condition: null },
+    { id: "task_157092444435008", description: "获取实时行情", type: "command", enabled: true, depends: ["task_157092403642944"],
+      command: "#!/bin/bash\n\npython ./stock_info/sina_today_k.py ${TA_ENV}", success: [], failure: [], condition: null },
+    { id: "task_157092532280896", description: "计算板块轮动指数", type: "command", enabled: true, depends: ["task_157092444435008"],
+      command: "#!/bin/bash\n\npython ./stock_calc/calc_sector_rotation.py ${TA_ENV}", success: [], failure: [], condition: null },
+    { id: "task_157092578820672", description: "不执行", type: "command", enabled: true, depends: ["task_157092376187456"],
+      command: "echo ooo", success: [], failure: [], condition: null },
+  ],
+};
+
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const taskName = id => (state.tasks.find(t => t.id === id)?.description) || id;
+
+function refreshScheduleEnabled() {
+  const hasCron = state.schedule.crons.some(item => item.trim());
+  const box = $("enabled");
+  box.disabled = !hasCron;
+  box.title = hasCron ? "" : "请先添加至少一个非空定时";
+  if (!hasCron && state.schedule.enabled) {
+    state.schedule.enabled = false;
+    box.checked = false;
+  }
+}
+
+function renderSchedule() {
+  refreshScheduleEnabled();
+  if (!state.schedule.crons.length) {
+    $("scheduleRows").innerHTML = '<div class="schedule-empty"><button type="button" class="button ghost small" onclick="addCron()">＋ 添加定时</button></div>';
+    return;
+  }
+  const rows = state.schedule.crons.map((cron, index) => `
+    <div class="schedule-row">
+      <span class="schedule-label">定时${index + 1}</span>
+      <input type="text" data-cron="${index}" value="${esc(cron)}" placeholder="分 时 日 月 周">
+      <span class="schedule-actions">
+        <button type="button" class="icon-button" data-add="${index}" title="在当前定时下方新增一行">＋</button>
+        <button type="button" class="icon-button" data-remove="${index}" title="删除当前定时">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+        </button>
+      </span>
+    </div>`).join("");
+  $("scheduleRows").innerHTML = rows || '<span class="note">尚未配置定时</span>';
+}
+
+function addCron(index = null) {
+  if (index == null) {
+    state.schedule.crons.push("");
+  } else {
+    state.schedule.crons.splice(Number(index) + 1, 0, "");
+  }
+  renderSchedule();
+  const inputs = document.querySelectorAll("[data-cron]");
+  const target = index == null ? inputs.length - 1 : Number(index) + 1;
+  inputs[target]?.focus();
+}
+
+function removeCron(index) {
+  state.schedule.crons.splice(Number(index), 1);
+  renderSchedule();
+}
+
+function renderStatic() {
+  $("timezone").value = state.schedule.timezone;
+  $("enabled").checked = state.schedule.enabled;
+  $("setup").value = state.setup;
+  renderSchedule();
+  $("rawYaml").textContent = RAW_YAML.replace(/\$\{TA_ENV\}/g, "${TA_ENV}");
+}
+
+function precedingTasks(task) {
+  const index = state.tasks.findIndex(item => item.id === task.id);
+  return state.tasks.slice(0, Math.max(0, index));
+}
+
+function checklist(labelText, task, field, candidates = state.tasks.filter(item => item.id !== task.id)) {
+  const boxes = candidates.map(item => `
+    <label><input type="checkbox" data-field="${field}" value="${esc(item.id)}"${task[field].includes(item.id) ? " checked" : ""}>
+      <span>${esc(item.description)}</span> <span class="summary-id">${esc(item.id)}</span></label>`).join("");
+  return `<div>
+    <div class="subhead">${labelText}<span class="note">${task[field].length} 个</span></div>
+    <div class="checklist${field === "depends" ? " depends-list" : ""}">${boxes || '<span class="note">没有可选任务</span>'}</div>
+  </div>`;
+}
+
+function conditionEditor(task) {
+  const condition = task.condition || { relation: "AND", groups: [{ relation: "AND", items: [] }] };
+  const depChips = task.depends.length
+    ? `<span class="chips">${task.depends.map(id =>
+        `<span class="chip">${esc(taskName(id))} <span class="summary-id">${esc(id)}</span></span>`).join("")}</span>`
+    : '<span class="note">未设置依赖，条件不会触发</span>';
+  return `
+    <div>
+      <div class="subhead">判断依据（来自「依赖」列表）<span class="note">${condition.relation}</span></div>
+      ${depChips}
+    </div>
+    <label class="f" style="max-width:220px">依赖任务关系
+      <select data-cond-relation>${["AND", "OR"].map(value =>
+        `<option value="${value}"${condition.relation === value ? " selected" : ""}>${value}</option>`).join("")}</select>
+    </label>
+    <p class="note" style="margin:0">AND：依赖任务全部成功后条件成立；OR：任一依赖任务成功即成立。</p>
+    ${checklist("成立分支（success）", task, "success")}
+    ${checklist("不成立分支（failure）", task, "failure")}`;
+}
+
+function renderTasks(opened) {
+  $("tasks").innerHTML = state.tasks.map(task => {
+    const depsTitle = task.depends.length
+      ? `依赖：${task.depends.map(id => taskName(id)).join("、")}`
+      : "无依赖";
+    const body = task.type === "condition"
+      ? conditionEditor(task)
+      : `<label class="f">命令<textarea class="code" data-command spellcheck="false">${esc(task.command)}</textarea></label>`;
+    return `
+    <details class="task" data-task="${esc(task.id)}"${opened.has(task.id) ? " open" : ""}>
+      <summary>
+        <span class="tag-type ${task.type}">${task.type === "condition" ? "条件" : "任务"}</span>
+        <span class="caret">▶</span>
+        <span class="summary-heading">
+          <span class="summary-title">${esc(task.description)}</span>
+          <span class="summary-id">${esc(task.id)}</span>
+        </span>
+        <span class="summary-deps"><span class="deps-text" title="${esc(depsTitle)}">${esc(depsTitle)}</span></span>
+      </summary>
+      <div class="task-body">
+        <div class="grid-2">
+          <label class="f">任务标题<input type="text" data-description value="${esc(task.description)}"></label>
+          <label class="switch"><input type="checkbox" data-enabled${task.enabled ? " checked" : ""}> 启用该任务</label>
+        </div>
+        ${checklist("依赖（depends）", task, "depends", precedingTasks(task))}
+        ${body}
+        <div style="text-align:right">
+          <button type="button" class="button danger small" onclick="deleteTask('${esc(task.id)}')">删除任务</button>
+        </div>
+      </div>
+    </details>`;
+  }).join("");
+}
+
+function bindTask(task) {
+  const root = document.querySelector(`details[data-task="${CSS.escape(task.id)}"]`);
+  if (!root) return;
+  root.querySelectorAll("[data-description]").forEach(input => input.addEventListener("input", () => {
+    task.description = input.value;
+    root.querySelector(".summary-title").textContent = input.value;
+  }));
+  root.querySelectorAll("[data-enabled]").forEach(input => input.addEventListener("change", () => {
+    task.enabled = input.checked;
+    renderTasks(new Set([...opened, task.id]));
+  }));
+  root.querySelectorAll("[data-command]").forEach(area => area.addEventListener("input", () => {
+    task.command = area.value;
+  }));
+  root.querySelectorAll("[data-field]").forEach(box => box.addEventListener("change", () => {
+    const field = box.dataset.field;
+    const values = [...root.querySelectorAll(`[data-field="${field}"]:checked`)].map(item => item.value);
+    task[field] = values;
+    renderTasks(new Set([...opened, task.id]));
+  }));
+  root.querySelectorAll("[data-cond-relation]").forEach(select => select.addEventListener("change", () => {
+    task.condition.relation = select.value;
+  }));
+}
+
+const opened = new Set();
+
+function renderAll() {
+  renderTasks(opened);
+  state.tasks.forEach(bindTask);
+}
+
+function toggleAll(open) {
+  opened.clear();
+  if (open) state.tasks.forEach(task => opened.add(task.id));
+  renderAll();
+}
+
+function addTask(type = "command") {
+  let n = state.tasks.length + 1;
+  let id = `task_new_${n}`;
+  while (state.tasks.some(task => task.id === id)) id = `task_new_${++n}`;
+  state.tasks.push({
+    id,
+    description: type === "condition" ? "新条件任务" : "新普通任务",
+    type,
+    enabled: true,
+    depends: [],
+    command: "",
+    success: [],
+    failure: [],
+    condition: type === "condition" ? { relation: "AND", groups: [{ relation: "AND", items: [] }] } : null,
+  });
+  opened.add(id);
+  renderAll();
+}
+
+function deleteTask(id) {
+  const index = state.tasks.findIndex(task => task.id === id);
+  if (index < 0) return;
+  state.tasks.splice(index, 1);
+  state.tasks.forEach(task => {
+    task.depends = task.depends.filter(item => item !== id);
+    task.success = task.success.filter(item => item !== id);
+    task.failure = task.failure.filter(item => item !== id);
+    if (task.condition) {
+      task.condition.groups.forEach(group => {
+        group.items = group.items.filter(item => item.task !== id);
+      });
+    }
+  });
+  opened.delete(id);
+  renderAll();
+}
+
+function currentEditingTask() {
+  const open = document.querySelector("details.task[open]");
+  return state.tasks.find(task => task.id === open?.dataset.task);
+}
+
+$("timezone").addEventListener("input", event => state.schedule.timezone = event.target.value);
+$("enabled").addEventListener("change", event => state.schedule.enabled = event.target.checked);
+$("setup").addEventListener("input", event => state.setup = event.target.value);
+$("scheduleRows").addEventListener("input", event => {
+  const index = event.target.dataset.cron;
+  if (index == null) return;
+  state.schedule.crons[Number(index)] = event.target.value;
+  refreshScheduleEnabled();
+});
+$("scheduleRows").addEventListener("click", event => {
+  const addButton = event.target.closest("[data-add]");
+  if (addButton) {
+    addCron(addButton.dataset.add);
+    return;
+  }
+  const removeButton = event.target.closest("[data-remove]");
+  if (removeButton) removeCron(removeButton.dataset.remove);
+});
+
+// 同步用户手动展开/折叠状态，保证删除任务后重渲染不改变其他任务的展开状态。
+$("tasks").addEventListener("toggle", event => {
+  const target = event.target;
+  if (!target.matches || !target.matches("details.task")) return;
+  if (target.open) opened.add(target.dataset.task);
+  else opened.delete(target.dataset.task);
+}, true);
+
+renderStatic();
+renderAll();
+</script>
+</body>
+</html>

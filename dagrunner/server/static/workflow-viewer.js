@@ -5,7 +5,8 @@ function disposeWorkflowViewer() {
 }
 
 function openWorkflowViewer(kind, id) {
-  openModal(kind === 'run' ? '运行详情' : '工作流', `<aside id="viewerDetails" class="viewer-details form-stack"><span id="viewerMessage" role="status">正在加载…</span><div id="viewerNode">正在加载节点内容…</div><div id="viewerTasks"></div></aside><section id="viewerGraphPanel"><div id="viewerLegend" class="dag-legend"></div><div id="viewerGraph" class="dag-scroll"></div></section>`);
+  if (kind !== 'run') { openReadOnlyWorkflow(id); return; }
+  openModal('运行详情', `<aside id="viewerDetails" class="viewer-details form-stack"><span id="viewerMessage" role="status">正在加载…</span><div id="viewerNode">正在加载节点内容…</div><div id="viewerTasks"></div></aside><section id="viewerGraphPanel"><div id="viewerLegend" class="dag-legend"></div><div id="viewerGraph" class="dag-scroll"></div></section>`);
   workflowViewer = {kind, id, direction: 'TB', selected: null, data: null, tasks: [], request: 0, logRequest: 0};
   mountWorkflowFrame(document.getElementById('viewerDetails'), document.getElementById('viewerGraphPanel'), direction => {
     const view = workflowViewer;
@@ -39,7 +40,7 @@ async function refreshWorkflowViewer() {
     document.getElementById('viewerMessage').classList.add('hidden');
     document.getElementById('viewerLegend').innerHTML = run
       ? ['RUNNING','SUCCESS','FAILED','SKIPPED','PENDING'].map(status => statusBadge(status)).join(' ')
-      : `<span>${t("点击节点定位 YAML · 右键执行任务")}</span>`;
+      : `<span>${t("点击节点定位任务卡片 · 右键执行任务")}</span>`;
     if (run) {
       // Scoped runs hide the tasks that were never part of the run.
       if (view.hideOutsideScope === undefined) view.hideOutsideScope = Boolean(run.from_task);
@@ -52,13 +53,8 @@ async function refreshWorkflowViewer() {
     }
     renderViewerGraph();
     if (view.kind === 'workflow') {
-      const rendered = renderViewerYaml(view);
-      if (rendered && view.tasks.some(task => task.name === view.selected)) selectViewerTask(view.selected);
-      else if (!rendered) {
-        view.selected = null;
-        view.renderedNode = null;
-        document.getElementById('viewerNode').textContent = '点击节点查看详情';
-      }
+      await loadViewerForm(view);
+      if (view.selected && view.tasks.some(task => task.name === view.selected)) selectViewerTask(view.selected);
     } else if (view.tasks.some(task => task.name === view.selected)) {
       selectViewerTask(view.selected);
     } else {
@@ -83,6 +79,43 @@ async function refreshWorkflowViewer() {
       if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
     }
   }
+}
+
+async function loadViewerForm(view) {
+  const target = document.getElementById('viewerReadForm');
+  if (!target) return;
+  try {
+    const model = await api(`/api/workflows/${encodeURIComponent(view.id)}/model`);
+    if (workflowViewer !== view) return;
+    model.schedule = model.schedule || {crons: [], timezone: 'Asia/Shanghai', enabled: false};
+    renderViewerForm(view, model);
+  } catch (error) {
+    target.innerHTML = `<span class="tf-note">只读表单加载失败：${esc(error.message)}</span>`;
+  }
+}
+
+function toggleViewerForm(open) {
+  const view = workflowViewer;
+  if (!view || view.kind !== 'workflow') return;
+  view.openTasks = new Set(open ? view.tasks.map(task => task.name) : []);
+  document.querySelectorAll('#viewerReadForm details.tf-task').forEach(card => { card.open = open; });
+}
+
+function renderViewerForm(view, model) {
+  const options = {readOnly: true, openSections: view.openSections, openTasks: view.openTasks};
+  const cards = model.tasks.map((task, index) => taskCardHtml(model, task, index, options)).join('');
+  const extraButtons = `<button type="button" class="button ghost small" onclick="toggleViewerForm(true)">全部展开</button>`
+    + `<button type="button" class="button ghost small" onclick="toggleViewerForm(false)">全部折叠</button>`;
+  document.getElementById('viewerReadForm').innerHTML =
+    schedulePanelHtml(model, options)
+    + setupPanelHtml(model, options)
+    + `<div class="tf-panel tf-section-gap">${taskListToolbarHtml(extraButtons)}<div class="tf-tasks tf-readonly-list">${cards}</div></div>`;
+  document.querySelectorAll('#viewerReadForm details.tf-collapse').forEach(section => {
+    section.addEventListener('toggle', () => {
+      if (section.open) view.openSections.add(section.dataset.section);
+      else view.openSections.delete(section.dataset.section);
+    });
+  });
 }
 
 function renderViewerTasks(view) {
@@ -183,6 +216,7 @@ function clearViewerSelection() {
   view.selected = null;
   document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.remove('preview-selected'));
   document.querySelectorAll('[data-run-task]').forEach(row => row.classList.remove('viewer-row-selected'));
+  document.querySelectorAll('#viewerReadForm .tf-focus').forEach(card => card.classList.remove('tf-focus'));
   const textarea = document.getElementById('viewerYaml');
   if (textarea) {
     clearYamlFlash(textarea);
@@ -190,7 +224,7 @@ function clearViewerSelection() {
     textarea.setSelectionRange(0, 0);
     textarea.scrollTop = 0;
     syncYamlScroll('viewerYaml');
-  } else {
+  } else if (document.getElementById('viewerNode')) {
     document.getElementById('viewerNode').textContent = '点击节点查看详情';
   }
 }
@@ -201,6 +235,24 @@ function selectViewerTask(name) {
   view.selected = name;
   document.querySelectorAll('#viewerGraph .dag-node').forEach(node => node.classList.toggle('preview-selected', node.dataset.task === name));
   document.querySelectorAll('[data-run-task]').forEach(row => row.classList.toggle('viewer-row-selected', row.dataset.runTask === name));
+  if (view.kind === 'workflow') {
+    document.querySelectorAll('#viewerReadForm .tf-focus').forEach(card => card.classList.remove('tf-focus'));
+    // 与编辑模式一致：选中一个任务时其他任务卡片收起。
+    document.querySelectorAll('#viewerReadForm details.tf-task').forEach(item => {
+      if (item.dataset.task !== name) {
+        item.open = false;
+        view.openTasks.delete(item.dataset.task);
+      }
+    });
+    const card = document.querySelector(`#viewerReadForm details.tf-task[data-task="${CSS.escape(name)}"]`);
+    if (card) {
+      card.classList.add('tf-focus');
+      card.open = true;
+      view.openTasks.add(name);
+      card.scrollIntoView({block: 'nearest'});
+    }
+    return;
+  }
   if (view.yamlRendered) {
     focusViewerYamlTask(name);
     return;

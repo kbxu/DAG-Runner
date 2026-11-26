@@ -85,6 +85,160 @@ def preview_definition(definition, workflow_name=None):
     }
 
 
+def build_model(definition):
+    """把工作流 YAML 解析成表单模式可用的结构化模型（保持任务顺序）。"""
+    data = yaml.safe_load(definition)
+    if not isinstance(data, dict):
+        raise WorkflowError("工作流 YAML 必须是映射")
+    tasks = []
+    for name, raw in (data.get("tasks") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        task_type = raw.get("type", "command")
+        command = raw.get("command")
+        if isinstance(command, list):
+            command = "\n".join(str(item) for item in command)
+        relation = "AND"
+        condition = raw.get("condition")
+        if isinstance(condition, dict):
+            relation = str(condition.get("relation", "AND")).upper()
+        tasks.append(
+            {
+                "name": str(name),
+                "description": str(raw.get("description", "")),
+                "type": task_type,
+                "enabled": bool(raw.get("enabled", True)),
+                "depends": [str(item) for item in _string_list(raw.get("depends"))],
+                "command": command if isinstance(command, str) else "",
+                "conditionRelation": relation,
+                "success": [str(item) for item in _string_list(raw.get("success"))],
+                "failure": [str(item) for item in _string_list(raw.get("failure"))],
+            }
+        )
+    description = data.get("name") if isinstance(data.get("name"), str) else ""
+    setup = data.get("setup")
+    schedule = None
+    raw_schedule = data.get("schedule")
+    if isinstance(raw_schedule, dict):
+        crons = raw_schedule.get("crons", raw_schedule.get("cron"))
+        if isinstance(crons, str):
+            crons = [crons]
+        if isinstance(crons, list):
+            schedule = {
+                "crons": [str(item) for item in crons if str(item).strip()],
+                "timezone": str(raw_schedule.get("timezone", "Asia/Shanghai")),
+                "enabled": bool(raw_schedule.get("enabled", False)),
+            }
+    return {
+        "description": description,
+        "runner": str(data.get("runner") or ""),
+        "setup": setup if isinstance(setup, str) else "",
+        "schedule": schedule,
+        "tasks": tasks,
+    }
+
+
+def _string_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def merge_model(definition, model):
+    """把表单模型合并回原 YAML，保留未编辑字段与顶层配置。"""
+    data = yaml.safe_load(definition)
+    if not isinstance(data, dict):
+        raise WorkflowError("工作流 YAML 必须是映射")
+    originals = data.get("tasks") or {}
+    if not isinstance(originals, dict):
+        originals = {}
+    tasks = {}
+    for item in model.get("tasks", []):
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        raw = dict(originals.get(name, {}))
+        for key in ("command", "condition", "success", "failure"):
+            raw.pop(key, None)
+        description = str(item.get("description", ""))
+        if description:
+            raw["description"] = description
+        elif "description" in raw:
+            del raw["description"]
+        task_type = item.get("type") if item.get("type") in ("command", "condition") else "command"
+        raw["type"] = task_type
+        if bool(item.get("enabled", True)):
+            raw.pop("enabled", None)
+        else:
+            raw["enabled"] = False
+        depends = [str(entry) for entry in (item.get("depends") or []) if str(entry)]
+        if depends:
+            raw["depends"] = depends
+        elif "depends" in raw:
+            raw["depends"] = []
+        if task_type == "command":
+            raw["command"] = item.get("command") or ""
+        else:
+            relation = "OR" if str(item.get("conditionRelation", "AND")).upper() == "OR" else "AND"
+            raw["condition"] = {
+                "relation": relation,
+                "groups": [
+                    {
+                        "relation": "AND",
+                        "items": [
+                            {"task": entry, "status": "SUCCESS"} for entry in depends
+                        ],
+                    }
+                ],
+            }
+            success = [str(entry) for entry in (item.get("success") or []) if str(entry)]
+            failure = [str(entry) for entry in (item.get("failure") or []) if str(entry)]
+            if success:
+                raw["success"] = success
+            if failure:
+                raw["failure"] = failure
+        tasks[name] = raw
+    data["tasks"] = tasks
+    if model.get("description") is not None:
+        data["name"] = str(model.get("description") or "")
+    if "setup" in model:
+        setup = model.get("setup") or ""
+        if setup:
+            data["setup"] = setup
+        else:
+            data.pop("setup", None)
+    if "runner" in model:
+        runner = str(model.get("runner") or "")
+        if runner:
+            data["runner"] = runner
+        else:
+            data.pop("runner", None)
+    if model.get("schedule") is not None:
+        schedule = model.get("schedule") or {}
+        crons = [
+            str(item).strip()
+            for item in (schedule.get("crons") or [])
+            if str(item).strip()
+        ]
+        if crons:
+            data["schedule"] = {
+                "crons": crons,
+                "timezone": str(schedule.get("timezone") or "Asia/Shanghai"),
+                "enabled": bool(schedule.get("enabled", False)),
+            }
+        else:
+            data.pop("schedule", None)
+    dumped = yaml.dump(
+        data, Dumper=LiteralDumper, allow_unicode=True, sort_keys=False, width=1000
+    )
+    preview_definition(dumped)
+    return dumped
+
+
 def extend_definition(definition, parent, kind, branch, workflow_name=None):
     preview_definition(definition, workflow_name)
     data = yaml.safe_load(definition)
