@@ -1229,7 +1229,7 @@ def create_app(
 
     @app.post("/api/workflows/<workflow_name>/run")
     def run_workflow(workflow_name: str):
-        _require_permission(workflow_name, "execute")
+        permission = _require_permission(workflow_name, "execute")
         payload = request.get_json(silent=True) or {}
         from_task = payload.get("from_task")
         if from_task is not None and not isinstance(from_task, str):
@@ -1238,6 +1238,9 @@ def create_app(
         only_task = bool(payload.get("only_task", False))
         if only_task and not from_task:
             raise ServiceError("only_task 需要 from_task")
+        # Executor 只允许整张工作流的单次手动执行；局部/续跑范围需要 maintainer。
+        if (from_task or only_task) and not permission_at_least(permission, "edit"):
+            raise AccessDenied("permission denied", 403)
         run_id = executions.start_run(
             workflow_name,
             from_task=from_task,
@@ -1403,7 +1406,7 @@ def create_app(
         run = database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
-        _require_permission(run["workflow_name"], "execute")
+        _require_permission(run["workflow_name"], "edit")
         new_id = executions.rerun(run_id, trigger_user=g.current_user)
         return jsonify({"ok": True, "run_id": new_id}), 202
 
@@ -1412,7 +1415,7 @@ def create_app(
         run = database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
-        _require_permission(run["workflow_name"], "execute")
+        _require_permission(run["workflow_name"], "edit")
         new_id = executions.resume_failed(run_id, trigger_user=g.current_user)
         return jsonify({"ok": True, "run_id": new_id}), 202
 

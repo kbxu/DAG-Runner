@@ -55,19 +55,42 @@ function setServiceStatus(status) {
 
 function esc(value) { return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c])); }
 function jsArg(value) { return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"); }
-const PERMISSION_ORDER = { read: 1, execute: 2, edit: 3 };
-function workflowPermission(name) {
+const PERMISSION_RANK = { read: 1, execute: 2, edit: 3 };
+// 存储里的权限：单词沿用旧的逐级包含语义；JSON 数组表示相互独立的权限组合。
+function parsePermissionFlags(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return new Set();
+  const lower = text.toLowerCase();
+  if (lower === "read") return new Set(["read"]);
+  if (lower === "execute") return new Set(["read", "execute"]);
+  if (lower === "edit") return new Set(["read", "execute", "edit"]);
+  if (lower.startsWith("[")) {
+    try {
+      const items = JSON.parse(text);
+      if (Array.isArray(items)) return new Set(items.filter(item => item in PERMISSION_RANK));
+    } catch (_) {}
+    return new Set();
+  }
+  return new Set(lower.split(",").map(item => item.trim()).filter(item => item in PERMISSION_RANK));
+}
+function serializePermissionFlags(flags) {
+  const ordered = Object.keys(PERMISSION_RANK).filter(perm => flags.has(perm));
+  if (!ordered.length) return "";
+  if (ordered.length === 3) return "edit";
+  if (ordered.length === 2 && ordered[0] === "read" && ordered[1] === "execute") return "execute";
+  return JSON.stringify(ordered);
+}
+function workflowPermissionSet(name) {
   const workflow = state.workflows.get(name);
-  if (workflow?.permission) return workflow.permission;
-  return state.auth.is_admin || state.auth.unrestricted ? "edit" : null;
+  if (workflow?.permission) return parsePermissionFlags(workflow.permission);
+  return state.auth.is_admin || state.auth.unrestricted ? new Set(["read", "execute", "edit"]) : new Set();
 }
 function canWorkflow(name, required) {
-  const permission = workflowPermission(name);
-  return Boolean(permission) && PERMISSION_ORDER[permission] >= PERMISSION_ORDER[required];
+  return workflowPermissionSet(name).has(required);
 }
 function canCreateWorkflow() {
   if (state.auth.is_admin || state.auth.unrestricted) return true;
-  return [...state.workflows.values()].some(workflow => workflow.permission === "edit");
+  return [...state.workflows.values()].some(workflow => parsePermissionFlags(workflow.permission).has("edit"));
 }
 async function loadAuth() {
   try { state.auth = await api("/api/auth/me"); }
@@ -473,10 +496,12 @@ async function loadRuns(resetPage=false) {
       const canEdit = canWorkflow(r.workflow_name, "edit");
       const actions = [];
       if (r.status === "RUNNING") {
+        // 停止不是新的执行动作，executor 也可以操作。
         if (canExecute) actions.push(`<button class="button danger" onclick="runAction('${r.run_id}','stop')">${t("停止")}</button>`);
       } else {
-        if (canExecute) actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">${t("重跑")}</button>`);
-        if (canExecute && r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" title="${esc(t("按最新配置续跑：从上次失败处继续，已成功的任务不重跑，运行位置以当前配置为准"))}" onclick="runAction('${r.run_id}','resume')">${t("失败续跑")}</button>`);
+        // 重跑/续跑会产生额外执行，只有 maintainer（edit）可用。
+        if (canEdit) actions.push(`<button class="button ghost" onclick="runAction('${r.run_id}','rerun')">${t("重跑")}</button>`);
+        if (canEdit && r.status === "FAILED" && r.error_message !== "stopped by user") actions.push(`<button class="button" title="${esc(t("按最新配置续跑：从上次失败处继续，已成功的任务不重跑，运行位置以当前配置为准"))}" onclick="runAction('${r.run_id}','resume')">${t("失败续跑")}</button>`);
         if (canEdit) actions.push(`<button class="button danger" onclick="deleteRun('${r.run_id}')">${t("删除")}</button>`);
       }
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
@@ -1466,7 +1491,11 @@ let accountWorkflowKeys = [];
 let accountWorkflowTitles = {};
 
 function permissionLabel(permission) {
-  return t(permission === "edit" ? "编辑" : permission === "execute" ? "执行" : "只读");
+  const flags = parsePermissionFlags(permission);
+  if (flags.has("edit")) return "Maintainer";
+  if (flags.has("execute")) return "Executor";
+  if (flags.has("read")) return "Reviewer";
+  return t("无权限");
 }
 
 function accountWorkflowLabel(key) {
@@ -1530,14 +1559,24 @@ function accountEditorHtml(account) {
   const unrestricted = Boolean(account?.unrestricted);
   const grants = {};
   for (const item of account?.workflows || []) grants[item.key] = item.permission;
-  const options = selected => ["", "read", "execute", "edit"].map(value =>
-    `<option value="${value}"${selected === value ? " selected" : ""}>${value ? permissionLabel(value) : t("无")}</option>`).join("");
+  const ROLE_OPTIONS = [
+    { value: "read", name: "Reviewer" },
+    { value: "execute", name: "Executor" },
+    { value: "edit", name: "Maintainer" },
+  ];
+  const roleDescription = value => t(value === "read" ? "只读" : value === "execute" ? "只读 + 执行" : "只读 + 执行 + 编辑");
+  const permissionCells = (key, granted) => {
+    const flags = parsePermissionFlags(granted);
+    const current = flags.has("edit") ? "edit" : flags.has("execute") ? "execute" : flags.has("read") ? "read" : "";
+    return ROLE_OPTIONS.map(option => `
+      <label class="account-role-cell"><input type="radio" name="account-perm-${esc(key)}" value="${option.value}" data-account-workflow="${esc(key)}"${current === option.value ? " checked" : ""} aria-label="${option.name} · ${esc(key)}"></label>`).join("");
+  };
   const workflowRows = accountWorkflowKeys.map(key => {
     const title = accountWorkflowTitles[key];
     const name = title && title !== key
       ? `<strong title="${esc(title)}">${esc(title)}</strong><span class="mono" title="${esc(key)}">${esc(key)}</span>`
       : `<strong class="mono" title="${esc(key)}">${esc(key)}</strong>`;
-    return `<div class="account-workflow-row"><div class="account-workflow-name">${name}</div><select class="ui-select" data-account-workflow="${esc(key)}">${options(grants[key])}</select></div>`;
+    return `<div class="account-workflow-row"><div class="account-workflow-name">${name}</div>${permissionCells(key, grants[key])}</div>`;
   }).join("");
   return `<div class="account-editor">
     <h4>${isNew ? t("新建账号") : t("编辑账号：{name}", {name: username})}</h4>
@@ -1547,11 +1586,27 @@ function accountEditorHtml(account) {
     </div>
     <div class="account-checks">
       <label class="account-check"><input id="accountEnabled" type="checkbox" ${enabled ? "checked" : ""}> ${t("启用")}</label>
-      <label class="account-check"><input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""}> ${t("全部工作流（旧账号兼容）")}</label>
+      <label class="account-check"><input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""}> ${t("全部工作流")}</label>
+    </div>
+    <div class="account-flag-hints">
+      <span class="form-hint">${t("启用：允许该账号登录控制台；禁用后其现有会话会立即失效。")}</span>
+      <span class="form-hint">${t("全部工作流：拥有所有工作流的完整权限，不再受下方逐项授权限制。")}</span>
     </div>
     <div class="account-workflows">
-      <div class="account-workflows-head"><span>${t("工作流权限")}</span><span class="form-hint">${t("未列出的工作流不可访问")}</span></div>
-      <div class="account-workflows-list">${workflowRows || `<span class="form-hint">${t("暂无工作流")}</span>`}</div>
+      <div class="account-workflows-head"><span>${t("工作流权限")}</span><span class="form-hint">${t("每行选择一个角色，角色说明见下表头")}</span></div>
+      <div class="account-workflows-bulk">
+        <span class="bulk-label">${t("统一设置")}</span>
+        <button type="button" class="button ghost" onclick="setAllAccountRoles('read')">Reviewer · ${t("只读")}</button>
+        <button type="button" class="button ghost" onclick="setAllAccountRoles('execute')">Executor · ${t("只读 + 执行")}</button>
+        <button type="button" class="button ghost" onclick="setAllAccountRoles('edit')">Maintainer · ${t("只读 + 执行 + 编辑")}</button>
+      </div>
+      <div class="account-workflows-list">
+        <div class="account-workflow-head">
+          <span class="account-workflow-head-label">${t("工作流")}</span>
+          ${ROLE_OPTIONS.map(option => `<div class="account-role-head"><span class="role-name">${option.name}</span><span class="role-desc">${roleDescription(option.value)}</span></div>`).join("")}
+        </div>
+        ${workflowRows || `<span class="form-hint">${t("暂无工作流")}</span>`}
+      </div>
     </div>
     <div class="account-editor-actions">
       <button class="button ghost" onclick="cancelAccountPanel()">${t("取消")}</button>
@@ -1564,15 +1619,25 @@ function addAccountPanel() { renderAccountSettings(lastAccounts, "new"); }
 function editAccountPanel(username) { renderAccountSettings(lastAccounts, username); }
 function cancelAccountPanel() { renderAccountSettings(lastAccounts, null); }
 
+function setAllAccountRoles(role) {
+  document.querySelectorAll("#modalBody [name^='account-perm-']").forEach(radio => {
+    radio.checked = radio.value === role;
+  });
+}
+
 function readAccountPanel() {
   const payload = {
     enabled: document.getElementById("accountEnabled").checked,
     unrestricted: document.getElementById("accountUnrestricted").checked,
     workflows: {},
   };
-  document.querySelectorAll("[data-account-workflow]").forEach(select => {
-    if (select.value) payload.workflows[select.dataset.accountWorkflow] = select.value;
-  });
+  const keys = [...new Set(
+    [...document.querySelectorAll("#modalBody [data-account-workflow]")].map(item => item.dataset.accountWorkflow)
+  )];
+  for (const key of keys) {
+    const checked = document.querySelector(`#modalBody [data-account-workflow="${CSS.escape(key)}"]:checked`);
+    if (checked) payload.workflows[key] = checked.value;
+  }
   if (accountEditing === "new") {
     payload.username = document.getElementById("accountUsername").value.trim();
     payload.password = document.getElementById("accountPassword").value;

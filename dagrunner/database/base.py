@@ -345,9 +345,8 @@ SCHEMA: tuple[TableSpec, ...] = (
             ColumnSpec(
                 "permission",
                 "TEXT",
-                "VARCHAR(16)",
+                "VARCHAR(64)",
                 not_null=True,
-                check="permission IN ('read','execute','edit')",
             ),
         ),
         primary_key=("username", "workflow_key"),
@@ -597,6 +596,7 @@ class BaseStateDatabase:
         with self.connect() as connection:
             self._create_schema(connection)
             self._ensure_columns(connection)
+            self._migrate_user_workflow_permissions(connection)
             self._drop_legacy_tables(connection)
             self._normalize_timestamps(connection)
             self._after_init(connection)
@@ -694,6 +694,46 @@ class BaseStateDatabase:
                 connection.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
                 )
+
+    def _migrate_user_workflow_permissions(self, connection: Any) -> None:
+        """旧版 permission 列带 CHECK 约束且长度不足，重建表以支持独立权限组合。"""
+        if self.dialect == "sqlite":
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='user_workflows'"
+            ).fetchone()
+            if row is None or not row[0] or "CHECK" not in str(row[0]).upper():
+                return
+            rename = "ALTER TABLE user_workflows RENAME TO user_workflows_legacy"
+            undo = "ALTER TABLE user_workflows_legacy RENAME TO user_workflows"
+        else:
+            row = connection.execute("SHOW CREATE TABLE user_workflows").fetchone()
+            if row is None or "CHECK" not in str(row[1]).upper():
+                return
+            rename = "RENAME TABLE user_workflows TO user_workflows_legacy"
+            undo = "RENAME TABLE user_workflows_legacy TO user_workflows"
+        spec = next(table for table in SCHEMA if table.name == "user_workflows")
+        if self.dialect == "sqlite":
+            connection.commit()
+            connection.execute("PRAGMA foreign_keys = OFF")
+        else:
+            connection.execute("SET FOREIGN_KEY_CHECKS = 0")
+        connection.execute(rename)
+        try:
+            connection.execute(self._render_create_table(spec))
+            connection.execute(
+                "INSERT INTO user_workflows (username, workflow_key, permission) "
+                "SELECT username, workflow_key, permission FROM user_workflows_legacy"
+            )
+        except Exception:
+            connection.execute("DROP TABLE IF EXISTS user_workflows")
+            connection.execute(undo)
+            raise
+        finally:
+            if self.dialect == "sqlite":
+                connection.execute("PRAGMA foreign_keys = ON")
+            else:
+                connection.execute("SET FOREIGN_KEY_CHECKS = 1")
+        connection.execute("DROP TABLE user_workflows_legacy")
 
     @staticmethod
     def _drop_legacy_tables(connection: Any) -> None:

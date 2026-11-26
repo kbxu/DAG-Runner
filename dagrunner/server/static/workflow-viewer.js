@@ -137,6 +137,8 @@ function renderViewerGraph() {
     graph.addEventListener('contextmenu', event => {
       const node = event.target.closest('.dag-node');
       if (!node) return;
+      // 局部执行（单任务/子树）属于 maintainer 能力；executor 只能整张手动运行。
+      if (typeof canWorkflow !== 'function' || !canWorkflow(view.id, 'edit')) return;
       event.preventDefault();
       openTaskRunMenu(view.id, node.dataset.task, event);
     });

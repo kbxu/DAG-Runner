@@ -552,17 +552,31 @@ pre { overflow: auto; min-height: 220px; margin: 0; padding: 15px; color: #dbeaf
 .account-form-grid .account-full { grid-column: 1 / -1; }
 .account-checks { display: flex; flex-wrap: nowrap; gap: 8px 22px; }
 .account-check { display: flex; align-items: center; flex: 0 0 auto; gap: 8px; white-space: nowrap; font-size: 13px; color: #344054; }
+.account-flag-hints { display: flex; flex-direction: column; gap: 3px; }
+.account-workflows-bulk { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: #f8fafc; }
+.account-workflows-bulk .bulk-label { margin-right: 2px; font-size: 12px; font-weight: 700; color: #344054; }
+.account-workflows-bulk .button { padding: 4px 9px; font-size: 11px; }
+.account-workflow-head, .account-workflow-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(3, 96px); align-items: center; gap: 8px; padding: 8px 12px; }
+.account-workflow-head { position: sticky; top: 0; z-index: 1; border-bottom: 1px solid var(--line); background: #f8fafc; }
+.account-workflow-head-label { font-size: 12px; font-weight: 700; color: #344054; }
+.account-role-head { display: flex; flex-direction: column; align-items: center; gap: 1px; text-align: center; }
+.role-name { color: var(--ink); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.role-desc { color: var(--muted); font-size: 11px; }
+.account-role-cell { display: flex; align-items: center; justify-content: center; }
+.account-role-cell input { width: 16px; height: 16px; margin: 0; accent-color: var(--teal); cursor: pointer; }
 .account-workflows { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: white; }
 .account-workflows-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: #f8fafc; color: #344054; font-size: 12px; font-weight: 700; }
 .account-workflows-head .form-hint { margin: 0; }
 .account-workflows-list { max-height: 220px; overflow: auto; }
-.account-workflow-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; border-top: 1px solid #edf0f2; font-size: 12px; }
-.account-workflow-row:first-child { border-top: 0; }
+.account-workflow-row { border-top: 1px solid #edf0f2; font-size: 12px; }
+.account-workflow-head + .account-workflow-row { border-top: 0; }
 .account-workflow-name { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
 .account-workflow-name strong { overflow: hidden; color: #344054; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .account-workflow-name .mono { overflow: hidden; color: #98a2b3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.account-workflow-row select { flex: 0 0 112px; width: 112px; margin: 0; padding: 6px 26px 6px 9px; }
 .account-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 560px) {
+  .account-workflow-head, .account-workflow-row { grid-template-columns: minmax(0, 1fr) repeat(3, 64px); gap: 6px; }
+}
 @media (max-width: 720px) {
   .account-form-grid { grid-template-columns: 1fr; }
   .account-editor { padding: 12px; }

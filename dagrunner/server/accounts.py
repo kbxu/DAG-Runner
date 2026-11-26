@@ -1,13 +1,16 @@
 """Account management: per-workflow permissions and the admin bootstrap.
 
 The admin account is the user named ``admin`` (see :data:`ADMIN_USERNAME`).
-Every other account carries a set of workflow grants, each one ``read``,
-``execute`` or ``edit``. Accounts created before this feature existed keep full
-workflow access through the ``unrestricted`` flag.
+Every other account carries per-workflow grants. A grant is a set of
+``read``/``execute``/``edit`` flags: single legacy words keep their old
+cumulative meaning, while JSON lists store arbitrary combinations.
+Accounts created before this feature existed keep full workflow access
+through the ``unrestricted`` flag.
 """
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import re
 import sys
@@ -29,21 +32,65 @@ from ..database import (
 ADMIN_USERNAME = "admin"
 PERMISSIONS = {"read": 1, "execute": 2, "edit": 3}
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+# 旧数据里单个权限词表示「该等级及其以下」的全部权限。
+CUMULATIVE_PERMISSIONS = {
+    "read": frozenset({"read"}),
+    "execute": frozenset({"read", "execute"}),
+    "edit": frozenset({"read", "execute", "edit"}),
+}
 
 
 class AccountError(RuntimeError):
     pass
 
 
-def normalize_permission(value: object) -> str:
-    text = str(value or "").strip().lower()
-    if text not in PERMISSIONS:
+def _normalize_flags(items: object) -> frozenset:
+    flags = frozenset(str(item).strip().lower() for item in items)
+    if not flags or not flags.issubset(PERMISSIONS):
         raise AccountError("permission must be read, execute, or edit")
-    return text
+    return flags
+
+
+def parse_permission_set(value: object) -> frozenset:
+    """解析存储的权限：单词沿用旧的逐级包含语义，JSON 数组表示独立权限组合。"""
+    text = str(value or "").strip()
+    if not text:
+        return frozenset()
+    lowered = text.lower()
+    if lowered in CUMULATIVE_PERMISSIONS:
+        return CUMULATIVE_PERMISSIONS[lowered]
+    if lowered.startswith("["):
+        try:
+            items = json.loads(text)
+        except (TypeError, ValueError) as exc:
+            raise AccountError("permission must be read, execute, or edit") from exc
+        if not isinstance(items, list):
+            raise AccountError("permission must be read, execute, or edit")
+        return _normalize_flags(items)
+    parts = [part.strip().lower() for part in lowered.split(",") if part.strip()]
+    if parts:
+        return _normalize_flags(parts)
+    raise AccountError("permission must be read, execute, or edit")
+
+
+def serialize_permission_set(flags: object) -> str:
+    normalized = _normalize_flags(flags)
+    for word, cumulative in CUMULATIVE_PERMISSIONS.items():
+        if normalized == cumulative:
+            return word
+    return json.dumps(sorted(normalized, key=PERMISSIONS.__getitem__), ensure_ascii=False)
+
+
+def normalize_permission(value: object) -> str:
+    if isinstance(value, str):
+        return serialize_permission_set(parse_permission_set(value))
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return serialize_permission_set(value)
+    raise AccountError("permission must be read, execute, or edit")
 
 
 def permission_at_least(permission: str, required: str) -> bool:
-    return PERMISSIONS[permission] >= PERMISSIONS[required]
+    return required in parse_permission_set(permission)
 
 
 class AccountService:
@@ -70,7 +117,7 @@ class AccountService:
         if self.is_admin(username) or self.is_unrestricted(username):
             return True
         return any(
-            permission == "edit"
+            "edit" in parse_permission_set(permission)
             for permission in self.permissions_for(username).values()
         )
 
