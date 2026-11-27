@@ -569,8 +569,9 @@ async function loadRuns(resetPage=false) {
     state.runPagination = data.pagination;
     state.runPage = data.pagination.page;
     document.getElementById("runRows").innerHTML = data.runs.map(r => {
-      const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.handled_count || 0) + (r.skipped_count || 0);
-      const percent = r.task_count ? Math.round(complete * 100 / r.task_count) : 0;
+      const complete = (r.success_count || 0) + (r.failed_count || 0) + (r.handled_count || 0);
+      const total = Math.max(0, (r.task_count || 0) - (r.skipped_count || 0));
+      const percent = total ? Math.round(complete * 100 / total) : 0;
       const canExecute = canWorkflow(r.workflow_name, "execute");
       const canEdit = canWorkflow(r.workflow_name, "edit");
       const actions = [];
@@ -586,7 +587,7 @@ async function loadRuns(resetPage=false) {
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
       const triggerText = esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual");
-      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${triggerText}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${triggerText}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${total} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
     renderRunStats(data.stats);

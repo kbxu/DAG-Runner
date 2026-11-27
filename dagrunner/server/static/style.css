@@ -787,6 +787,10 @@ html[data-theme="dark"] label,
 html[data-theme="dark"] .tf-field-label,
 html[data-theme="dark"] .schedule-label,
 html[data-theme="dark"] .schedule-check { color: #cbd5e1; }
+html[data-theme="dark"] .tf-code-box { background: #0f172a; border-color: #334155; }
+html[data-theme="dark"] .tf-code-gutter { background: #172033; border-right-color: #263244; color: #64748b; }
+html[data-theme="dark"] .tf-code-box textarea,
+html[data-theme="dark"] .tf-ro-code-box .tf-ro-code { background: transparent; border: 0; color: #e2e8f0; }
 html[data-theme="dark"] .dag-scroll { background-color: #0f172a; background-image: radial-gradient(#334155 0.75px, transparent 0.75px); border-color: #263244; }
 html[data-theme="dark"] .dag-branch-label { fill: #cbd5e1; stroke: #0f172a; }
 html[data-theme="dark"] .workflow-editor-footer { border-top-color: #263244; }
@@ -935,7 +939,7 @@ select.ui-select.tf-task-runner { height: 30px; min-height: 30px; margin-top: 0;
 .tf-menu-sep { height: 1px; margin: 2px 4px; background: #eaecf0; }
 .tf-menu-item.danger { color: #b42318; }
 .tf-menu-item.danger:hover { background: #fef3f2; }
-.tf-body label.f.tf-command-field { width: var(--tf-field-w); max-width: 100%; }
+.tf-body label.f.tf-command-field { width: 100%; max-width: 100%; }
 .tf-grid2 { display: grid; grid-template-columns: minmax(0, var(--tf-field-w)) auto; justify-content: start; align-items: end; gap: 6px 10px; }
 .tf-grid2 > label.switch { justify-self: start; display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 9px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f8fafc; font-size: 11.5px; font-weight: 600; color: #344054; cursor: pointer; box-sizing: border-box; }
 .tf-grid2 > label.switch input { accent-color: var(--teal); cursor: pointer; }
@@ -958,10 +962,14 @@ select.ui-select.tf-task-runner { height: 30px; min-height: 30px; margin-top: 0;
 .tf-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tf-opt-id { flex: 0 0 auto; color: #98a2b3; font-size: 10.5px; }
 .tf-checklist input { accent-color: var(--teal); flex: 0 0 auto; }
-.tf-command, .tf-setup { width: 100%; margin-top: 0; padding: 5px 8px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fcfcfd; font: 12px/1.45 "Cascadia Code", Consolas, "Microsoft YaHei", "PingFang SC", sans-serif; resize: vertical; box-sizing: border-box; }
+.tf-code-box { display: flex; align-items: stretch; width: 100%; min-width: 0; border: 1px solid #d0d5dd; border-radius: 6px; background: #fcfcfd; overflow: hidden; box-sizing: border-box; }
+.tf-code-box:focus-within { border-color: var(--teal); box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal) 18%, transparent); }
+.tf-code-gutter { flex: 0 0 auto; min-width: 32px; padding: 5px 6px; text-align: right; color: #98a2b3; background: #f2f4f7; border-right: 1px solid #e4e7ec; font: 12px/18px "Cascadia Code", Consolas, "Microsoft YaHei", "PingFang SC", monospace; white-space: pre; overflow: hidden; user-select: none; box-sizing: border-box; }
+.tf-command, .tf-setup { flex: 1 1 auto; min-width: 0; width: 100%; margin: 0; padding: 5px 8px; border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent; font: 12px/18px "Cascadia Code", Consolas, "Microsoft YaHei", "PingFang SC", monospace; white-space: pre; overflow-x: auto; overflow-wrap: normal; resize: none; box-sizing: border-box; }
+.tf-command:focus, .tf-setup:focus { outline: none; box-shadow: none; border-color: transparent; }
 .tf-command::placeholder, .tf-setup::placeholder { font-family: Inter, "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif; font-size: 11.5px; color: #98a2b3; }
-.tf-command { height: 30px; min-height: 30px; overflow: hidden; resize: none; }
-.tf-setup { height: 30px; min-height: 30px; overflow: hidden; resize: none; }
+.tf-command { height: 28px; min-height: 28px; overflow-y: hidden; }
+.tf-setup { height: 28px; min-height: 28px; overflow-y: hidden; }
 .tf-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .tf-chip { padding: 1px 6px; border-radius: 99px; background: #e6f4f1; color: #0f766e; font-size: 10.5px; font-weight: 600; }
 .tf-actions { display: flex; justify-content: flex-end; padding-top: 2px; border-top: 1px dashed #eaecf0; }
@@ -982,7 +990,9 @@ select.ui-select.tf-task-runner { height: 30px; min-height: 30px; margin-top: 0;
 .tf-ro-block { display: flex; gap: 8px; padding: 3px 0; font-size: 12px; }
 .tf-ro-label { flex: 0 0 72px; color: var(--muted); font-weight: 650; }
 .tf-ro-value { min-width: 0; overflow-wrap: anywhere; }
-.tf-ro-code { margin: 0; padding: 6px 8px; min-height: 0; max-height: calc(1.5em * 8 + 14px); color: #1e293b; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; font: 12px/1.5 "Cascadia Code", Consolas, "Microsoft YaHei", monospace; white-space: pre-wrap; word-break: break-word; overflow: auto; flex: 1 1 auto; }
+.tf-ro-code-box { flex: 1 1 auto; max-height: calc(18px * 8 + 12px); overflow-y: auto; overflow-x: hidden; background: #f8fafc; }
+.tf-ro-code-box .tf-code-gutter { overflow: visible; }
+.tf-ro-code { margin: 0; padding: 5px 8px; min-height: 0; color: #1e293b; border: 0; border-radius: 0; background: transparent; font: 12px/18px "Cascadia Code", Consolas, "Microsoft YaHei", "PingFang SC", monospace; white-space: pre; overflow-x: auto; overflow-y: hidden; flex: 1 1 auto; min-width: 0; }
 .tf-readonly-list details.tf-task > summary { cursor: default; }
 .tf-task.tf-focus { border-left-color: #2563eb; }
 .tf-task.tf-focus > summary { background: #eff6ff; }

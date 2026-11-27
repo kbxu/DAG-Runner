@@ -159,6 +159,17 @@ function renderViewerSummaryHtml(view) {
   </div>`;
 }
 
+function viewerCodeBlockHtml(text) {
+  const normalized = String(text ?? '').replace(/\r\n/g, '\n');
+  let lineCount = 1;
+  for (let i = 0; i < normalized.length; i += 1) {
+    if (normalized.charCodeAt(i) === 10) lineCount += 1;
+  }
+  let numbers = '1';
+  for (let i = 2; i <= lineCount; i += 1) numbers += `\n${i}`;
+  return `<div class="tf-code-box tf-ro-code-box"><div class="tf-code-gutter" aria-hidden="true">${numbers}</div><pre class="tf-ro-code">${esc(normalized)}</pre></div>`;
+}
+
 function renderViewerSetupHtml(view) {
   const run = view.data.run;
   const open = view.openSections.has('setup');
@@ -172,7 +183,7 @@ function renderViewerSetupHtml(view) {
     <div class="tf-collapse-body">
       <div class="tf-ro-block"><span class="tf-ro-label">运行位置</span><span class="tf-ro-value">${esc(runnerLabel)}</span></div>
       ${setupText
-        ? `<div class="tf-ro-block"><span class="tf-ro-label">预跑命令</span><pre class="tf-ro-code">${esc(setupText)}</pre></div>`
+        ? `<div class="tf-ro-block"><span class="tf-ro-label">预跑命令</span>${viewerCodeBlockHtml(setupText)}</div>`
         : '<span class="tf-note">未配置预跑命令</span>'}
     </div>
   </details>`;
@@ -220,7 +231,7 @@ function renderViewerTaskCardHtml(view, row, graphTask, names) {
   const commandSection = taskType === 'condition'
     ? `<div class="tf-ro-block"><span class="tf-ro-label">条件结果</span><span class="tf-ro-value">${row.condition_result ? `<strong>${esc(row.condition_result.toUpperCase())}</strong>` : '—'}</span></div>`
     : (graphTask?.command
-      ? `<div class="tf-block"><div class="subhead">执行命令</div><pre class="tf-ro-code">${esc(graphTask.command)}</pre></div>`
+      ? `<div class="tf-block"><div class="subhead">执行命令</div>${viewerCodeBlockHtml(graphTask.command)}</div>`
       : '');
   const depsSection = deps.length
     ? `<div class="tf-ro-block"><span class="tf-ro-label">前置依赖</span><div class="tf-chips">${deps.map(id => `<span class="tf-chip">${esc(names[id] || id)}</span>`).join('')}</div></div>`
@@ -256,10 +267,11 @@ function renderViewerLeft(view) {
   if (summaryHost) summaryHost.innerHTML = renderViewerSummaryHtml(view);
   const prevScroll = container.scrollTop;
   const rows = view.data.tasks || [];
+  const visibleRows = rows.filter(row => row.status !== 'SKIPPED');
   const graphByName = new Map((view.tasks || []).map(item => [item.name, item]));
   const names = Object.fromEntries(rows.map(item => [item.task_name, item.task_description || item.task_name]));
-  const cards = rows.map(row => renderViewerTaskCardHtml(view, row, graphByName.get(row.task_name), names)).join('');
-  const toolbar = `<div class="tf-panel-head tf-list-head"><span class="tf-section-head">任务列表<span class="tf-count-badge">${rows.length}</span></span><div class="tf-toolbar">
+  const cards = visibleRows.map(row => renderViewerTaskCardHtml(view, row, graphByName.get(row.task_name), names)).join('');
+  const toolbar = `<div class="tf-panel-head tf-list-head"><span class="tf-section-head">任务列表<span class="tf-count-badge">${visibleRows.length}</span></span><div class="tf-toolbar">
     <button type="button" class="button ghost small" data-rv-action="expand">展开</button>
     <button type="button" class="button ghost small" data-rv-action="collapse">折叠</button>
   </div></div>`;
@@ -408,7 +420,7 @@ function onViewerSectionClick(event) {
   if (action === 'refresh') {
     refreshWorkflowViewer(false);
   } else if (action === 'expand') {
-    const rows = view.data?.tasks || [];
+    const rows = (view.data?.tasks || []).filter(item => item.status !== 'SKIPPED');
     rows.forEach(item => view.openTasks.add(item.task_name));
     renderViewerLeft(view);
   } else if (action === 'collapse') {

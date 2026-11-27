@@ -109,6 +109,7 @@ function initWorkflowEditor() {
   formPanel.addEventListener('change', onTaskFormChange);
   formPanel.addEventListener('click', onTaskFormClick);
   formPanel.addEventListener('toggle', onTaskFormToggle, true);
+  formPanel.addEventListener('scroll', onTaskFormScroll, true);
   // 删除/新增定时后列表会整体上移，防止同一位置的连击误触到下方的任务摘要。
   formPanel.addEventListener('click', event => {
     const editor = workflowEditor;
@@ -442,14 +443,53 @@ async function flushScheduleServerSync() {
   editor.scheduleDirty = false;
 }
 
-function autoGrowSetup(textarea) {
+function countTextLines(text) {
+  const s = String(text || '');
+  let count = 1;
+  for (let i = 0; i < s.length; i += 1) {
+    if (s.charCodeAt(i) === 10) count += 1;
+  }
+  return count;
+}
+
+function codeLineNumbers(countOrText) {
+  const count = typeof countOrText === 'number' ? Math.max(1, countOrText) : countTextLines(countOrText);
+  let out = '1';
+  for (let i = 2; i <= count; i += 1) out += `\n${i}`;
+  return out;
+}
+
+function codeBoxHtml(textareaHtml, text) {
+  return `<div class="tf-code-box"><div class="tf-code-gutter" aria-hidden="true">${codeLineNumbers(text)}</div>${textareaHtml}</div>`;
+}
+
+function onTaskFormScroll(event) {
+  const target = event.target;
+  if (!target?.matches?.('.tf-command, .tf-setup')) return;
+  const gutter = target.closest('.tf-code-box')?.querySelector('.tf-code-gutter');
+  if (gutter) gutter.scrollTop = target.scrollTop;
+}
+
+function autoGrowSetup(textarea, force = false) {
   if (!textarea) return;
-  const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 18;
-  textarea.style.height = 'auto';
-  const max = lineHeight * 8 + 4;
-  const next = Math.min(textarea.scrollHeight + 2, max);
-  textarea.style.height = `${Math.max(next, lineHeight + 8)}px`;
-  textarea.style.overflowY = textarea.scrollHeight > max ? 'auto' : 'hidden';
+  const lineCount = countTextLines(textarea.value);
+  const prevCount = Number(textarea.dataset.lineCount || 0);
+  if (!force && prevCount === lineCount) return;
+  textarea.dataset.lineCount = String(lineCount);
+  const lineHeight = 18;
+  const padY = 10;
+  const maxLines = 8;
+  const visibleLines = Math.min(Math.max(1, lineCount), maxLines);
+  const heightPx = `${visibleLines * lineHeight + padY}px`;
+  if (textarea.style.height !== heightPx) textarea.style.height = heightPx;
+  const nextOverflowY = lineCount > maxLines ? 'auto' : 'hidden';
+  if (textarea.style.overflowY !== nextOverflowY) textarea.style.overflowY = nextOverflowY;
+  const gutter = textarea.closest('.tf-code-box')?.querySelector('.tf-code-gutter');
+  if (gutter) {
+    gutter.textContent = codeLineNumbers(lineCount);
+    if (gutter.style.height !== heightPx) gutter.style.height = heightPx;
+    gutter.scrollTop = textarea.scrollTop;
+  }
 }
 
 function scheduleSummaryBadge(schedule) {
@@ -527,7 +567,7 @@ function setupPanelHtml(model, options = {}) {
     </summary>
     <div class="tf-collapse-body">
       <div class="tf-setup-grid">
-        <label class="f">预跑命令<textarea id="tfSetup" class="tf-setup" rows="1" data-field="setup" placeholder="如：激活虚拟环境、切换目录或设置环境变量"${disabled}>${esc(model.setup)}</textarea></label>
+        <label class="f">预跑命令${codeBoxHtml(`<textarea id="tfSetup" class="tf-setup" rows="1" wrap="off" data-field="setup" placeholder="如：激活虚拟环境、切换目录或设置环境变量"${disabled}>${esc(model.setup)}</textarea>`, model.setup)}</label>
         <div class="tf-runner-slot">${runnerBlock}</div>
       </div>
       <p class="form-hint">预跑命令仅对与工作流「运行位置」相同的任务生效；单独指定了其他运行位置的任务不会执行该预跑命令。</p>
@@ -608,7 +648,7 @@ function taskCardHtml(model, task, index, options = {}) {
           </select>
         </label>
       </div>`
-    : `<label class="f tf-command-field">命令<textarea class="tf-command" rows="1" data-field="command" data-task="${esc(task.name)}" placeholder="输入要执行的命令"${disabled}>${esc(task.command)}</textarea></label>`;
+    : `<label class="f tf-command-field">命令${codeBoxHtml(`<textarea class="tf-command" rows="1" wrap="off" data-field="command" data-task="${esc(task.name)}" placeholder="输入要执行的命令"${disabled}>${esc(task.command)}</textarea>`, task.command)}</label>`;
   const branches = task.type === 'condition'
     ? `<div class="tf-branch-grid">
          <div class="tf-block"><div class="subhead"><span class="branch-dot success"></span>成立分支（success）<span class="note">${task.success.length}</span></div><div class="tf-checklist">${branchBoxes('success')}</div></div>
@@ -838,9 +878,11 @@ function onTaskFormInput(event) {
       if (title) title.textContent = task.description || '（未命名任务）';
       renderDraftPreviewFromModel(editor);
     } else if (field === 'command') {
+      const wasEmpty = !String(task.command || '').trim();
       task.command = event.target.value;
+      const isEmpty = !String(task.command || '').trim();
       autoGrowSetup(event.target);
-      renderDraftPreviewFromModel(editor);
+      if (wasEmpty !== isEmpty) renderDraftPreviewFromModel(editor);
     }
   }
   scheduleFormSync();
@@ -991,6 +1033,7 @@ function onTaskFormToggle(event) {
   if (!target.matches('details.tf-task')) return;
   if (target.open) {
     editor.formOpen.add(target.dataset.task);
+    autoGrowSetup(target.querySelector('.tf-command'));
     // 展开任务卡片即选中它，作为新增任务的插入锚点。
     editor.selectedTask = target.dataset.task;
     editor.selected = target.dataset.task;
