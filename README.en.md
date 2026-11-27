@@ -175,7 +175,7 @@ python -m dagrunner.watchdog --status --role master  # print supervisor status
 - Updates: when a watchdog is active it performs the version switch, verification and rollback; otherwise the original `watchdog/restart.py` path is used unchanged.
 - `mode: notify` disables automatic restarts (alert only); a per-role lock prevents duplicate supervisors.
 
-Defaults live in the `watchdog` section of `var/example_configs/config.example.yaml`. Restarting on an unhealthy process interrupts running tasks; use `mode: notify` if that is not acceptable.
+Defaults live in the `watchdog` section of `var/examples/config.example.yaml`. Restarting on an unhealthy process interrupts running tasks; use `mode: notify` if that is not acceptable.
 
 ## Configuration
 

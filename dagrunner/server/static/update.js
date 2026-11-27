@@ -3,6 +3,8 @@ let updateStatus = { current_version: "", state: "idle", satellites: {} };
 let updateVersions = [];
 let updateSource = "";
 let updateBranch = null;
+let updateChecking = false;
+let updateApplying = false;
 
 function knownSatellites(status) {
   const merged = {};
@@ -59,25 +61,49 @@ async function refreshUpdateStatus() {
   }
 }
 
-function updateStateBadge(state) {
-  const label = t(state || "idle");
-  return `<span class="update-state ${esc(state || "")}">${esc(label)}</span>`;
+function updateStateBadge(stateName) {
+  const key = stateName || "idle";
+  const labels = {
+    idle: "空闲",
+    ready: "可更新",
+    preparing: "准备中",
+    prepared: "已就绪",
+    staged: "已暂存",
+    committing: "应用中",
+    done: "已完成",
+    failed: "失败",
+    prepare_failed: "准备失败",
+    commit_failed: "应用失败",
+    aborted: "已中止",
+  };
+  const label = t(labels[key] || key);
+  return `<span class="update-state ${esc(key)}">${esc(label)}</span>`;
 }
 
 function updateSatelliteRows(satellites) {
   const entries = Object.entries(satellites || {});
-  if (!entries.length) return `<p class="form-hint">${t("暂无卫星节点")}</p>`;  return entries.map(([alias, info]) => {
+  if (!entries.length) {
+    return `<div class="update-sat-empty">${esc(t("暂无卫星节点"))}</div>`;
+  }
+  return entries.map(([alias, info]) => {
     const version = info.current_version || "—";
     const online = info.online ? t("在线") : t("离线");
-    const state = info.state || "";
-    const message = info.message ? ` · ${esc(info.message)}` : "";
+    const stateName = info.state || "";
+    const message = info.message ? `<div class="update-satellite-message">${esc(info.message)}</div>` : "";
+    const branchPill = info.branch
+      ? `<span class="update-sat-cap ${info.branch.available ? "ok" : "no"}" title="${esc(info.branch.reason || "")}">${info.branch.available ? t("支持分支更新") : t("不支持")}</span>`
+      : "";
     return `<div class="update-satellite-row">
-      <span class="satellite-row-alias">${esc(alias)}</span>
-      <span class="satellite-status ${info.online ? "online" : "offline"}">${online}</span>
-      <span class="mono">v${esc(version)}</span>
-      ${info.branch ? `<span class="satellite-branch ${info.branch.available ? "online" : ""}" title="${esc(info.branch.reason || "")}">${info.branch.available ? t("支持") : t("不支持")}</span>` : ""}
-      ${updateStateBadge(state)}
-      <span class="update-satellite-message">${message}</span>
+      <div class="update-sat-main">
+        <span class="satellite-row-alias">${esc(alias)}</span>
+        <span class="satellite-status ${info.online ? "online" : "offline"}">${esc(online)}</span>
+        <span class="mono update-sat-ver">v${esc(version)}</span>
+      </div>
+      <div class="update-sat-meta">
+        ${branchPill}
+        ${stateName ? updateStateBadge(stateName) : ""}
+      </div>
+      ${message}
     </div>`;
   }).join("");
 }
@@ -87,65 +113,116 @@ function branchRefText() {
   return `${configured.remote || "origin"}/${configured.name || "main"}`;
 }
 
-function updateBranchHint() {
+function updateBranchSummary() {
+  if (updateChecking) {
+    return { tone: "checking", title: t("正在检查远端分支…"), detail: branchRefText() };
+  }
   const info = updateBranch;
   if (!info || !Object.keys(info).length) {
     return updateStatus?.branch?.available
-      ? t("正在检查远端分支…")
-      : t("分支更新不可用：{reason}", { reason: t("不是 git 仓库") });
+      ? { tone: "checking", title: t("等待检查远端分支"), detail: branchRefText() }
+      : { tone: "error", title: t("分支更新不可用"), detail: t("当前目录不是 git 仓库") };
   }
-  if (!info.available) return t("分支更新不可用：{reason}", { reason: info.reason || "unknown" });
-  if (info.dirty) return t("工作区有未提交改动，无法更新");
+  if (!info.available) {
+    return { tone: "error", title: t("分支更新不可用"), detail: info.reason || "unknown" };
+  }
+  if (info.dirty) {
+    return { tone: "warn", title: t("工作区有未提交改动，无法更新"), detail: t("请先提交或清理本地改动后再试") };
+  }
   if (Number(info.behind) > 0) {
-    return t("落后 {count} 个提交", { count: info.behind })
-      + (info.latest_subject ? ` · ${info.latest_subject}` : "")
-      + (info.remote_sha ? ` · ${info.remote_sha.slice(0, 8)}` : "");
+    const detail = [info.latest_subject, info.remote_sha ? info.remote_sha.slice(0, 8) : ""].filter(Boolean).join(" · ");
+    return { tone: "ready", title: t("发现新版本 · 落后 {count} 个提交", { count: info.behind }), detail };
   }
-  return t("本地已是最新");
+  return {
+    tone: "ok",
+    title: t("当前已是最新版本"),
+    detail: info.remote_sha ? `${branchRefText()} · ${info.remote_sha.slice(0, 8)}` : branchRefText(),
+  };
 }
 
 function updateReady() {
   const info = updateBranch || {};
-  return Boolean(info.available && !info.dirty && Number(info.behind) > 0);
+  return Boolean(
+    !updateChecking
+    && !updateApplying
+    && !updateStatus?.active
+    && info.available
+    && !info.dirty
+    && Number(info.behind) > 0
+  );
+}
+
+function updatePanelMarkup() {
+  const data = updateStatus || {};
+  const current = data.current_version || "—";
+  const summary = updateBranchSummary();
+  const satellites = knownSatellites(data);
+  const satCount = Object.keys(satellites).length;
+  return `<div class="update-panel" id="updatePanel">
+    <div class="update-hero">
+      <div class="update-hero-left">
+        <div class="update-hero-label">${esc(t("当前主控版本"))}</div>
+        <div class="update-hero-ver-row">
+          <b class="mono update-hero-ver">v${esc(current)}</b>
+          ${updateStateBadge(data.state)}
+        </div>
+        <div class="update-hero-ref mono">git pull · ${esc(branchRefText())}</div>
+      </div>
+      <div class="update-hero-right">
+        <button class="button ghost small" type="button" onclick="checkBranchUpdate(true)"${updateChecking || data.active ? " disabled" : ""}>${updateChecking ? esc(t("检查中…")) : esc(t("重新检查"))}</button>
+      </div>
+    </div>
+
+    <div class="update-diff-card tone-${esc(summary.tone)}">
+      <div class="update-diff-title">${esc(summary.title)}</div>
+      ${summary.detail ? `<div class="update-diff-detail">${esc(summary.detail)}</div>` : ""}
+    </div>
+
+    ${data.skipped_schedules ? `<div class="update-notice">${esc(t("更新期间跳过了 {count} 次定时触发", { count: data.skipped_schedules }))}</div>` : ""}
+    ${data.message ? `<div class="update-notice">${esc(data.message)}</div>` : ""}
+
+    <div class="update-sat-section">
+      <div class="update-sat-head">
+        <span>${esc(t("卫星节点同步状态"))}</span>
+        <span class="tf-count-badge">${satCount}</span>
+      </div>
+      <div class="update-satellites">${updateSatelliteRows(satellites)}</div>
+    </div>
+
+    <div class="update-actions">
+      ${data.active ? `<button class="button danger" type="button" onclick="abortUpdate()">${esc(t("中止更新"))}</button>` : ""}
+      <button class="button" type="button" onclick="applyUpdate()"${updateReady() ? "" : " disabled"}>${updateApplying ? esc(t("正在更新…")) : esc(t("立即更新"))}</button>
+      <button class="button ghost" type="button" onclick="closeUpdateModal()">${esc(t("关闭"))}</button>
+    </div>
+  </div>`;
 }
 
 function renderUpdateModal() {
-  const data = updateStatus || {};
-  const current = data.current_version || "—";
-  // 其它更新入口（更新源 / 目标版本 / 发布包安装 / 回滚）已暂时从界面隐藏；
-  // 后端接口与旧逻辑仍保留，恢复时把对应 UI 加回来即可。
-  openModal(t("版本与更新"), `<div class="update-panel" id="updatePanel">
-    <div class="update-current">
-      <span>${t("当前版本")}</span><b class="mono">v${esc(current)}</b>
-      ${updateStateBadge(data.state)}
-      ${data.skipped_schedules ? `<span class="form-hint">${t("更新期间跳过了 {count} 次定时触发", { count: data.skipped_schedules })}</span>` : ""}
-    </div>
-    <div class="update-branch">
-      <span class="update-branch-label">${t("更新方式")}</span>
-      <b class="mono">git pull · ${esc(branchRefText())}</b>
-    </div>
-    <div id="branchBox" class="form-hint">${updateBranchHint()}</div>
-    <div class="update-satellites">${updateSatelliteRows(knownSatellites(data))}</div>
-    ${data.message ? `<p class="form-hint">${esc(data.message)}</p>` : ""}
-    <div class="update-actions">
-      <button class="button" type="button" onclick="applyUpdate()"${updateReady() ? "" : " disabled"}>${t("更新")}</button>
-      ${data.active ? `<button class="button ghost" type="button" onclick="abortUpdate()">${t("中止")}</button>` : ""}
-      <button class="button ghost" type="button" onclick="closeUpdateModal()">${t("关闭")}</button>
-    </div>
-  </div>`, false, "compact");
+  const existing = document.getElementById("updatePanel");
+  const modal = document.getElementById("modal");
+  if (existing && modal && !modal.classList.contains("hidden")) {
+    existing.outerHTML = updatePanelMarkup();
+    modalBackdropClosable = !Boolean(updateStatus?.active || updateApplying);
+    return;
+  }
+  openModal(t("版本与更新"), updatePanelMarkup(), !Boolean(updateStatus?.active || updateApplying), "compact");
 }
 
 function openUpdateSettings() {
+  updateBranch = null;
+  updateChecking = true;
   renderUpdateModal();
   refreshUpdateStatus();
-  checkBranchUpdate();
+  checkBranchUpdate(false);
 }
 
 function closeUpdateModal() {
   closeModal();
 }
 
-async function checkBranchUpdate() {
+async function checkBranchUpdate(manual = false) {
+  updateChecking = true;
+  if (updateModalVisible()) renderUpdateModal();
   try {
     const data = await api("/api/update/check", {
       method: "POST",
@@ -155,18 +232,22 @@ async function checkBranchUpdate() {
     updateVersions = [];
     updateSource = "branch";
     updateStatus = { ...updateStatus, target_version: data.target || "" };
-    if (updateModalVisible()) renderUpdateModal();
-    toast(updateBranch.behind > 0
-      ? t("落后 {count} 个提交", { count: updateBranch.behind })
-      : t("本地已是最新"));
+    if (manual) {
+      toast(updateBranch.behind > 0
+        ? t("落后 {count} 个提交", { count: updateBranch.behind })
+        : t("本地已是最新"));
+    }
   } catch (e) {
     updateBranch = { available: false, reason: e.message };
+    if (manual) toast(e.message, true);
+  } finally {
+    updateChecking = false;
     if (updateModalVisible()) renderUpdateModal();
-    toast(e.message, true);
   }
 }
 
 async function applyUpdate() {
+  if (!updateReady()) return;
   const target = updateStatus?.target_version || updateBranch?.remote_sha || "";
   if (!target) {
     toast(t("请先检查更新"), true);
@@ -174,6 +255,8 @@ async function applyUpdate() {
   }
   const ref = updateBranch?.name || updateStatus?.branch?.configured?.name || "main";
   if (!await confirmDelete(t("同步 {ref} 分支？", { ref }), t("将执行 git pull --ff-only 并重启主程序；工作区必须干净，本地不能有未推送提交。"))) return;
+  updateApplying = true;
+  if (updateModalVisible()) renderUpdateModal();
   try {
     const data = await api("/api/update", {
       method: "POST",
@@ -183,10 +266,13 @@ async function applyUpdate() {
       toast(t("正在同步分支并重启，请稍候…"));
       setTimeout(() => window.location.reload(), 4000);
     } else {
+      updateApplying = false;
       toast(data.error || t("更新已中止"), true);
       await refreshUpdateStatus();
     }
   } catch (e) {
+    updateApplying = false;
+    if (updateModalVisible()) renderUpdateModal();
     toast(e.message, true);
   }
 }
@@ -194,6 +280,7 @@ async function applyUpdate() {
 async function abortUpdate() {
   try {
     await api("/api/update/abort", { method: "POST", body: "{}" });
+    updateApplying = false;
     toast(t("更新已中止"));
     await refreshUpdateStatus();
   } catch (e) {

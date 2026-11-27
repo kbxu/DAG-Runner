@@ -1,0 +1,105 @@
+# DAG Runner master startup configuration example.
+# Copy to var/config.yaml before use (dagrunner.server reads var/config.yaml by default):
+#   python -m dagrunner.server --config var/config.yaml
+host: 127.0.0.1
+port: 7119
+# SQLite is used by default. Replace with a mapping to use MySQL 8:
+# db:
+#   type: mysql8
+#   host: 127.0.0.1
+#   port: 3306
+#   user: dagrunner
+#   password: ""
+#   database: dagrunner
+#   charset: utf8mb4
+#   state_dir: var
+db: var/scheduler.db
+logs: var/logs
+threads: 8
+language: zh-CN
+# Optional legacy notifier.yaml path (one-time auto-import into the database on first startup).
+notifier_config: null
+allow_insecure_remote_login: false
+
+# Satellite service (master side, HTTPS). Listens on a dedicated port to accept
+# satellite registrations and dispatch tasks.
+# Supported topologies: bidirectional -> reverse mode; master-to-satellite only -> forward mode;
+# satellite-to-master only -> reverse mode. The satellite picks automatically when mode=auto.
+# Master and satellite must run the exact same dagrunner.__version__; mismatches are rejected.
+satellite:
+  enabled: false
+  host: 0.0.0.0
+  port: 7120
+  threads: 16
+  # Master TLS certificate (auto-generated on first startup)
+  cert: var/master-certs/cert.pem
+  key: var/master-certs/key.pem
+  # Address used by satellites to reach the master (written into downloaded satellite configs).
+  # Leave blank to derive from the Web request Host + satellite.port.
+  # Example: if nginx proxies https://xxx.com:7117 -> local 7120, set https://xxx.com:7117.
+  # Note: port 7120 speaks HTTPS; nginx must use TLS passthrough or re-encrypt upstream.
+  public_url: ""
+  timeout: 15
+  poll_interval: 1.0
+  # Max seconds to wait for satellites to download, verify, and stage an update
+  update_timeout: 300
+
+# Software updates. Preflight verifies no tasks are running; schedules pause during updates;
+# master and online satellites update together (offline satellites are skipped).
+# Versioned installs live under var/versions/<version>/ with active version in var/current.
+update:
+  enabled: true
+  # auto: prefer GitHub Release, then git; or set explicitly to git / release
+  source: auto
+  git:
+    remote: origin
+    # Target tag/branch; leave blank to look up vX.Y.Z or X.Y.Z
+    branch_or_tag: ""
+  release:
+    repo: kbxu/DAG-Runner
+    # Release asset filename templates (cross-platform tar.gz by default)
+    assets:
+      windows: "dagrunner-{version}.tar.gz"
+      linux: "dagrunner-{version}.tar.gz"
+    # Optional internal mirror URL template; leave blank to use GitHub
+    download_url: ""
+  rollback_on_failure: true
+  # Branch mode (git clone / development deployments): checks whether origin/<name> is ahead
+  # of HEAD and hands off git pull --ff-only + restart to the watchdog.
+  # Requires the working directory to be a git repository.
+  branch:
+    remote: origin
+    name: main
+
+# Run history archiving. Terminal runs older than retention_days are moved to *_archive tables
+# (not read by the web server; kept for troubleshooting).
+maintenance:
+  enabled: true
+  retention_days: 60
+  # Daily off-peak archive time
+  hour: 3
+  minute: 15
+  # Runs archived per batch
+  batch_size: 50
+
+# Process watchdog. Restarts the server automatically on crash or hang, and handles
+# version switching / rollback during updates.
+# Startup scripts launch python -m dagrunner.watchdog via run_tee.py; set enabled=false to run directly.
+watchdog:
+  enabled: true
+  mode: restart                 # restart | notify (alert only, no restart)
+  interval: 5                   # Health probe interval (seconds)
+  timeout: 3                    # Single health probe timeout (seconds)
+  alert_after: 120              # Send first alert after 2 minutes of consecutive failures
+  unhealthy_after: 300          # Treat as hung and restart after 5 minutes
+  handoff_wait: 15              # Grace window for update handoff requests after graceful stop (seconds)
+  backoff_base: 5               # Initial restart backoff (seconds)
+  backoff_max: 300              # Maximum restart backoff (seconds)
+  stable_window: 300            # Reset failure counter after staying healthy this long (seconds)
+  max_consecutive_failures: 0   # 0 = retry indefinitely at backoff_max
+  stop_timeout: 20              # Grace period before force-killing process tree (seconds)
+  alert_to: []                  # Alert recipients; empty = log to var/logs/watchdog.log only
+  alert_cooldown: 3600          # Minimum interval between repeated restart alerts (seconds)
+  health:
+    require_scheduler: true     # Unhealthy if scheduler is not running
+    require_db: true            # Unhealthy if database is unavailable

@@ -166,6 +166,38 @@ tasks:
             all(row["reused_from_run_id"] is None for row in states.values())
         )
 
+    def test_rerun_preserves_single_task_scope(self) -> None:
+        first_resp = self.client.post(
+            f"/api/workflows/{self.workflow_key}/run",
+            json={"from_task": "second", "only_task": True},
+        )
+        self.assertEqual(first_resp.status_code, 202)
+        first_id = first_resp.get_json()["run_id"]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            run = self.database.get_run(first_id)
+            if run and run["status"] in {"SUCCESS", "FAILED"}:
+                break
+            time.sleep(0.1)
+
+        rerun_resp = self.client.post(f"/api/runs/{first_id}/rerun")
+        self.assertEqual(rerun_resp.status_code, 202)
+        rerun_id = rerun_resp.get_json()["run_id"]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            run = self.database.get_run(rerun_id)
+            if run and run["status"] in {"SUCCESS", "FAILED"}:
+                break
+            time.sleep(0.1)
+
+        rerun_row = self.database.get_run(rerun_id)
+        self.assertEqual(rerun_row["status"], "SUCCESS")
+        self.assertEqual(rerun_row["from_task"], "second")
+        states = self.database.task_states(rerun_id)
+        self.assertEqual(states["second"]["status"], "SUCCESS")
+        self.assertEqual(states["first"]["skip_kind"], "OUTSIDE_SCOPE")
+        self.assertEqual(states["third"]["skip_kind"], "OUTSIDE_SCOPE")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,53 @@
+# DAG Runner satellite agent configuration example.
+# Copy to var/satellite.yaml before use:
+#   python -m dagrunner.satellite --config var/satellite.yaml
+# Tokens are generated in the master Web console under "Satellites" and pre-filled when downloading config.
+# Master and satellite must run the exact same dagrunner.__version__; mismatches are rejected.
+satellite:
+  # Satellite alias; must match the alias configured on the master
+  alias: sat-01
+  # Master satellite service URL (HTTPS)
+  master_url: https://master.example.com:7120
+  # Shared authentication token; must match the master configuration
+  token: ""
+  # auto: try reverse connection to master first, fall back to forward listener
+  # forward: listen only and wait for master connections (master -> satellite)
+  # reverse: initiate outbound connection to master only (satellite -> master)
+  mode: auto
+  listen_host: 0.0.0.0
+  listen_port: 7121
+  # Satellite TLS certificate (auto-generated on first startup; do not share with master)
+  # Copy the entire var/satellite-certs/ directory when migrating a satellite host
+  cert: var/satellite-certs/cert.pem
+  key: var/satellite-certs/key.pem
+  host_key_policy: accept-new
+  # Optional pinned master certificate SHA-256 fingerprint (64 hex chars); leave blank for accept-new
+  master_cert_fingerprint: ""
+  # Default task working directory; leave blank to use the agent process cwd
+  workdir: ""
+  log_dir: var/satellite-logs
+  heartbeat_interval: 30
+  probe_interval: 60
+  timeout: 15
+  # Standalone satellite update:
+  #   python -m dagrunner.server.update --role satellite --to <version>
+
+# Satellite process watchdog. Restarts the agent on crash or hang and handles version handoffs.
+watchdog:
+  enabled: true
+  mode: restart                 # restart | notify (alert only, no restart)
+  interval: 5
+  timeout: 3
+  alert_after: 120              # Send first alert after 2 minutes of consecutive failures
+  unhealthy_after: 300          # Treat as hung and restart after 5 minutes
+  handoff_wait: 15
+  backoff_base: 5
+  backoff_max: 300
+  stable_window: 300
+  max_consecutive_failures: 0
+  stop_timeout: 20
+  alert_to: []
+  alert_cooldown: 3600
+  health:
+    require_db: true
+    # require_scheduler does not apply to satellites and is ignored

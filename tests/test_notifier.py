@@ -273,12 +273,15 @@ tasks:
                 },
             )
             try:
-                initial = client.get("/api/notifier").get_json()["email"]
-                self.assertFalse(initial["configured"])
-                response = client.put(
-                    "/api/notifier",
+                initial = client.get("/api/notifier/channels").get_json()["channels"]
+                self.assertEqual(initial, [])
+                response = client.post(
+                    "/api/notifier/channels",
                     json={
-                        "email": {
+                        "name": "主发件箱",
+                        "channel_type": "email",
+                        "enabled": True,
+                        "config": {
                             "host": "smtp.example.com",
                             "port": 587,
                             "username": "sender@example.com",
@@ -287,28 +290,36 @@ tasks:
                             "security": "starttls",
                             "timeout": 12,
                             "subject_prefix": "[Reports]",
-                        }
+                        },
                     },
                 )
-                self.assertEqual(response.status_code, 200)
-                saved = load_email_config(var_dir=root)
-                self.assertEqual(saved.host, "smtp.example.com")
-                self.assertEqual(saved.password, "secret-app-password")
-                self.assertTrue(saved.starttls)
-                self.assertIsInstance(
-                    app.extensions["execution_service"].notifier, EmailNotifier
-                )
+                self.assertEqual(response.status_code, 201)
+                channel_id = response.get_json()["channel"]["id"]
+                stored = database.get_notification_channel(channel_id)
+                self.assertEqual(stored["config"]["host"], "smtp.example.com")
+                self.assertEqual(stored["config"]["password"], "secret-app-password")
+                self.assertTrue(stored["config"]["starttls"])
 
-                public = client.get("/api/notifier").get_json()["email"]
+                listed = client.get("/api/notifier/channels").get_json()["channels"]
+                self.assertEqual(len(listed), 1)
+                public = listed[0]["config"]
                 self.assertTrue(public["has_password"])
                 self.assertNotIn("password", public)
                 public["host"] = "smtp2.example.com"
                 public["password"] = ""
-                response = client.put("/api/notifier", json={"email": public})
+                response = client.put(
+                    f"/api/notifier/channels/{channel_id}",
+                    json={
+                        "name": "主发件箱",
+                        "channel_type": "email",
+                        "enabled": True,
+                        "config": public,
+                    },
+                )
                 self.assertEqual(response.status_code, 200)
-                updated = load_email_config(var_dir=root)
-                self.assertEqual(updated.host, "smtp2.example.com")
-                self.assertEqual(updated.password, "secret-app-password")
+                updated = database.get_notification_channel(channel_id)
+                self.assertEqual(updated["config"]["host"], "smtp2.example.com")
+                self.assertEqual(updated["config"]["password"], "secret-app-password")
             finally:
                 app.extensions["schedule_service"].shutdown()
                 app.extensions["execution_service"].shutdown()

@@ -128,12 +128,16 @@ class ExecutionService:
         trigger_type: str = "manual",
         trigger_user: str | None = None,
         resume_run_id: str | None = None,
+        scope_override: list[str] | None = None,
     ) -> str:
         if self.update_service is not None and self.update_service.active:
             raise ServiceError("更新进行中，暂不能启动任务")
         self.registry.refresh()
         workflow = self.registry.get(workflow_name)
-        if from_task:
+        if scope_override is not None:
+            if not any(name in workflow.tasks for name in scope_override):
+                raise ServiceError("原运行范围内的任务已不存在，无法重跑")
+        elif from_task:
             if from_task not in workflow.tasks:
                 raise ServiceError(f"任务不存在：{from_task}")
             if not only_task:
@@ -159,6 +163,7 @@ class ExecutionService:
                     active.cancel_event,
                     resume_run_id,
                     runner_alias,
+                    scope_override,
                 )
             except Exception:
                 self._active.pop(run_id, None)
@@ -196,6 +201,7 @@ class ExecutionService:
         cancel_event: Event,
         resume_run_id: str | None,
         runner_alias: str = "local",
+        scope_override: list[str] | None = None,
     ) -> tuple[str, str]:
         lock_path = self.database.state_dir / "locks" / f"{workflow.name}.lock"
         with workflow_lock(lock_path):
@@ -214,6 +220,7 @@ class ExecutionService:
                 resume_run_id=resume_run_id,
                 only_task=only_task,
                 runner_alias=runner_alias,
+                scope_override=scope_override,
             )
 
     def _completed(self, run_id: str, future: Future) -> None:
@@ -245,8 +252,21 @@ class ExecutionService:
         run = self.database.get_run(run_id)
         if run is None:
             raise ServiceError(f"run not found: {run_id}")
+        raw_scope = run["scope"]
+        scope_override: list[str] | None = None
+        if raw_scope:
+            try:
+                parsed = json.loads(raw_scope)
+                if isinstance(parsed, list):
+                    scope_override = [str(name) for name in parsed]
+            except (TypeError, ValueError):
+                scope_override = None
         return self.start_run(
-            run["workflow_name"], trigger_type="rerun", trigger_user=trigger_user
+            run["workflow_name"],
+            from_task=run["from_task"],
+            trigger_type="rerun",
+            trigger_user=trigger_user,
+            scope_override=scope_override,
         )
 
     def resume_failed(self, run_id: str, trigger_user: str | None = None) -> str:

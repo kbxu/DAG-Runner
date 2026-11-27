@@ -85,6 +85,41 @@ def preview_definition(definition, workflow_name=None):
     }
 
 
+def draft_preview_definition(definition):
+    """Build a best-effort DAG preview from draft YAML without strict validation."""
+    try:
+        data = yaml.safe_load(definition)
+    except yaml.YAMLError:
+        return {"runner": "local", "tasks": []}
+    if not isinstance(data, dict):
+        return {"runner": "local", "tasks": []}
+    workflow_runner = str(data.get("runner") or "local")
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, dict):
+        return {"runner": workflow_runner, "tasks": []}
+    tasks = []
+    for name, raw in raw_tasks.items():
+        if not isinstance(raw, dict):
+            continue
+        task_type = raw.get("type", "command")
+        if task_type not in ("command", "condition"):
+            task_type = "command"
+        tasks.append(
+            {
+                "name": str(name),
+                "description": str(raw.get("description", "")),
+                "depends": _string_list(raw.get("depends")),
+                "enabled": bool(raw.get("enabled", True)),
+                "type": task_type,
+                "command": raw.get("command"),
+                "success": _string_list(raw.get("success")),
+                "failure": _string_list(raw.get("failure")),
+                "runner": str(raw.get("runner") or workflow_runner or "local"),
+            }
+        )
+    return {"runner": workflow_runner, "tasks": tasks}
+
+
 def build_model(definition):
     """把工作流 YAML 解析成表单模式可用的结构化模型（保持任务顺序）。"""
     data = yaml.safe_load(definition)
@@ -113,6 +148,7 @@ def build_model(definition):
                 "conditionRelation": relation,
                 "success": [str(item) for item in _string_list(raw.get("success"))],
                 "failure": [str(item) for item in _string_list(raw.get("failure"))],
+                "runner": str(raw.get("runner") or ""),
             }
         )
     description = data.get("name") if isinstance(data.get("name"), str) else ""
@@ -148,7 +184,7 @@ def _string_list(value):
     return []
 
 
-def merge_model(definition, model):
+def merge_model(definition, model, validate=True):
     """把表单模型合并回原 YAML，保留未编辑字段与顶层配置。"""
     data = yaml.safe_load(definition)
     if not isinstance(data, dict):
@@ -175,6 +211,12 @@ def merge_model(definition, model):
             raw.pop("enabled", None)
         else:
             raw["enabled"] = False
+        if "runner" in item:
+            task_runner = str(item.get("runner") or "").strip()
+            if task_runner and task_type == "command":
+                raw["runner"] = task_runner
+            else:
+                raw.pop("runner", None)
         depends = [str(entry) for entry in (item.get("depends") or []) if str(entry)]
         if depends:
             raw["depends"] = depends
@@ -235,7 +277,9 @@ def merge_model(definition, model):
     dumped = yaml.dump(
         data, Dumper=LiteralDumper, allow_unicode=True, sort_keys=False, width=1000
     )
-    preview_definition(dumped)
+    # 编辑过程中允许语义尚未自洽（如分支目标暂未建立依赖），保存时再统一校验。
+    if validate:
+        preview_definition(dumped)
     return dumped
 
 
@@ -252,7 +296,7 @@ def extend_definition(definition, parent, kind, branch, workflow_name=None):
 
     def new_id():
         while True:
-            value = f"task_{secrets.token_hex(6)}"
+            value = f"task_{secrets.token_hex(4)}"
             if value not in tasks:
                 return value
 

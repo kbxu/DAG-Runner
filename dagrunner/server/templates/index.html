@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DAG Runner Console</title>
+  <title>Directed Acyclic Graph (DAG) Runner</title>
   <link rel="icon" href="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -13,7 +13,7 @@
       <img class="brand-logo" src="{{ url_for('static', filename='dagrunner-logo-refined.svg') }}" alt="DAG Runner">
       <div>
         <p class="eyebrow">MINI WORKFLOW SERVICE</p>
-        <h1>DAG Runner Console</h1>
+        <h1>Directed Acyclic Graph (DAG) Runner</h1>
         <p class="subtitle" data-i18n>工作流、定时计划和运行状态集中管理</p>
       </div>
     </div>
@@ -28,14 +28,26 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
             <span class="gear-user-name">{{ username }}</span>
           </div>
-          {% if is_admin and update_git_available %}
-          <button class="gear-item" type="button" role="menuitem" onclick="openUpdateSettings(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg><span data-i18n>更新</span></button>
-          {% endif %}
           {% if is_admin %}
-          <button class="gear-item" type="button" role="menuitem" onclick="openAccountSettings(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg><span data-i18n>账号</span></button>
+          <button class="gear-item" type="button" role="menuitem" onclick="openAccountSettings(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg><span data-i18n>账号管理</span></button>
           {% endif %}
           <button class="gear-item" type="button" role="menuitem" onclick="openChangePassword(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span data-i18n>修改密码</span></button>
           <button class="gear-item" type="button" role="menuitem" onclick="toggleLanguage()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg><span data-i18n>语言</span><span class="gear-item-meta" id="gearLanguageMeta">English</span></button>
+          <div class="gear-theme-row" role="group" aria-label="切换皮肤" data-i18n-aria-label="切换皮肤">
+            <span class="gear-theme-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+              <span data-i18n>皮肤</span>
+            </span>
+            <span class="theme-swatches">
+              <button type="button" class="theme-swatch swatch-default" data-theme-choice="default" title="默认青绿" data-i18n-title="默认青绿" onclick="setTheme('default')"></button>
+              <button type="button" class="theme-swatch swatch-blue" data-theme-choice="blue" title="蓝色主题" data-i18n-title="蓝色主题" onclick="setTheme('blue')"></button>
+              <button type="button" class="theme-swatch swatch-red" data-theme-choice="red" title="红色主题" data-i18n-title="红色主题" onclick="setTheme('red')"></button>
+              <button type="button" class="theme-swatch swatch-dark" data-theme-choice="dark" title="黑色主题" data-i18n-title="黑色主题" onclick="setTheme('dark')"></button>
+            </span>
+          </div>
+          {% if is_admin and update_git_available %}
+          <button class="gear-item" type="button" role="menuitem" onclick="openUpdateSettings(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg><span data-i18n>更新</span></button>
+          {% endif %}
           <button class="gear-item" type="button" role="menuitem" onclick="openAbout(); closeGearMenu();"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span data-i18n>关于</span></button>
           <div class="gear-separator"></div>
           <button class="gear-item danger" type="button" role="menuitem" onclick="logout()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg><span data-i18n>登出</span></button>
@@ -49,7 +61,7 @@
       <aside id="workflowTags" class="workflow-tags" role="group" aria-label="按标签筛选" data-i18n-aria-label="按标签筛选"></aside>
       <section class="panel">
       <div class="panel-head workflow-panel-head">
-        <div><h2 data-i18n>工作流与定时</h2><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p><label class="mobile-sort"><span data-i18n>排序</span><select id="workflowSortMobile" class="ui-select" onchange="setWorkflowSortFromSelect(this.value)"></select></label></div>
+        <div><div class="panel-title-row"><h2 data-i18n>工作流与定时</h2><span id="workflowResortBadge" class="resort-countdown hidden" aria-live="polite"></span></div><p data-i18n>查看任务 DAG，配置 cron，或立即发起运行</p><label class="mobile-sort"><span data-i18n>排序</span><select id="workflowSortMobile" class="ui-select" onchange="setWorkflowSortFromSelect(this.value)"></select></label></div>
         <div id="resourceBar" class="resource-bar" role="group" aria-label="服务器资源" data-i18n-aria-label="服务器资源">
           {% for key, label in [('cpu', 'CPU'), ('memory', '内存'), ('disk', '硬盘')] %}
           <div class="resource-metric" data-resource="{{ key }}">
@@ -63,7 +75,7 @@
       <div class="table-wrap">
         <table class="workflow-list-table card-table">
           <colgroup><col class="workflow-col-name"><col class="workflow-col-schedule"><col class="workflow-col-time"><col class="workflow-col-time"><col class="workflow-col-actions"></colgroup>
-          <thead><tr><th data-i18n>工作流</th><th data-i18n>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')"><span data-i18n>上次运行</span> <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')"><span data-i18n>下次运行</span> <span id="nextRunSort"></span></button></th><th data-i18n>操作</th></tr></thead>
+          <thead><tr class="run-head-row"><th><div class="th-inline-search"><span data-i18n>工作流</span><input id="workflowSearchFilter" name="wf_search_filter" class="th-filter-input" type="search" autocomplete="off" data-lpignore="true" placeholder="搜索名称或 ID" data-i18n-placeholder="搜索名称或 ID" aria-label="搜索工作流" data-i18n-aria-label="搜索工作流" oninput="setWorkflowSearch(this.value)"></div></th><th data-i18n>Cron / 时区</th><th><button class="sort-header" onclick="setWorkflowSort('last_run_time')"><span data-i18n>上次运行</span> <span id="lastRunSort"></span></button></th><th><button class="sort-header" onclick="setWorkflowSort('next_run_time')"><span data-i18n>下次运行</span> <span id="nextRunSort"></span></button></th><th data-i18n>操作</th></tr></thead>
           <tbody id="workflowRows"><tr><td colspan="5" class="empty" data-i18n>正在加载…</td></tr></tbody>
         </table>
       </div>
@@ -83,12 +95,14 @@
         <table class="run-list-table card-table">
           <colgroup><col class="workflow-col-name"><col class="run-col-trigger"><col class="run-col-status"><col class="run-col-time"><col class="run-col-progress"><col class="run-col-duration"><col class="run-col-actions"></colgroup>
           <thead>
-            <tr><th data-i18n>工作流</th><th data-i18n>触发方式</th><th data-i18n>状态</th><th data-i18n>开始时间 / Run ID</th><th data-i18n>任务进度</th><th data-i18n>耗时</th><th data-i18n>操作</th></tr>
-            <tr class="filter-row">
-              <th><input id="runWorkflowFilter" type="search" placeholder="搜索名称或 ID" data-i18n-placeholder="搜索名称或 ID" aria-label="搜索工作流" data-i18n-aria-label="搜索工作流" oninput="scheduleRunSearch(this.value)"></th>
-              <th><select id="runTriggerFilter" aria-label="筛选触发方式" data-i18n-aria-label="筛选触发方式" onchange="setRunFilter('trigger',this.value)"><option value="" data-i18n>全部</option><option value="manual" data-i18n>手动</option><option value="schedule" data-i18n>定时</option><option value="rerun" data-i18n>重跑</option><option value="resume" data-i18n>失败续跑</option></select></th>
-              <th><select id="runStatusFilter" aria-label="筛选状态" data-i18n-aria-label="筛选状态" onchange="setRunFilter('status',this.value)"><option value="" data-i18n>全部</option><option value="RUNNING" data-i18n>运行中</option><option value="SUCCESS" data-i18n>成功</option><option value="FAILED" data-i18n>失败</option></select></th>
-              <th></th><th></th><th></th><th></th>
+            <tr class="run-head-row">
+              <th><div class="th-inline-search"><span data-i18n>工作流</span><input id="runWorkflowFilter" name="run_wf_search_filter" class="th-filter-input" type="search" autocomplete="off" data-lpignore="true" placeholder="搜索名称或 ID" data-i18n-placeholder="搜索名称或 ID" aria-label="搜索工作流" data-i18n-aria-label="搜索工作流" oninput="scheduleRunSearch(this.value)"></div></th>
+              <th><select id="runTriggerFilter" class="th-filter-select" aria-label="筛选触发方式" data-i18n-aria-label="筛选触发方式" onchange="setRunFilter('trigger',this.value)"><option value="" data-i18n>触发方式</option><option value="manual" data-i18n>手动</option><option value="schedule" data-i18n>定时</option><option value="rerun" data-i18n>重跑</option><option value="resume" data-i18n>失败续跑</option></select></th>
+              <th><select id="runStatusFilter" class="th-filter-select" aria-label="筛选状态" data-i18n-aria-label="筛选状态" onchange="setRunFilter('status',this.value)"><option value="" data-i18n>状态</option><option value="RUNNING" data-i18n>运行中</option><option value="SUCCESS" data-i18n>成功</option><option value="FAILED" data-i18n>失败</option></select></th>
+              <th data-i18n>开始时间 / Run ID</th>
+              <th data-i18n>任务进度</th>
+              <th data-i18n>耗时</th>
+              <th data-i18n>操作</th>
             </tr>
           </thead>
           <tbody id="runRows"><tr><td colspan="7" class="empty" data-i18n>正在加载…</td></tr></tbody>

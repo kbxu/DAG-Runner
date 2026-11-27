@@ -16,8 +16,10 @@
 - **定时调度**：Linux 风格 cron（`0`/`7` 为周日），支持多条 cron 与任意时区
 - **跨平台**：Linux 用 bash，Windows 用 cmd，也可指定 PowerShell
 - **卫星节点**：在其它机器部署卫星版，主程序加密下发命令，支持前向/反向两种连接模式
-- **Web 管理**：导入编辑工作流、查看 DAG 与日志、邮件通知
-- **迁移导入**：DolphinScheduler JSON、Windows 计划任务 XML 一键转成 YAML
+- **Web 管理**：表单可视化编辑工作流与实时 DAG 预览、只读预览图右键执行单任务/子树、运行详情内嵌日志、多套皮肤切换（青绿/蓝/红/暗黑）与中英文界面
+- **多渠道通知**：通知渠道（邮箱 SMTP、飞书自定义机器人）与工作流绑定规则全部存入数据库，支持配置任意数量渠道与一键测试发送
+- **迁移导入**：支持 DAG Runner YAML、DolphinScheduler JSON、Windows 计划任务 XML 与单行 Crontab 导入，自动清理第三方多余字段并统一重新生成 ID（`workflow_<12hex>` / `task_<8hex>`）
+- **标签分组**：工作流名称以 `【标签】` 或 `[标签]` 开头自动归类筛选
 - **安全防护**：账号密码登录、失败封禁，卫星通信用 HTTPS + 令牌挑战-响应
 - **进程看门狗**：主服务与卫星崩溃/假死自动重启，指数退避、邮件告警，更新时无缝接管版本切换
 
@@ -80,7 +82,6 @@ tasks:
 | `timeout` | 整个 workflow 的超时（秒） | 不限 |
 | `schedule.crons` | 多条 cron 表达式 | 无 |
 | `schedule.timezone` | 时区 | `Asia/Shanghai` |
-| `notification.email` | 邮件通知开关与收件人 | 关闭 |
 | `runner` | workflow 级默认运行位置 | `local` |
 | `tasks.<id>.command` | 命令（字符串或数组） | 必填 |
 | `tasks.<id>.args` | 附加参数 | 空 |
@@ -126,7 +127,7 @@ python -m dagrunner.satellite --config var/satellite.yaml
 
 ## 版本展示与更新
 
-顶栏显示当前版本 `vX.Y.Z`，卫星面板显示每台卫星的版本，版本不一致会标红。点顶栏「更新」打开更新面板。
+在右上角「⚙ 设置 → 更新」打开版本与更新面板（仅管理员可见），卫星面板同时展示各节点版本，版本不一致会提示告警。
 
 **版本号来源**：`dagrunner/__init__.py::__version__`，`pyproject.toml` 通过 `dynamic version` 读取，发版 tag 必须与它一致。
 
@@ -175,7 +176,7 @@ python -m dagrunner.watchdog --status --role master  # 查看运行状态
 - 更新提交：看门狗接管切版本、校验与回滚；没有看门狗时仍走原有 `watchdog/restart.py`；
 - `mode: notify` 可切换为只告警不重启；单例锁防止重复守护。
 
-默认配置见 `var/example_configs/config.example.yaml` 的 `watchdog` 段。**健康检查失败达到阈值时的自动重启会中断正在运行的任务**，必要时可用 `mode: notify` 人工兜底。
+默认配置见 `var/examples/config.example.yaml` 的 `watchdog` 段。**健康检查失败达到阈值时的自动重启会中断正在运行的任务**，必要时可用 `mode: notify` 人工兜底。
 
 ## 配置速查
 
@@ -184,7 +185,7 @@ python -m dagrunner.watchdog --status --role master  # 查看运行状态
 | `host` / `port` | Web 监听地址 | `127.0.0.1:7119` |
 | `db` / `logs` | 数据库（SQLite 路径，或 MySQL 8 的 map 配置）与日志目录 | `var/scheduler.db` / `var/logs` |
 | `threads` | Web 线程数 | `8` |
-| `notifier_config` | 邮件配置路径 | 自动查找 `var/notifier.yaml` |
+| `notifier_config` | 兼容旧版 `var/notifier.yaml`（首次启动若数据库无渠道会自动迁移，现统一在 Web 控制台管理并存库） | `null` |
 | `allow_insecure_remote_login` | 允许 HTTP 登录（仅可信内网） | `false` |
 | `satellite.enabled` | 启用卫星服务 | `false` |
 | `satellite.host` / `port` | 卫星服务监听地址 | `0.0.0.0:7120` |
@@ -258,7 +259,7 @@ dagrunner/
   database/         状态存取包：base / sqlite / mysql8（SQLite 与 MySQL 8）
   satellite/        卫星节点包：agent / 协议 / 加密 / 主机通道 / 更新
   watchdog/         进程看门狗（状态 / 健康 / 拉起 / 守护循环）+ restart 更新看门狗
-  notifier/         通知包：邮件已实现，飞书等通道接口已预留
+  notifier/         通知包：邮件 SMTP 与飞书自定义机器人已实现，数据库多渠道配置与分发
   tools/            命令行工具：cli（运行记录）/ migrate_workflows（导入）/ workflow_editor
 run_server.py       版本目录启动器     run_satellite.py 卫星启动器
 demo/             示例工作流、任务脚本与演示数据初始化

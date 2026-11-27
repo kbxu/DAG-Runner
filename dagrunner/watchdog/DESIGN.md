@@ -83,7 +83,7 @@ run_server.py (child)              run_satellite.py (child)
 | `dagrunner/webapp.py` | `/health` 增加 `db_ok`、`active_runs` 字段；`_schedule_restart` 无需改动 |
 | `dagrunner/database/base.py` | 新增 `ping()`（`SELECT 1`） |
 | `dagrunner/notifier/` | 新增 `WatchdogEvent` 与 `Notifier.on_watchdog_event()` 默认空实现 + 邮件构建（通知已拆为独立包） |
-| `var/example_configs/*`、`var/*.bat`、`var/*.sh`、`README.md` | 配置项与启动脚本改造 |
+| `var/examples/*`、`var/*.bat`、`var/*.sh`、`README.md` | 配置项与启动脚本改造 |
 
 ## 5. 控制协议与状态机
 

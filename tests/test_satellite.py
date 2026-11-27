@@ -86,12 +86,12 @@ class SatelliteCryptoTests(unittest.TestCase):
 
         root = Path(__file__).resolve().parent.parent
         master = yaml.safe_load(
-            (root / "var" / "example_configs" / "config.example.yaml").read_text(
+            (root / "var" / "examples" / "config.example.yaml").read_text(
                 encoding="utf-8"
             )
         )
         agent = yaml.safe_load(
-            (root / "var" / "example_configs" / "satellite.example.yaml").read_text(
+            (root / "var" / "examples" / "satellite.example.yaml").read_text(
                 encoding="utf-8"
             )
         )

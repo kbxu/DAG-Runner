@@ -69,6 +69,7 @@ class WorkflowRunner:
         resume_run_id: str | None = None,
         only_task: bool = False,
         runner_alias: str = "local",
+        scope_override: list[str] | None = None,
     ) -> tuple[str, str]:
         self._runner_alias = runner_alias or "local"
         self._default_runner = self._runner_alias
@@ -86,10 +87,17 @@ class WorkflowRunner:
                 f"run {previous['run_id']!r} belongs to workflow "
                 f"{previous['workflow_name']!r}, not {workflow.name!r}"
             )
+        recorded_from_task = from_task
         if resume_run_id:
             # A resume repeats the scope recorded by the run it resumes, so resuming a
             # single-node run runs that node again, and resuming a subtree runs it again.
             scope = _decode_scope(previous["scope"], order)
+            recorded_from_task = previous["from_task"]
+        elif scope_override is not None:
+            override_set = {str(name) for name in scope_override}
+            scope = [name for name in order if name in override_set]
+            if not scope:
+                raise WorkflowError("原运行范围内的任务已不存在，无法重跑")
         elif from_task and only_task:
             scope = [from_task]
         elif from_task:
@@ -104,7 +112,7 @@ class WorkflowRunner:
             workflow.name,
             order,
             resumed_from_run_id=previous["run_id"] if previous else None,
-            from_task=from_task,
+            from_task=recorded_from_task,
             trigger_type=trigger_type,
             trigger_user=trigger_user,
             scope=scope,
@@ -141,7 +149,13 @@ class WorkflowRunner:
         try:
             if previous:
                 reused = self._seed_resume(
-                    run_id, order, selected, previous_states, states
+                    workflow,
+                    run_id,
+                    order,
+                    selected,
+                    previous_states,
+                    states,
+                    benign_skips,
                 )
             for name in order:
                 if name not in selected and states[name] == "PENDING":
@@ -266,7 +280,11 @@ class WorkflowRunner:
                             assert task.condition is not None
                             self.database.set_task_status(run_id, task_name, "RUNNING")
                             states[task_name] = "RUNNING"
-                            matched = task.condition.evaluate(states)
+                            effective_states = {
+                                name: ("SUCCESS" if name in reused else state)
+                                for name, state in states.items()
+                            }
+                            matched = task.condition.evaluate(effective_states)
                             decision = "success" if matched else "failure"
                             self.database.set_task_status(
                                 run_id,
@@ -488,15 +506,57 @@ class WorkflowRunner:
         return states[task_name] == "SUCCESS" or task_name in reused
 
     def _seed_resume(
-        self, run_id, order, selected, previous_states, states
+        self,
+        workflow: Workflow,
+        run_id,
+        order,
+        selected,
+        previous_states,
+        states,
+        benign_skips: set[str],
     ) -> set[str]:
-        """Skip the in-scope tasks that already succeeded; they still satisfy dependents."""
+        """Skip the in-scope tasks that already succeeded (or were reused); preserve condition decisions."""
         reused: set[str] = set()
         for task_name in order:
             if task_name not in selected:
                 continue
             old = previous_states.get(task_name)
-            if old is None or old["status"] != "SUCCESS":
+            if old is None or not (
+                old["status"] == "SUCCESS" or old["skip_kind"] == "REUSED"
+            ):
+                continue
+            task = workflow.tasks[task_name]
+            if task.is_condition:
+                assert task.condition is not None
+                in_scope_refs = [
+                    ref for ref in task.condition.referenced_tasks if ref in selected
+                ]
+                decision = old["condition_result"]
+                if decision not in ("success", "failure") or not all(
+                    ref in reused for ref in in_scope_refs
+                ):
+                    continue
+                self.database.set_task_status(
+                    run_id,
+                    task_name,
+                    "SKIPPED",
+                    error_message="上次运行已成功，本次未重跑",
+                    skip_kind="REUSED",
+                    condition_result=decision,
+                )
+                states[task_name] = "SKIPPED"
+                reused.add(task_name)
+                unselected = task.failure if decision == "success" else task.success
+                for target in unselected:
+                    if target in selected and states[target] == "PENDING":
+                        self._skip(
+                            run_id,
+                            target,
+                            f"condition {task_name} selected {decision} branch",
+                            states,
+                            skip_kind="CONDITION_NOT_SELECTED",
+                            benign_skips=benign_skips,
+                        )
                 continue
             self._skip(
                 run_id,
@@ -540,8 +600,9 @@ class WorkflowRunner:
         status: str,
         error_message: str | None,
     ) -> None:
+        manages_rules = bool(getattr(self.notifier, "manages_rules", False))
         notification = workflow.email_notification
-        if not notification.should_send(status):
+        if not manages_rules and not notification.should_send(status):
             return
         try:
             failures = tuple(

@@ -81,7 +81,7 @@ def uniquify_task_ids(
         if task_id not in unavailable_ids:
             continue
         while True:
-            candidate = f"task_{secrets.token_hex(6)}"
+            candidate = f"task_{secrets.token_hex(4)}"
             if candidate not in occupied:
                 break
         replacements[task_id] = candidate
@@ -115,6 +115,123 @@ def uniquify_task_ids(
         rewritten_tasks[rewritten_id] = task
     data["tasks"] = rewritten_tasks
     return dump_workflow_yaml(data), replacements
+
+
+_IMPORT_WORKFLOW_KEYS = ("name", "description", "setup", "runner", "timeout", "schedule", "tasks")
+
+
+def regenerate_import_definition(
+    content: str, unavailable_ids: set[str] | None = None
+) -> tuple[str, dict[str, str]]:
+    """Strip unused third-party keys and regenerate all task IDs as task_<8hex>."""
+    data = yaml.safe_load(content)
+    if not isinstance(data, dict):
+        return content, {}
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, dict) or not raw_tasks:
+        return content, {}
+
+    occupied = set(unavailable_ids or ())
+    replacements: dict[str, str] = {}
+    for task_id in raw_tasks:
+        while True:
+            candidate = f"task_{secrets.token_hex(4)}"
+            if candidate not in occupied:
+                break
+        replacements[str(task_id)] = candidate
+        occupied.add(candidate)
+
+    def remap_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item:
+                mapped = replacements.get(item, item)
+                if mapped not in result:
+                    result.append(mapped)
+        return result
+
+    cleaned_tasks: dict[str, Any] = {}
+    for old_id, raw in raw_tasks.items():
+        new_id = replacements[str(old_id)]
+        if not isinstance(raw, dict):
+            continue
+        task_type = raw.get("type", "command")
+        if task_type not in ("command", "condition"):
+            task_type = "command"
+        task: dict[str, Any] = {}
+        description = raw.get("description")
+        if isinstance(description, str) and description.strip():
+            task["description"] = description.strip()
+        if task_type == "condition":
+            task["type"] = "condition"
+        if raw.get("enabled") is False:
+            task["enabled"] = False
+        deps = remap_list(raw.get("depends"))
+        if deps:
+            task["depends"] = deps
+        if task_type == "command":
+            if raw.get("shell") in TASK_SHELLS:
+                task["shell"] = raw["shell"]
+            if isinstance(raw.get("runner"), str) and raw["runner"].strip():
+                task["runner"] = raw["runner"].strip()
+            if isinstance(raw.get("cwd"), str) and raw["cwd"].strip():
+                task["cwd"] = raw["cwd"].strip()
+            if isinstance(raw.get("timeout"), int) and not isinstance(raw.get("timeout"), bool) and raw["timeout"] > 0:
+                task["timeout"] = raw["timeout"]
+            command = raw.get("command")
+            if isinstance(command, list):
+                task["command"] = [str(x) for x in command]
+            elif command is not None:
+                task["command"] = str(command)
+            args = raw.get("args")
+            if isinstance(args, list) and args:
+                task["args"] = [str(x) for x in args]
+        else:
+            raw_cond = raw.get("condition")
+            if isinstance(raw_cond, dict):
+                groups = []
+                for group in raw_cond.get("groups") or []:
+                    if not isinstance(group, dict):
+                        continue
+                    items = []
+                    for item in group.get("items") or []:
+                        if isinstance(item, dict) and isinstance(item.get("task"), str):
+                            items.append({
+                                "task": replacements.get(item["task"], item["task"]),
+                                "status": str(item.get("status", "SUCCESS")).upper(),
+                            })
+                    if items:
+                        groups.append({
+                            "relation": str(group.get("relation", "AND")).upper(),
+                            "items": items,
+                        })
+                if groups:
+                    task["condition"] = {
+                        "relation": str(raw_cond.get("relation", "AND")).upper(),
+                        "groups": groups,
+                    }
+            success = remap_list(raw.get("success"))
+            failure = remap_list(raw.get("failure"))
+            if success:
+                task["success"] = success
+            if failure:
+                task["failure"] = failure
+        cleaned_tasks[new_id] = task
+
+    cleaned: dict[str, Any] = {}
+    for key in _IMPORT_WORKFLOW_KEYS:
+        if key == "tasks":
+            cleaned["tasks"] = cleaned_tasks
+            continue
+        val = data.get(key)
+        if val is None or val == "" or val == {}:
+            continue
+        cleaned[key] = val
+    return dump_workflow_yaml(cleaned), replacements
 
 
 def _detect_setup_shell(setup: str) -> str:

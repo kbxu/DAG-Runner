@@ -143,7 +143,7 @@ function highlightUsefulYaml(value, includeSchedule=false) {
     return `${esc(match[1])}<span class="yaml-useful-key">${esc(rawKey)}</span>:${highlightShellVariables(match[3])}`;
   }).join("\n");
 }
-function syncYamlHighlight(id) {
+function syncYamlHighlight(id, skipPreview=false) {
   const input=document.getElementById(id), highlight=document.getElementById(`${id}Highlight`);
   if (input) {
     const normalized=normalizeYamlNewlines(input.value);
@@ -155,7 +155,7 @@ function syncYamlHighlight(id) {
   }
   if (input && highlight) { highlight.innerHTML=`${highlightUsefulYaml(input.value,input.dataset.includeSchedule==="true")}\n`; syncYamlScroll(id); }
   syncYamlGutter(id);
-  queueWorkflowPreview(id);
+  if (!skipPreview) queueWorkflowPreview(id);
 }
 function syncYamlGutter(id) {
   const input=document.getElementById(id), gutter=document.getElementById(`${id}Gutter`);
@@ -296,9 +296,13 @@ let workflowTagOptions = [];
 function workflowTitle(workflow) { return workflow.description || workflow.name; }
 function extractWorkflowTags(workflow) {
   const tags = [];
-  for (const match of String(workflowTitle(workflow)).matchAll(/【([^】]*)】/g)) {
-    const tag = match[1].trim();
+  let rest = String(workflowTitle(workflow)).trim();
+  for (;;) {
+    const match = rest.match(/^(?:【([^】]+)】|\[([^\]]+)\])\s*/);
+    if (!match) break;
+    const tag = (match[1] ?? match[2] ?? "").trim();
     if (tag && !tags.includes(tag)) tags.push(tag);
+    rest = rest.slice(match[0].length);
   }
   return tags;
 }
@@ -328,7 +332,8 @@ function renderWorkflowTags() {
   if (!workflowTagOptions.some(option => option.key === state.workflowTag)) state.workflowTag = "all";
   const box = document.getElementById("workflowTags");
   if (!box) return;
-  box.innerHTML = workflowTagOptions.map((option, index) => `<button type="button" class="workflow-tag${option.key === state.workflowTag ? " active" : ""}" onclick="setWorkflowTag(${index})"><span class="workflow-tag-label">${esc(option.label)}</span><span class="workflow-tag-count">${option.count}</span></button>`).join("");
+  const allTagHint = t("在工作流名称开头添加【标签】或 [标签] 即可自动归类，如：【运维】日报");
+  box.innerHTML = workflowTagOptions.map((option, index) => `<button type="button" class="workflow-tag${option.key === state.workflowTag ? " active" : ""}"${option.key === "all" ? ` title="${esc(allTagHint)}"` : ""} onclick="setWorkflowTag(${index})"><span class="workflow-tag-label">${esc(option.label)}</span><span class="workflow-tag-count">${option.count}</span></button>`).join("");
 }
 function setWorkflowTag(index) {
   const option = workflowTagOptions[index];
@@ -340,23 +345,92 @@ function setWorkflowTag(index) {
   loadRuns(true);
 }
 
+let workflowResortInterval = null;
+let workflowResortDeadline = 0;
+
+function sortWorkflowList(list) {
+  const { key, direction } = state.workflowSort;
+  if (!key) return list;
+  const multiplier = direction === "asc" ? 1 : -1;
+  return list.sort((left, right) => {
+    const leftValue = key === "next_run_time" ? left.schedule?.next_run_time : left[key];
+    const rightValue = key === "next_run_time" ? right.schedule?.next_run_time : right[key];
+    const leftTime = leftValue ? Date.parse(leftValue) : null;
+    const rightTime = rightValue ? Date.parse(rightValue) : null;
+    if (leftTime === null && rightTime === null) return left.db_id - right.db_id;
+    if (leftTime === null) return 1;
+    if (rightTime === null) return -1;
+    return (leftTime - rightTime) * multiplier || left.db_id - right.db_id;
+  });
+}
+
+function renderWorkflowResortBadge() {
+  const badge = document.getElementById("workflowResortBadge");
+  if (!badge) return;
+  if (!state.frozenWorkflowOrder || !workflowResortDeadline) {
+    badge.classList.add("hidden");
+    badge.innerHTML = "";
+    return;
+  }
+  const remain = Math.max(0, Math.ceil((workflowResortDeadline - Date.now()) / 1000));
+  if (remain <= 0) {
+    flushWorkflowResort();
+    return;
+  }
+  badge.classList.remove("hidden");
+  badge.innerHTML = `<span>${esc(t("{seconds}s 后恢复排序", {seconds: remain}))}</span><button type="button" class="resort-now-btn" onclick="flushWorkflowResort()">${esc(t("立即刷新"))}</button>`;
+}
+
+function startWorkflowResortCountdown(seconds = 30) {
+  if (!state.frozenWorkflowOrder) {
+    const current = sortWorkflowList([...state.workflows.values()]);
+    state.frozenWorkflowOrder = current.map(item => item.name);
+  }
+  workflowResortDeadline = Date.now() + seconds * 1000;
+  clearInterval(workflowResortInterval);
+  renderWorkflowResortBadge();
+  workflowResortInterval = setInterval(renderWorkflowResortBadge, 1000);
+}
+
+function flushWorkflowResort(rerender = true) {
+  clearInterval(workflowResortInterval);
+  workflowResortInterval = null;
+  workflowResortDeadline = 0;
+  state.frozenWorkflowOrder = null;
+  const badge = document.getElementById("workflowResortBadge");
+  if (badge) {
+    badge.classList.add("hidden");
+    badge.innerHTML = "";
+  }
+  if (rerender) renderWorkflows();
+}
+
+function setWorkflowSearch(value) {
+  state.workflowSearch = String(value || "").trim().toLowerCase();
+  state.workflowPage = 1;
+  renderWorkflows();
+}
+
 function renderWorkflows() {
   hideSchedulePopover();
   renderWorkflowTags();
-  const workflows = [...state.workflows.values()].filter(workflowMatchesTag);
+  const query = state.workflowSearch || "";
+  const workflows = [...state.workflows.values()].filter(w => {
+    if (!workflowMatchesTag(w)) return false;
+    if (!query) return true;
+    return String(w.name || "").toLowerCase().includes(query)
+      || String(w.description || "").toLowerCase().includes(query);
+  });
   const { key, direction } = state.workflowSort;
-  if (key) {
-    const multiplier = direction === "asc" ? 1 : -1;
+  if (state.frozenWorkflowOrder) {
+    const rank = new Map(state.frozenWorkflowOrder.map((name, idx) => [name, idx]));
     workflows.sort((left, right) => {
-      const leftValue = key === "next_run_time" ? left.schedule?.next_run_time : left[key];
-      const rightValue = key === "next_run_time" ? right.schedule?.next_run_time : right[key];
-      const leftTime = leftValue ? Date.parse(leftValue) : null;
-      const rightTime = rightValue ? Date.parse(rightValue) : null;
-      if (leftTime === null && rightTime === null) return left.db_id - right.db_id;
-      if (leftTime === null) return 1;
-      if (rightTime === null) return -1;
-      return (leftTime - rightTime) * multiplier || left.db_id - right.db_id;
+      const a = rank.has(left.name) ? rank.get(left.name) : Number.MAX_SAFE_INTEGER;
+      const b = rank.has(right.name) ? rank.get(right.name) : Number.MAX_SAFE_INTEGER;
+      return a - b || left.db_id - right.db_id;
     });
+  } else {
+    sortWorkflowList(workflows);
   }
   const totalPages = Math.max(1, Math.ceil(workflows.length / state.workflowPageSize));
   state.workflowPage = Math.min(Math.max(state.workflowPage, 1), totalPages);
@@ -380,8 +454,7 @@ function renderWorkflows() {
   }
   document.getElementById("workflowRows").innerHTML = visibleWorkflows.map(w => {
       const s = w.schedule;
-      const emailNotification = w.notification?.email || {send_on:"disabled", to:[]};
-      const notificationClass = emailNotification.send_on === "disabled" ? "" : " notification-active";
+      const notificationClass = (w.notification_count || 0) > 0 ? " notification-active" : "";
       const canExecute = canWorkflow(w.name, "execute");
       const canEdit = canWorkflow(w.name, "edit");
       const actions = [];
@@ -404,7 +477,7 @@ function renderWorkflows() {
         <td data-label="${esc(t("下次运行"))}">${fmt(s.next_run_time)}</td>
         <td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td>
       </tr>`;
-    }).join("") || `<tr><td colspan="5" class="empty">${t("还没有导入工作流")}</td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="empty">${state.workflowSearch ? t("没有匹配的工作流") : t("还没有导入工作流")}</td></tr>`;
   document.getElementById("workflowPagination").innerHTML = `<span>${t("共 {total} 条 · 第 {page} / {pages} 页", {total:workflows.length,page:state.workflowPage,pages:totalPages})}</span><div><button class="button ghost" ${state.workflowPage <= 1 ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage - 1})">${t("上一页")}</button><button class="button ghost" ${state.workflowPage >= totalPages ? "disabled" : ""} onclick="changeWorkflowPage(${state.workflowPage + 1})">${t("下一页")}</button></div>`;
   positionWorkflowTags();
 }
@@ -513,20 +586,31 @@ async function loadRuns(resetPage=false) {
       const handled = r.handled_count ? ` · ${t("已处理 {count}", {count:r.handled_count})}` : "";
       const triggerLabels = {manual:t("手动"),schedule:t("定时"),rerun:t("重跑"),resume:t("失败续跑")};
       const triggerText = esc(triggerLabels[r.trigger_type] || r.trigger_type || "manual");
-      const triggerUser = r.trigger_user ? ` <span class="secondary mono">${esc(r.trigger_user)}</span>` : "";
-      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${triggerText}${triggerUser}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
+      return `<tr><td class="card-cell-name"><div class="workflow-name-cell"><button class="workflow-link" title="${esc(r.workflow_description || r.workflow_name)}" onclick='showRun(${jsArg(r.run_id)})'>${esc(r.workflow_description || r.workflow_name)}</button>${runnerTag(r.runner, r.runner_locations)}</div><div class="workflow-id mono" title="${esc(r.workflow_name)}">${esc(r.workflow_name)}</div></td><td data-label="${esc(t("触发方式"))}">${triggerText}</td><td data-label="${esc(t("状态"))}">${statusBadge(r.status)}</td><td data-label="${esc(t("开始时间"))}"><div>${fmt(r.start_time)}</div><div class="secondary mono" title="${esc(r.run_id)}">${esc(r.run_id)}</div></td><td data-label="${esc(t("任务进度"))}"><div class="progress"><span style="width:${percent}%"></span></div><div class="progress-label">${complete}/${r.task_count || 0} · ${t("成功")} ${r.success_count || 0}${handled}</div></td><td data-label="${esc(t("耗时"))}">${duration(r.start_time, r.end_time)}</td><td class="card-cell-actions"><div class="actions">${actions.join("")}</div></td></tr>`;
     }).join("") || `<tr><td colspan="7" class="empty">${t("没有符合条件的运行记录")}</td></tr>`;
     renderRunPagination();
     renderRunStats(data.stats);
   } catch (error) { if (!error.offline) toast(error.message, true); }
 }
 
+function toggleRunStatusFromStat(status) {
+  const next = state.runFilters.status === status ? "" : status;
+  state.runFilters.status = next;
+  const select = document.getElementById("runStatusFilter");
+  if (select) select.value = next;
+  loadRuns(true);
+}
+
 function renderRunStats(stats) {
-  const item = (label, value, className) => `<span class="run-stat ${className}"><b>${value}</b>${t(label)}</span>`;
+  const current = state.runFilters.status || "";
+  const item = (label, value, className, status) => {
+    const active = current === status ? " active" : "";
+    return `<button type="button" class="run-stat ${className}${active}" onclick="toggleRunStatusFromStat('${status}')" aria-pressed="${current === status}"><b>${value}</b>${t(label)}</button>`;
+  };
   document.getElementById("runStats").innerHTML = stats
-    ? item("成功", stats.success, "run-stat-success") +
-      item("运行中", stats.running, "run-stat-running") +
-      item("失败", stats.failed, "run-stat-failed")
+    ? item("成功", stats.success, "run-stat-success", "SUCCESS") +
+      item("运行中", stats.running, "run-stat-running", "RUNNING") +
+      item("失败", stats.failed, "run-stat-failed", "FAILED")
     : "";
 }
 
@@ -589,6 +673,27 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Escape') closeTaskRunMenu();
 });
 
+function applySavedTheme() {
+  let saved = "default";
+  try { saved = localStorage.getItem("dagrunner.theme") || "default"; } catch (_) {}
+  if (!["default", "blue", "red", "dark"].includes(saved)) saved = "default";
+  setTheme(saved, false);
+}
+
+function setTheme(theme, persist = true) {
+  const valid = ["default", "blue", "red", "dark"].includes(theme) ? theme : "default";
+  if (valid === "default") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", valid);
+  if (persist) {
+    try { localStorage.setItem("dagrunner.theme", valid); } catch (_) {}
+  }
+  document.querySelectorAll(".theme-swatch").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.themeChoice === valid);
+  });
+}
+
+applySavedTheme();
+
 function toggleGearMenu(event) {
   event.stopPropagation();
   const dropdown = document.getElementById("gearDropdown");
@@ -643,32 +748,220 @@ updateGearLanguageMeta();
 
 async function logout() { try { const result=await api("/api/auth/logout",{method:"POST",body:"{}"}); window.location.replace(result.redirect || "/login"); } catch(e) { if (!e.loginRequired) toast(e.message,true); } }
 
+let notifierChannelsCache = [];
+let notifierEditing = null;
+
 async function openNotifierSettings() {
+  notifierEditing = null;
   try {
-    const data=await api("/api/notifier"), email=data.email;
-    const securityOption=(value,label)=>`<option value="${value}" ${email.security===value?"selected":""}>${t(label)}</option>`;
-    const passwordHint=email.has_password?t("已保存密码；留空不会修改"):t("请输入 SMTP 密码或授权码");
-    openModal(t("通知渠道配置"), `<div class="channel-editor"><div class="channel-card"><div class="notification-icon">✉</div><div><strong>${t("邮件 SMTP")}</strong><p>${t("配置所有工作流共用的发件账号。收件人与发送时机仍在各工作流的通知面板中配置。")}</p></div><span class="channel-status ${email.configured?"configured":""}">${email.configured?t("已配置"):t("未配置")}</span></div><div class="channel-form-grid"><label>${t("SMTP 主机")}<input id="smtpHost" required value="${esc(email.host)}" placeholder="smtp.example.com"></label><label>${t("端口")}<input id="smtpPort" required type="number" min="1" max="65535" value="${esc(email.port)}"></label><label>${t("用户名")}<input id="smtpUsername" value="${esc(email.username)}" autocomplete="username"></label><label>${t("密码 / 授权码")}<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="${esc(passwordHint)}"></label><label class="channel-wide">${t("发件邮箱")}<input id="smtpFrom" required type="email" value="${esc(email.from)}" placeholder="sender@example.com"></label><label>${t("连接安全")}<select id="smtpSecurity" class="ui-select">${securityOption("ssl","SSL/TLS")}${securityOption("starttls","STARTTLS")}${securityOption("plain","无加密")}</select></label><label>${t("超时（秒）")}<input id="smtpTimeout" required type="number" min="1" step="0.1" value="${esc(email.timeout)}"></label><label class="channel-wide">${t("邮件主题前缀")}<input id="smtpSubjectPrefix" value="${esc(email.subject_prefix)}" placeholder="[DAG Runner]"></label></div><span class="form-hint">${t("当前仅支持邮件渠道；此页面后续可继续增加飞书等通知渠道。")}</span><button class="button" onclick="saveNotifierSettings()">${t("保存发件配置")}</button></div>`, false, "compact");
-  } catch(e) { toast(e.message,true); }
+    const data = await api("/api/notifier/channels");
+    notifierChannelsCache = data.channels || [];
+    renderNotifierSettingsModal();
+  } catch (e) { toast(e.message, true); }
 }
 
-async function saveNotifierSettings() {
-  const ids=["smtpHost","smtpPort","smtpFrom","smtpTimeout"];
-  for (const id of ids) { const input=document.getElementById(id); if (!input.checkValidity()) { input.reportValidity(); input.focus(); return; } }
-  const email={
-    host:document.getElementById("smtpHost").value.trim(),
-    port:Number(document.getElementById("smtpPort").value),
-    username:document.getElementById("smtpUsername").value.trim(),
-    password:document.getElementById("smtpPassword").value,
-    from:document.getElementById("smtpFrom").value.trim(),
-    security:document.getElementById("smtpSecurity").value,
-    timeout:Number(document.getElementById("smtpTimeout").value),
-    subject_prefix:document.getElementById("smtpSubjectPrefix").value.trim() || "[DAG Runner]",
+function notifierChannelSummary(ch) {
+  const cfg = ch.config || {};
+  if (ch.channel_type === "email") {
+    return `${cfg.from || "—"} · ${cfg.host || "—"}:${cfg.port || 465}`;
+  }
+  const url = String(cfg.webhook_url || "");
+  return url.length > 48 ? `${url.slice(0, 48)}…` : (url || "—");
+}
+
+function renderNotifierChannelForm(editing) {
+  const isNew = !editing.id;
+  const type = editing.channel_type;
+  const cfg = editing.config || {};
+  const fields = type === "email"
+    ? `<div class="channel-form-grid">
+        <label>${t("SMTP 主机")}<input id="chHost" required value="${esc(cfg.host || "")}" placeholder="smtp.example.com"></label>
+        <label>${t("端口")}<input id="chPort" required type="number" min="1" max="65535" value="${esc(cfg.port ?? 465)}"></label>
+        <label>${t("用户名")}<input id="chUser" value="${esc(cfg.username || "")}" autocomplete="username"></label>
+        <label>${t("密码 / 授权码")}<input id="chPass" type="password" autocomplete="new-password" placeholder="${esc(cfg.has_password ? t("已保存；留空不修改") : t("请输入密码或授权码"))}"></label>
+        <label class="channel-wide">${t("发件邮箱")}<input id="chFrom" required type="email" value="${esc(cfg.from || "")}" placeholder="sender@example.com"></label>
+        <label>${t("连接安全")}<select id="chSecurity" class="ui-select">
+          <option value="ssl"${(cfg.security || "ssl") === "ssl" ? " selected" : ""}>SSL/TLS</option>
+          <option value="starttls"${cfg.security === "starttls" ? " selected" : ""}>STARTTLS</option>
+          <option value="plain"${cfg.security === "plain" ? " selected" : ""}>无加密</option>
+        </select></label>
+        <label>${t("超时（秒）")}<input id="chTimeout" required type="number" min="1" step="0.1" value="${esc(cfg.timeout ?? 10)}"></label>
+        <label class="channel-wide">${t("主题前缀")}<input id="chPrefix" value="${esc(cfg.subject_prefix || "[DAG Runner]")}"></label>
+      </div>`
+    : `<div class="channel-form-grid">
+        <label class="channel-wide">Webhook URL<input id="chWebhook" required type="url" value="${esc(cfg.webhook_url || "")}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."></label>
+        <label class="channel-wide">签名密钥 Secret（可选）<input id="chSecret" type="password" autocomplete="new-password" placeholder="${esc(cfg.has_secret ? "已保存；留空不修改" : "开启签名校验时填写")}"></label>
+        <label>${t("主题前缀")}<input id="chPrefix" value="${esc(cfg.subject_prefix || "[DAG Runner]")}"></label>
+        <label>${t("超时（秒）")}<input id="chTimeout" required type="number" min="1" step="0.1" value="${esc(cfg.timeout ?? 10)}"></label>
+        <label class="channel-wide">默认 @手机号（可选，逗号分隔）<input id="chMobiles" value="${esc((cfg.mention_mobiles || []).join(", "))}" placeholder="13800138000"></label>
+      </div>`;
+  return `<div class="notif-form-card">
+    <div class="notif-form-head">
+      <strong>${isNew ? (type === "feishu" ? "新增飞书渠道" : "新增邮箱渠道") : `编辑渠道 · ${esc(editing.name)}`}</strong>
+      <button type="button" class="button ghost small" onclick="cancelNotifierEdit()">返回列表</button>
+    </div>
+    <div class="channel-form-grid">
+      <label>渠道名称<input id="chName" required value="${esc(editing.name || "")}" placeholder="${type === "feishu" ? "如：运维告警飞书群" : "如：公司发件邮箱"}"></label>
+      <label class="notif-enable-check"><input id="chEnabled" type="checkbox"${editing.enabled !== false ? " checked" : ""}> 启用该渠道</label>
+    </div>
+    ${fields}
+    <div class="notif-form-actions">
+      <button type="button" class="button" onclick="saveNotifierChannel()">${t("保存")}</button>
+      <button type="button" class="button ghost" onclick="cancelNotifierEdit()">${t("取消")}</button>
+    </div>
+  </div>`;
+}
+
+function renderNotifierSettingsModal() {
+  const listHtml = notifierChannelsCache.length
+    ? notifierChannelsCache.map(ch => `
+      <div class="notif-channel-row">
+        <div class="notif-channel-info">
+          <div class="notif-channel-title">
+            <span class="notif-type-tag ${esc(ch.channel_type)}">${ch.channel_type === "feishu" ? "飞书" : "邮箱"}</span>
+            <strong>${esc(ch.name)}</strong>
+            <span class="badge ${ch.enabled ? "enabled" : "disabled"}">${ch.enabled ? "启用" : "停用"}</span>
+          </div>
+          <div class="notif-channel-sub mono">${esc(notifierChannelSummary(ch))}</div>
+        </div>
+        <div class="notif-channel-actions">
+          <button type="button" class="button ghost small" onclick='testNotifierChannel(${jsArg(ch.id)})'>测试</button>
+          <button type="button" class="button ghost small" onclick='startEditNotifierChannel(${jsArg(ch.id)})'>编辑</button>
+          <button type="button" class="button danger small" onclick='removeNotifierChannel(${jsArg(ch.id)})'>删除</button>
+        </div>
+      </div>`).join("")
+    : `<div class="notif-empty">暂无通知渠道，请点击上方按钮添加邮箱或飞书渠道（配置保存在数据库中）。</div>`;
+
+  const body = notifierEditing
+    ? `<div class="channel-editor">${renderNotifierChannelForm(notifierEditing)}</div>`
+    : `<div class="channel-editor">
+        <div class="notif-toolbar">
+          <span class="form-hint" style="margin:0">支持配置任意数量的邮箱 SMTP 与飞书自定义机器人渠道。</span>
+          <div class="notif-toolbar-btns">
+            <button type="button" class="button small" onclick="startAddNotifierChannel('email')">＋ 新增邮箱</button>
+            <button type="button" class="button small" onclick="startAddNotifierChannel('feishu')">＋ 新增飞书</button>
+          </div>
+        </div>
+        <div class="notif-channel-list">${listHtml}</div>
+      </div>`;
+
+  const existing = document.querySelector("#modalBody .channel-editor");
+  const modal = document.getElementById("modal");
+  if (existing && modal && !modal.classList.contains("hidden")) {
+    existing.outerHTML = body;
+    return;
+  }
+  openModal(t("通知渠道管理"), body, true, "compact");
+}
+
+function startAddNotifierChannel(type) {
+  notifierEditing = {
+    id: null,
+    name: "",
+    channel_type: type,
+    enabled: true,
+    config: type === "email"
+      ? { host: "", port: 465, username: "", from: "", security: "ssl", timeout: 10, subject_prefix: "[DAG Runner]" }
+      : { webhook_url: "", secret: "", mention_mobiles: [], timeout: 10, subject_prefix: "[DAG Runner]" },
+  };
+  renderNotifierSettingsModal();
+}
+
+function startEditNotifierChannel(id) {
+  const found = notifierChannelsCache.find(item => item.id === id);
+  if (!found) return;
+  notifierEditing = JSON.parse(JSON.stringify(found));
+  renderNotifierSettingsModal();
+}
+
+function cancelNotifierEdit() {
+  notifierEditing = null;
+  renderNotifierSettingsModal();
+}
+
+async function saveNotifierChannel() {
+  if (!notifierEditing) return;
+  const type = notifierEditing.channel_type;
+  const nameInput = document.getElementById("chName");
+  if (!nameInput.checkValidity()) { nameInput.reportValidity(); nameInput.focus(); return; }
+  let config;
+  if (type === "email") {
+    for (const id of ["chHost", "chPort", "chFrom", "chTimeout"]) {
+      const el = document.getElementById(id);
+      if (!el.checkValidity()) { el.reportValidity(); el.focus(); return; }
+    }
+    config = {
+      host: document.getElementById("chHost").value.trim(),
+      port: Number(document.getElementById("chPort").value),
+      username: document.getElementById("chUser").value.trim(),
+      password: document.getElementById("chPass").value,
+      from: document.getElementById("chFrom").value.trim(),
+      security: document.getElementById("chSecurity").value,
+      timeout: Number(document.getElementById("chTimeout").value),
+      subject_prefix: document.getElementById("chPrefix").value.trim() || "[DAG Runner]",
+    };
+  } else {
+    for (const id of ["chWebhook", "chTimeout"]) {
+      const el = document.getElementById(id);
+      if (!el.checkValidity()) { el.reportValidity(); el.focus(); return; }
+    }
+    const mobiles = document.getElementById("chMobiles").value.split(/[\n,;]+/).map(v => v.trim()).filter(Boolean);
+    config = {
+      webhook_url: document.getElementById("chWebhook").value.trim(),
+      secret: document.getElementById("chSecret").value.trim(),
+      mention_mobiles: mobiles,
+      timeout: Number(document.getElementById("chTimeout").value),
+      subject_prefix: document.getElementById("chPrefix").value.trim() || "[DAG Runner]",
+    };
+  }
+  const payload = {
+    name: nameInput.value.trim(),
+    channel_type: type,
+    enabled: document.getElementById("chEnabled").checked,
+    config,
   };
   try {
-    await api("/api/notifier",{method:"PUT",body:JSON.stringify({email})});
-    closeModal(); toast(t("发件配置已保存"));
-  } catch(e) { toast(e.message,true); }
+    if (notifierEditing.id) {
+      await api(`/api/notifier/channels/${encodeURIComponent(notifierEditing.id)}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("通知渠道已更新");
+    } else {
+      await api("/api/notifier/channels", { method: "POST", body: JSON.stringify(payload) });
+      toast("通知渠道已添加");
+    }
+    notifierEditing = null;
+    const data = await api("/api/notifier/channels");
+    notifierChannelsCache = data.channels || [];
+    renderNotifierSettingsModal();
+    loadWorkflows();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function removeNotifierChannel(id) {
+  const found = notifierChannelsCache.find(item => item.id === id);
+  if (!await confirmDelete(`删除通知渠道「${found?.name || id}」？`, "已绑定该渠道的工作流通知规则也会同步移除。")) return;
+  try {
+    await api(`/api/notifier/channels/${encodeURIComponent(id)}`, { method: "DELETE" });
+    toast("通知渠道已删除");
+    const data = await api("/api/notifier/channels");
+    notifierChannelsCache = data.channels || [];
+    renderNotifierSettingsModal();
+    loadWorkflows();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function testNotifierChannel(id) {
+  const found = notifierChannelsCache.find(item => item.id === id);
+  if (!found) return;
+  let target = "";
+  if (found.channel_type === "email") {
+    const input = prompt("请输入测试收件邮箱（留空默认发给发件邮箱）：", found.config?.from || "");
+    if (input === null) return;
+    target = input.trim();
+  }
+  try {
+    await api(`/api/notifier/channels/${encodeURIComponent(id)}/test`, { method: "POST", body: JSON.stringify({ target }) });
+    toast("测试消息已发送");
+  } catch (e) { toast(e.message, true); }
 }
 
 let satelliteConfigs = [];
@@ -906,6 +1199,13 @@ function setTopLevelRunner(definition, runner) {
 function onRunnerSelectChange(editorId, runner) {
   const textarea = document.getElementById(editorId);
   if (!textarea) return;
+  if (typeof workflowEditor !== "undefined" && workflowEditor && workflowEditor.input?.id === editorId && workflowEditor.mode === "form" && workflowEditor.formModel) {
+    workflowEditor.formModel.runner = runner === "local" ? "" : runner;
+    if (typeof renderTaskForm === "function") renderTaskForm();
+    if (typeof renderDraftPreviewFromModel === "function") renderDraftPreviewFromModel(workflowEditor);
+    if (typeof scheduleFormSync === "function") scheduleFormSync();
+    return;
+  }
   textarea.value = setTopLevelRunner(textarea.value, runner);
   syncYamlHighlight(editorId);
   queueWorkflowPreview(editorId, 0);
@@ -1011,16 +1311,16 @@ async function submitCrontabImport() {
   } catch(e) { toast(t("识别或转换 crontab 失败：{error}",{error:e.message}),true); }
 }
 async function submitImportWorkflow() {
-  if (typeof findDuplicateCrons === "function" && findDuplicateCrons().length) {
-    toast(t("定时配置存在重复的 Cron，请修改后再保存"), true);
-    return;
-  }
-  try { await flushWorkflowModelSync(); } catch (e) { toast(e.message, true); return; }
-  if (!workflowEditorCanSave()) return;
+  if (typeof clearFormError === "function") clearFormError();
+  const saveError = typeof workflowEditorSaveError === "function" ? workflowEditorSaveError() : null;
+  if (saveError) { showFormError(saveError); return; }
+  try { await flushWorkflowModelSync(); } catch (e) { showFormError(e.message); return; }
+  const postSyncError = typeof workflowEditorSaveError === "function" ? workflowEditorSaveError(true) : null;
+  if (postSyncError) { showFormError(postSyncError); return; }
   const definition=normalizeYamlNewlines(document.getElementById("importDefinition").value);
   const file=new File([definition],pendingImportFilename,{type:"application/yaml"});
   const form=new FormData(); form.append("file",file); form.append("workflow_id",pendingWorkflowId); form.append("name",document.getElementById("importWorkflowName").value.trim()); form.append("runner",document.getElementById("importRunner")?.value || "local");
-  try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { toast(e.message,true); }
+  try { const result=await api("/api/workflows/import",{method:"POST",body:form}); closeModal(); const message=pendingImportSuccessVerb === "新增" ? "已新增 {name}（{id}）" : "已导入 {name}（{id}）"; toast(t(message,{name:result.name,id:result.id})); await loadWorkflows(); } catch(e) { showFormError(e.message); toast(e.message,true); }
 }
 function openWorkflowFormModal(name, definition, description, readOnly) {
   const split = splitWorkflowName(definition);
@@ -1036,7 +1336,7 @@ function openWorkflowFormModal(name, definition, description, readOnly) {
     <label class="yaml-editor-label">${t("工作流 YAML")}${yamlEditor("workflowDefinition",split.definition,false,readOnly)}</label>
     <span class="form-hint"><i class="yaml-key-sample">${t("高亮字段")}</i>${t("会被运行时使用；migration 和 YAML schedule 不参与后续执行。保存后立即写入数据库。")}</span>
     ${submit}
-  </div>`, false);
+  </div>`, Boolean(readOnly));
 }
 
 async function editWorkflow(name) {
@@ -1068,22 +1368,23 @@ async function setWorkflowOnline(name, online) {
       method: "PUT",
       body: JSON.stringify({crons, timezone: schedule.timezone || "Asia/Shanghai", enabled: online}),
     });
+    startWorkflowResortCountdown(30);
     toast(t(online ? "已上线，定时调度已启用" : "已下线，定时调度已停用"));
     await loadWorkflows();
   } catch (e) { toast(e.message, true); }
 }
 async function saveWorkflow(name) {
-  if (typeof findDuplicateCrons === "function" && findDuplicateCrons().length) {
-    toast(t("定时配置存在重复的 Cron，请修改后再保存"), true);
-    return;
-  }
-  try { await flushWorkflowModelSync(); } catch (e) { toast(e.message, true); return; }
-  try { await flushScheduleServerSync(); } catch (e) { toast(e.message, true); return; }
-  if (!workflowEditorCanSave()) return;
+  if (typeof clearFormError === "function") clearFormError();
+  const saveError = typeof workflowEditorSaveError === "function" ? workflowEditorSaveError() : null;
+  if (saveError) { showFormError(saveError); return; }
+  try { await flushWorkflowModelSync(); } catch (e) { showFormError(e.message); return; }
+  const postSyncError = typeof workflowEditorSaveError === "function" ? workflowEditorSaveError(true) : null;
+  if (postSyncError) { showFormError(postSyncError); return; }
   try {
     await api(`/api/workflows/${encodeURIComponent(name)}`,{method:"PUT",body:JSON.stringify({definition:normalizeYamlNewlines(document.getElementById("workflowDefinition").value),name:document.getElementById("workflowDisplayName").value.trim(),runner:document.getElementById("workflowRunner")?.value || "local"})});
+    if (typeof flushScheduleServerSync === "function") await flushScheduleServerSync();
     closeModal(); toast(t("工作流已更新")); await loadWorkflows();
-  } catch(e) { toast(e.message,true); }
+  } catch(e) { showFormError(e.message); toast(e.message,true); }
 }
 async function runAction(id, action) { if (action === "stop" && !confirm(t("确定停止这个运行实例？当前子进程会被终止。"))) return; try { const r = await api(`/api/runs/${encodeURIComponent(id)}/${action}`, {method:"POST", body:"{}"}); toast(action === "stop" ? t("已发送停止请求") : t("已提交新运行 {id}",{id:r.run_id})); setTimeout(loadRuns, 300); } catch(e) { toast(e.message, true); } }
 async function deleteWorkflow(name) {
@@ -1131,14 +1432,48 @@ function showDag(name) {
   openWorkflowViewer('workflow', name);
 }
 
-function buildDagSvg(tasks, workflowName, showStatuses=false, preview=false, direction='LR', viewer=false) {
+const svgTextMeasureContext = document.createElement('canvas').getContext('2d');
+function truncateSvgText(text, maxWidth, font) {
+  const value=String(text ?? "");
+  if (!value) return "";
+  svgTextMeasureContext.font=font;
+  if (svgTextMeasureContext.measureText(value).width <= maxWidth) return value;
+  const ellipsis="…";
+  let truncated=value;
+  while (truncated.length > 1 && svgTextMeasureContext.measureText(truncated + ellipsis).width > maxWidth) {
+    truncated=truncated.slice(0, -1);
+  }
+  return truncated + ellipsis;
+}
+
+function buildDagSvg(tasks, workflowName, showStatuses=false, preview=false, direction='LR', viewer=false, issueMap=null) {
+  if (!tasks || !tasks.length) {
+    return `<div class="dag-empty">${esc(t("暂无任务节点"))}</div>`;
+  }
   const byName = new Map(tasks.map(task => [task.name, task]));
   const levels = new Map();
+  const visiting = new Set();
+  const cyclicNodes = new Set();
   function getLevel(task) {
     if (levels.has(task.name)) return levels.get(task.name);
-    const parents = task.depends.filter(name => byName.has(name));
-    const level = parents.length ? 1 + Math.max(...parents.map(name => getLevel(byName.get(name)))) : 0;
-    levels.set(task.name, level); return level;
+    if (visiting.has(task.name)) {
+      cyclicNodes.add(task.name);
+      return 0;
+    }
+    visiting.add(task.name);
+    const parents = (task.depends || []).filter(name => name !== task.name && byName.has(name));
+    let level = 0;
+    for (const parentName of parents) {
+      if (visiting.has(parentName)) {
+        cyclicNodes.add(task.name);
+        cyclicNodes.add(parentName);
+        continue;
+      }
+      level = Math.max(level, 1 + getLevel(byName.get(parentName)));
+    }
+    visiting.delete(task.name);
+    levels.set(task.name, level);
+    return level;
   }
   tasks.forEach(getLevel);
   const columns = new Map();
@@ -1159,32 +1494,38 @@ function buildDagSvg(tasks, workflowName, showStatuses=false, preview=false, dir
       : {x:margin+level*(nodeWidth+columnGap),y:startY+index*(nodeHeight+rowGap)}));
   }
   const edges=[];
-  tasks.forEach(task => task.depends.forEach(parentName => {
+  tasks.forEach(task => (task.depends || []).forEach(parentName => {
     const from=positions.get(parentName), to=positions.get(task.name);
     if (!from || !to) return;
     const x1=from.x+(vertical ? nodeWidth/2 : nodeWidth), y1=from.y+(vertical ? nodeHeight : nodeHeight/2);
     const x2=to.x+(vertical ? nodeWidth/2 : 0), y2=to.y+(vertical ? 0 : nodeHeight/2), mid=(x1+x2)/2, midY=(y1+y2)/2;
     const curve=vertical ? `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}` : `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
-    edges.push(`<path class="dag-edge" d="${curve}" marker-end="url(#dagArrow)"/>`);
+    const isCyclicEdge = cyclicNodes.has(parentName) && cyclicNodes.has(task.name);
+    edges.push(`<path class="dag-edge${isCyclicEdge ? ' dag-edge-cycle' : ''}" d="${curve}" marker-end="url(#dagArrow)"/>`);
     const parent = byName.get(parentName);
     const branch = parent.success?.includes(task.name) ? '成立' : parent.failure?.includes(task.name) ? '不成立' : '';
     if (branch) edges.push(`<text class="dag-branch-label" x="${mid}" y="${(y1+y2)/2-8}" text-anchor="middle">${branch}</text>`);
   }));
   const nodes=tasks.map(task => {
-    const p=positions.get(task.name), taskId=task.name.slice(0,27);
+    const p=positions.get(task.name);
     const runnerLabel=task.runner && task.runner !== "local" ? task.runner : "";
     const runnerText=runnerLabel.length > 10 ? runnerLabel.slice(0,7)+"..." : runnerLabel;
     const pillWidth=runnerText ? Math.ceil(runnerText.length*6.4)+14 : 0;
-    const title=(task.description || task.name).slice(0, 22);
+    // 标题/ID 按节点可用宽度测量截断，超出显示省略号，避免溢出节点框。
+    const title=truncateSvgText(task.description || task.name, nodeWidth-37, '700 12px Inter, "Microsoft YaHei", "Segoe UI", sans-serif');
+    const taskId=truncateSvgText(task.name, nodeWidth-21, '400 10.5px "Cascadia Code", Consolas, monospace');
     const status=showStatuses ? (task.status || "PENDING") : "";
     const click=viewer ? `data-task="${esc(task.name)}" onclick='selectViewerTask(${jsArg(task.name)})'` : preview ? `data-task="${esc(task.name)}" onclick='selectPreviewTask(${jsArg(task.name)})'` : showStatuses ? "" : `onclick="selectDagTask('${esc(workflowName)}','${esc(task.name)}')"`;
     // Status is conveyed by the node color only; hover shows the status word.
     const conditionText=task.type === "condition" && task.condition_result ? `→ ${task.condition_result.toUpperCase()}` : "";
-    const hoverStatus=[status, conditionText].filter(Boolean).join(" · ");
+    const issues = issueMap && typeof issueMap.get === "function" ? (issueMap.get(task.name) || []) : [];
+    const hasIssue = Boolean(issues.length || cyclicNodes.has(task.name));
+    const hoverStatus=[status, conditionText, issues.length ? `待完善：${issues.join('；')}` : ""].filter(Boolean).join(" · ");
     // The satellite badge hangs on the outer top-right corner of the node so
     // it never covers the task title inside the box.
     const pill=runnerText ? `<rect class="dag-node-runner" x="${nodeWidth + 14 - pillWidth}" y="-15" width="${pillWidth}" height="15" rx="7"></rect><text class="dag-node-runner-text" x="${nodeWidth + 14 - pillWidth/2}" y="-4" text-anchor="middle">${esc(runnerText)}</text>` : "";
-    return `<g class="dag-node ${task.type === "condition" ? "dag-condition" : ""} ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${pill}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${runnerLabel ? ` · ${esc(runnerLabel)}` : ""}${hoverStatus ? ` · ${esc(hoverStatus)}` : ""}</title></g>`;
+    const issueBadge = hasIssue && preview ? `<g class="dag-node-issue-badge" transform="translate(${nodeWidth - 10}, -6)"><circle cx="0" cy="0" r="8"></circle><text x="0" y="3.5" text-anchor="middle">!</text></g>` : "";
+    return `<g class="dag-node ${task.type === "condition" ? "dag-condition" : ""} ${showStatuses ? "dag-run-node" : ""} ${task.enabled ? "dag-enabled" : "dag-disabled"} ${status ? `dag-status-${status.toLowerCase()}` : ""} ${hasIssue && preview ? "dag-node-issue" : ""}" transform="translate(${p.x},${p.y})" ${click}><rect width="${nodeWidth}" height="${nodeHeight}" rx="8"></rect><circle cx="17" cy="19" r="5"></circle><text class="dag-node-title" x="29" y="24">${esc(title)}</text>${pill}${issueBadge}<text class="dag-node-id" x="15" y="49">${esc(taskId)}</text><title>${esc(task.description || task.name)} · ${esc(task.name)}${runnerLabel ? ` · ${esc(runnerLabel)}` : ""}${hoverStatus ? ` · ${esc(hoverStatus)}` : ""}</title></g>`;
   }).join("");
   return `<svg class="dag-canvas" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(workflowName)} DAG"><defs><marker id="dagArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>${edges.join("")}${nodes}</svg>`;
 }
@@ -1205,28 +1546,76 @@ function editSchedule(name) {
   openModal(`${namedId(workflow.description, workflow.name)} · ${t("定时配置")}`, `<div class="schedule-editor"><div class="schedule-editor-head"><label>${t("统一时区")}<input id="timezoneInput" value="${esc(s.timezone || "Asia/Shanghai")}" oninput="this.setCustomValidity('')"></label><button class="button ghost" type="button" onclick="addScheduleRow()">＋ ${t("增加定时")}</button></div><div id="scheduleInputs" class="schedule-inputs">${rows}</div><span class="form-hint">${t("Cron 使用 5 个字段。每小时第 10 分钟：10 * * * *　每天 10:00：0 10 * * *")}</span><label class="check"><input id="enabledInput" type="checkbox" ${s.enabled ? "checked" : ""}>${t("启用全部自动调度")}</label><button class="button" onclick='saveSchedule(${jsArg(name)})'>${t("保存配置")}</button></div>`, false, "compact");
 }
 
-function editNotification(name) {
+let wfNotifChannels = [];
+
+function wfNotificationRuleRowHtml(rule, channels) {
+  const chOptions = channels.map(ch => `<option value="${esc(ch.id)}"${rule.channel_id === ch.id ? " selected" : ""}>[${ch.channel_type === "feishu" ? "飞书" : "邮箱"}] ${esc(ch.name)}${ch.enabled ? "" : "（已停用）"}</option>`).join("");
+  const selectedCh = channels.find(ch => ch.id === rule.channel_id) || channels[0];
+  const placeholder = selectedCh?.channel_type === "feishu" ? "可选 @手机号，逗号分隔（留空直接发群）" : "收件邮箱，逗号或分号分隔";
+  return `<div class="wf-notif-row">
+    <select class="ui-select wf-notif-channel" onchange="onWfNotifChannelChange(this)">${chOptions}</select>
+    <select class="ui-select wf-notif-sendon">
+      <option value="failure"${rule.send_on === "failure" ? " selected" : ""}>仅失败时</option>
+      <option value="success"${rule.send_on === "success" ? " selected" : ""}>仅成功时</option>
+      <option value="always"${rule.send_on === "always" ? " selected" : ""}>成功或失败</option>
+    </select>
+    <input class="wf-notif-targets" type="text" value="${esc((rule.targets || []).join(", "))}" placeholder="${esc(placeholder)}">
+    <button type="button" class="icon-button wf-notif-del" title="删除规则" onclick="this.closest('.wf-notif-row').remove()">×</button>
+  </div>`;
+}
+
+function onWfNotifChannelChange(select) {
+  const row = select.closest(".wf-notif-row");
+  const ch = wfNotifChannels.find(item => item.id === select.value);
+  const input = row?.querySelector(".wf-notif-targets");
+  if (input) {
+    input.placeholder = ch?.channel_type === "feishu" ? "可选 @手机号，逗号分隔（留空直接发群）" : "收件邮箱，逗号或分号分隔";
+  }
+}
+
+function addWfNotificationRule() {
+  if (!wfNotifChannels.length) return;
+  const host = document.getElementById("wfNotifRules");
+  if (!host) return;
+  host.querySelector(".notif-empty")?.remove();
+  host.insertAdjacentHTML("beforeend", wfNotificationRuleRowHtml({ channel_id: wfNotifChannels[0].id, send_on: "failure", targets: [] }, wfNotifChannels));
+}
+
+async function editNotification(name) {
   const workflow = state.workflows.get(name);
   if (!workflow) return;
-  const email = workflow.notification?.email || {send_on:"disabled", to:[]};
-  const option = (value, label) => `<option value="${value}" ${email.send_on === value ? "selected" : ""}>${t(label)}</option>`;
-  openModal(`${namedId(workflow.description, workflow.name)} · ${t("邮件通知")}`, `<div class="notification-editor"><div class="notification-card"><div class="notification-icon">✉</div><div><strong>${t("工作流结果邮件")}</strong><p>${t("每次工作流结束后最多发送一封邮件，发件账号取自 var 通知配置。")}</p></div></div><label>${t("发送时机")}<select id="notificationSendOn" class="ui-select">${option("disabled","不发送")}${option("success","仅成功时发送")}${option("failure","仅失败时发送")}${option("always","成功或失败都发送")}</select></label><label>${t("收件邮箱")}<textarea id="notificationRecipients" class="notification-recipients" placeholder="ops@example.com&#10;owner@example.com">${esc((email.to || []).join("\n"))}</textarea></label><span class="form-hint">${t("每行填写一个邮箱，也可以使用逗号或分号分隔。保存后会更新完整的工作流 YAML 配置。")}</span><button class="button" onclick='saveNotification(${jsArg(name)})'>${t("保存通知配置")}</button></div>`, false, "compact");
+  try {
+    const data = await api(`/api/workflows/${encodeURIComponent(name)}/notifications`);
+    wfNotifChannels = data.channels || [];
+    const rules = data.rules || [];
+    const body = !wfNotifChannels.length
+      ? `<div class="notification-editor"><div class="notif-empty">暂无可用通知渠道。请管理员先在右上角「⚙ 通知」中配置邮箱或飞书渠道。</div></div>`
+      : `<div class="notification-editor">
+          <div class="notif-toolbar">
+            <span class="form-hint" style="margin:0">可为当前工作流绑定多条邮箱或飞书通知规则，保存后写入数据库。</span>
+            <button type="button" class="button ghost small" onclick="addWfNotificationRule()">＋ 添加规则</button>
+          </div>
+          <div id="wfNotifRules" class="wf-notif-rules">${rules.length ? rules.map(rule => wfNotificationRuleRowHtml(rule, wfNotifChannels)).join("") : '<div class="notif-empty">暂未绑定通知规则，点击上方「＋ 添加规则」配置。</div>'}</div>
+          <button class="button" onclick='saveNotification(${jsArg(name)})'>${t("保存通知配置")}</button>
+        </div>`;
+    openModal(`${namedId(workflow.description, workflow.name)} · ${t("通知配置")}`, body, true, "compact");
+  } catch (e) { toast(e.message, true); }
 }
 
 async function saveNotification(name) {
-  const sendOn = document.getElementById("notificationSendOn").value;
-  const input = document.getElementById("notificationRecipients");
-  const recipients = [...new Set(input.value.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean))];
-  input.setCustomValidity("");
-  if (sendOn !== "disabled" && !recipients.length) input.setCustomValidity(t("启用邮件通知时至少填写一个收件邮箱"));
-  else if (recipients.some(value => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) input.setCustomValidity(t("收件邮箱格式不正确"));
-  if (!input.checkValidity()) { input.reportValidity(); input.focus(); return; }
+  const rows = [...document.querySelectorAll("#wfNotifRules .wf-notif-row")];
+  const rules = rows.map(row => ({
+    channel_id: row.querySelector(".wf-notif-channel").value,
+    send_on: row.querySelector(".wf-notif-sendon").value,
+    targets: row.querySelector(".wf-notif-targets").value.split(/[\n,;]+/).map(v => v.trim()).filter(Boolean),
+    enabled: true,
+  }));
   try {
-    await api(`/api/workflows/${encodeURIComponent(name)}/notification`, {method:"PUT", body:JSON.stringify({send_on:sendOn, to:recipients})});
+    await api(`/api/workflows/${encodeURIComponent(name)}/notifications`, { method: "PUT", body: JSON.stringify({ rules }) });
     closeModal();
     toast(t("通知配置已保存"));
     await loadWorkflows();
-  } catch(e) { toast(e.message, true); }
+  } catch (e) { toast(e.message, true); }
 }
 function scheduleInputRow(cron="") {
   return `<div class="schedule-input-row"><label>${t("Cron（5 字段）")}<input class="cron-input" value="${esc(cron)}" oninput="this.setCustomValidity('')"></label><button class="button danger schedule-remove" type="button" onclick="removeScheduleRow(this)" aria-label="${t("删除此定时")}">${t("删除")}</button></div>`;
@@ -1584,32 +1973,64 @@ async function openAccountSettings() {
 
 function renderAccountSettings(accounts, editing) {
   accountEditing = editing;
+  if (editing) {
+    const account = editing === "new" ? null : accounts.find(item => item.username === editing);
+    if (editing === "new" || account) {
+      const body = `<div class="account-settings">${accountEditorHtml(account)}</div>`;
+      openModal(t("账号管理"), body, false, "account");
+      syncAccountUnrestrictedView();
+      return;
+    }
+  }
   const rows = accounts.map(account => {
     let actions;
     if (account.is_admin) {
       actions = `<span class="secondary">${t("内置管理员")}</span>`;
     } else {
-      actions = `<button class="button ghost" onclick='editAccountPanel(${jsArg(account.username)})'>${t("编辑")}</button>`
-        + `<button class="button ghost" onclick='resetAccountPasswordPrompt(${jsArg(account.username)})'>${t("重置密码")}</button>`
-        + `<button class="button danger" onclick='deleteAccountByUsername(${jsArg(account.username)})'>${t("删除")}</button>`;
+      actions = `<button class="button ghost small" onclick='editAccountPanel(${jsArg(account.username)})'>${t("编辑")}</button>`
+        + `<button class="button ghost small" onclick='resetAccountPasswordPrompt(${jsArg(account.username)})'>${t("重置密码")}</button>`
+        + `<button class="button danger small" onclick='deleteAccountByUsername(${jsArg(account.username)})'>${t("删除")}</button>`;
     }
-    const badge = account.enabled ? "" : ` <span class="badge">${t("已禁用")}</span>`;
+    const badge = account.enabled ? "" : ` <span class="badge disabled">${t("已禁用")}</span>`;
     return `<tr><td class="card-cell-name" data-label="${t("账号")}"><div class="account-name">${esc(account.username)}${badge}</div></td>`
       + `<td data-label="${t("权限")}"><div class="account-scope">${esc(accountScopeText(account))}</div></td>`
       + `<td class="secondary" data-label="${t("最后登录")}">${esc(account.last_login_time || "-")}</td>`
       + `<td class="card-cell-actions" data-label="${t("操作")}"><div class="actions">${actions}</div></td></tr>`;
   }).join("");
-  let editor = "";
-  if (editing === "new") editor = accountEditorHtml(null);
-  else if (editing) {
-    const account = accounts.find(item => item.username === editing);
-    if (account) editor = accountEditorHtml(account);
-  }
-  const toolbar = editor ? "" : `<div class="account-toolbar"><button class="button" onclick="addAccountPanel()">${t("新建账号")}</button></div>`;
-  const body = `<div class="account-settings">${toolbar}${editor}`
+  const toolbar = `<div class="account-toolbar"><span class="form-hint" style="margin:0">${t("管理登录账号及各工作流的细粒度访问权限")}</span><button class="button" onclick="addAccountPanel()">＋ ${t("新建账号")}</button></div>`;
+  const body = `<div class="account-settings">${toolbar}`
     + `<table class="account-table card-table"><thead><tr><th>${t("账号")}</th><th>${t("权限")}</th><th>${t("最后登录")}</th><th>${t("操作")}</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="empty">${t("暂无账号")}</td></tr>`}</tbody></table>`
     + `</div>`;
-  openModal(t("账号管理"), body, false, "account");
+  openModal(t("账号管理"), body, true, "account");
+}
+
+function generateStrongPassword(targetId) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*";
+  const bytes = new Uint8Array(20);
+  crypto.getRandomValues(bytes);
+  const pwd = Array.from(bytes, b => chars[b % chars.length]).join("");
+  const input = document.getElementById(targetId);
+  if (input) {
+    input.type = "text";
+    input.value = pwd;
+    input.focus();
+    input.select();
+  }
+}
+
+function filterAccountWorkflowRows(query) {
+  const q = String(query || "").trim().toLowerCase();
+  document.querySelectorAll("#modalBody .account-workflow-row").forEach(row => {
+    const hay = row.dataset.search || "";
+    row.style.display = !q || hay.includes(q) ? "" : "none";
+  });
+}
+
+function syncAccountUnrestrictedView() {
+  const box = document.getElementById("accountUnrestricted");
+  const section = document.getElementById("accountWorkflowsSection");
+  if (!box || !section) return;
+  section.classList.toggle("is-unrestricted", box.checked);
 }
 
 function accountEditorHtml(account) {
@@ -1620,59 +2041,83 @@ function accountEditorHtml(account) {
   const grants = {};
   for (const item of account?.workflows || []) grants[item.key] = item.permission;
   const ROLE_OPTIONS = [
-    { value: "read", name: "Reviewer" },
-    { value: "execute", name: "Executor" },
-    { value: "edit", name: "Maintainer" },
+    { value: "", name: t("无权限"), desc: t("不可见") },
+    { value: "read", name: "Reviewer", desc: t("只读") },
+    { value: "execute", name: "Executor", desc: t("只读 + 执行") },
+    { value: "edit", name: "Maintainer", desc: t("只读 + 执行 + 编辑") },
   ];
-  const roleDescription = value => t(value === "read" ? "只读" : value === "execute" ? "只读 + 执行" : "只读 + 执行 + 编辑");
   const permissionCells = (key, granted) => {
     const flags = parsePermissionFlags(granted);
     const current = flags.has("edit") ? "edit" : flags.has("execute") ? "execute" : flags.has("read") ? "read" : "";
     return ROLE_OPTIONS.map(option => `
-      <label class="account-role-cell"><input type="radio" name="account-perm-${esc(key)}" value="${option.value}" data-account-workflow="${esc(key)}"${current === option.value ? " checked" : ""} aria-label="${option.name} · ${esc(key)}"></label>`).join("");
+      <label class="account-role-cell"><input type="radio" name="account-perm-${esc(key)}" value="${option.value}" data-account-workflow="${esc(key)}"${current === option.value ? " checked" : ""} aria-label="${esc(option.name)} · ${esc(key)}"></label>`).join("");
   };
   const workflowRows = accountWorkflowKeys.map(key => {
-    const title = accountWorkflowTitles[key];
+    const title = accountWorkflowTitles[key] || "";
+    const search = `${title} ${key}`.toLowerCase();
     const name = title && title !== key
       ? `<strong title="${esc(title)}">${esc(title)}</strong><span class="mono" title="${esc(key)}">${esc(key)}</span>`
       : `<strong class="mono" title="${esc(key)}">${esc(key)}</strong>`;
-    return `<div class="account-workflow-row"><div class="account-workflow-name">${name}</div>${permissionCells(key, grants[key])}</div>`;
+    return `<div class="account-workflow-row" data-search="${esc(search)}"><div class="account-workflow-name">${name}</div>${permissionCells(key, grants[key])}</div>`;
   }).join("");
-  return `<div class="account-editor">
-    <h4>${isNew ? t("新建账号") : t("编辑账号：{name}", {name: username})}</h4>
-    <div class="account-form-grid">
-      <label${isNew ? "" : ` class="account-full"`}>${t("用户名")}<input id="accountUsername" value="${esc(username)}" ${isNew ? "" : "disabled"} maxlength="64"></label>
-      ${isNew ? `<label>${t("密码")}<input id="accountPassword" type="password" autocomplete="new-password" minlength="16"></label>` : ""}
+  return `<form class="account-editor" autocomplete="off" onsubmit="event.preventDefault()">
+    <div class="account-editor-head">
+      <div>
+        <h4>${isNew ? t("新建账号") : t("编辑账号：{name}", {name: username})}</h4>
+        <span class="form-hint" style="margin:0">${isNew ? t("创建登录凭据并分配工作流权限") : t("调整账号启停状态或工作流角色权限")}</span>
+      </div>
+      <button type="button" class="button ghost small" onclick="cancelAccountPanel()">← ${t("返回列表")}</button>
     </div>
-    <div class="account-checks">
-      <label class="account-check"><input id="accountEnabled" type="checkbox" ${enabled ? "checked" : ""}> ${t("启用")}</label>
-      <label class="account-check"><input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""}> ${t("全部工作流")}</label>
+
+    <div class="account-card-section">
+      <div class="account-form-grid">
+        <label${isNew ? "" : ` class="account-full"`}>${t("用户名")}<input id="accountUsername" name="new_account_user" autocomplete="off" value="${esc(username)}" ${isNew ? "" : "disabled"} maxlength="64" placeholder="如：ops_user"></label>
+        ${isNew ? `<label>${t("密码")}（至少 16 位）<div class="account-pwd-wrap"><input id="accountPassword" name="new_account_pass" type="password" autocomplete="new-password" minlength="16" placeholder="至少 16 位字符"><button type="button" class="button ghost small" onclick="generateStrongPassword('accountPassword')">${t("随机生成")}</button></div></label>` : ""}
+      </div>
+      <div class="account-toggles-grid">
+        <label class="account-toggle-card">
+          <input id="accountEnabled" type="checkbox" ${enabled ? "checked" : ""}>
+          <div><strong>${t("启用账号")}</strong><span>${t("允许登录控制台；禁用后现有会话立即失效")}</span></div>
+        </label>
+        <label class="account-toggle-card">
+          <input id="accountUnrestricted" type="checkbox" ${unrestricted ? "checked" : ""} onchange="syncAccountUnrestrictedView()">
+          <div><strong>${t("全部工作流权限")}</strong><span>${t("拥有所有工作流的完整权限，不受下方逐项授权限制")}</span></div>
+        </label>
+      </div>
     </div>
-    <div class="account-flag-hints">
-      <span class="form-hint">${t("启用：允许该账号登录控制台；禁用后其现有会话会立即失效。")}</span>
-      <span class="form-hint">${t("全部工作流：拥有所有工作流的完整权限，不再受下方逐项授权限制。")}</span>
-    </div>
-    <div class="account-workflows">
-      <div class="account-workflows-head"><span>${t("工作流权限")}</span><span class="form-hint">${t("每行选择一个角色，角色说明见下表头")}</span></div>
+
+    <div id="accountWorkflowsSection" class="account-workflows${unrestricted ? " is-unrestricted" : ""}">
+      <div class="account-workflows-head">
+        <div class="account-workflows-title">
+          <span>${t("工作流逐项授权")}</span>
+          <span class="tf-count-badge">${accountWorkflowKeys.length}</span>
+        </div>
+        <input class="account-wf-search" type="search" autocomplete="off" placeholder="${esc(t("搜索名称或 ID"))}" oninput="filterAccountWorkflowRows(this.value)">
+      </div>
+      <div class="account-unrestricted-banner">${t("已开启「全部工作流权限」，无需逐项勾选。")}</div>
       <div class="account-workflows-bulk">
-        <span class="bulk-label">${t("统一设置")}</span>
-        <button type="button" class="button ghost" onclick="setAllAccountRoles('read')">Reviewer · ${t("只读")}</button>
-        <button type="button" class="button ghost" onclick="setAllAccountRoles('execute')">Executor · ${t("只读 + 执行")}</button>
-        <button type="button" class="button ghost" onclick="setAllAccountRoles('edit')">Maintainer · ${t("只读 + 执行 + 编辑")}</button>
+        <span class="bulk-label">${t("批量设置")}</span>
+        <button type="button" class="button ghost small" onclick="setAllAccountRoles('')">${t("全部清空")}</button>
+        <button type="button" class="button ghost small" onclick="setAllAccountRoles('read')">Reviewer · ${t("只读")}</button>
+        <button type="button" class="button ghost small" onclick="setAllAccountRoles('execute')">Executor · ${t("只读 + 执行")}</button>
+        <button type="button" class="button ghost small" onclick="setAllAccountRoles('edit')">Maintainer · ${t("只读 + 执行 + 编辑")}</button>
       </div>
       <div class="account-workflows-list">
         <div class="account-workflow-head">
           <span class="account-workflow-head-label">${t("工作流")}</span>
-          ${ROLE_OPTIONS.map(option => `<div class="account-role-head"><span class="role-name">${option.name}</span><span class="role-desc">${roleDescription(option.value)}</span></div>`).join("")}
+          ${ROLE_OPTIONS.map(option => `<div class="account-role-head"><span class="role-name">${esc(option.name)}</span><span class="role-desc">${esc(option.desc)}</span></div>`).join("")}
         </div>
-        ${workflowRows || `<span class="form-hint">${t("暂无工作流")}</span>`}
+        <div class="account-workflow-scroll">
+          ${workflowRows || `<div class="notif-empty">${t("暂无工作流")}</div>`}
+        </div>
       </div>
     </div>
+
     <div class="account-editor-actions">
-      <button class="button ghost" onclick="cancelAccountPanel()">${t("取消")}</button>
-      <button class="button" onclick="saveAccountPanel()">${t("保存")}</button>
+      <button type="button" class="button ghost" onclick="cancelAccountPanel()">${t("取消")}</button>
+      <button type="button" class="button" onclick="saveAccountPanel()">${t("保存")}</button>
     </div>
-  </div>`;
+  </form>`;
 }
 
 function addAccountPanel() { renderAccountSettings(lastAccounts, "new"); }
@@ -1696,7 +2141,7 @@ function readAccountPanel() {
   )];
   for (const key of keys) {
     const checked = document.querySelector(`#modalBody [data-account-workflow="${CSS.escape(key)}"]:checked`);
-    if (checked) payload.workflows[key] = checked.value;
+    if (checked && checked.value) payload.workflows[key] = checked.value;
   }
   if (accountEditing === "new") {
     payload.username = document.getElementById("accountUsername").value.trim();
@@ -1731,11 +2176,12 @@ async function deleteAccountByUsername(username) {
 }
 
 async function resetAccountPasswordPrompt(username) {
-  openModal(t("重置密码：{name}", {name: username}), `<div class="form-stack">
-    <label>${t("新密码")}<input id="accountResetPassword" type="password" autocomplete="new-password" minlength="16"></label>
+  openModal(t("重置密码：{name}", {name: username}), `<form class="form-stack" autocomplete="off" onsubmit="event.preventDefault()">
+    <input type="text" name="username" autocomplete="username" value="${esc(username)}" style="display:none">
+    <label>${t("新密码")}<div class="account-pwd-wrap"><input id="accountResetPassword" type="password" autocomplete="new-password" minlength="16" placeholder="至少 16 位字符"><button type="button" class="button ghost small" onclick="generateStrongPassword('accountResetPassword')">${t("随机生成")}</button></div></label>
     <span class="form-hint">${t("密码至少 16 位；该账号现有会话会立即失效。")}</span>
-    <div class="form-actions"><button class="button" onclick='saveAccountPasswordReset(${jsArg(username)})'>${t("保存")}</button></div>
-  </div>`, false, "compact");
+    <div class="form-actions"><button type="button" class="button ghost" onclick="openAccountSettings()">${t("返回列表")}</button><button type="button" class="button" onclick='saveAccountPasswordReset(${jsArg(username)})'>${t("保存")}</button></div>
+  </form>`, false, "compact");
 }
 
 async function saveAccountPasswordReset(username) {
@@ -1749,13 +2195,15 @@ async function saveAccountPasswordReset(username) {
 }
 
 async function openChangePassword() {
-  openModal(t("修改密码"), `<div class="form-stack">
+  const currentUser = state.auth?.username || "";
+  openModal(t("修改密码"), `<form class="form-stack" autocomplete="off" onsubmit="event.preventDefault()">
+    <input type="text" name="username" autocomplete="username" value="${esc(currentUser)}" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0;width:0;">
     <label>${t("当前密码")}<input id="oldPassword" type="password" autocomplete="current-password"></label>
     <label>${t("新密码")}<input id="newPassword" type="password" autocomplete="new-password" minlength="16"></label>
     <label>${t("确认新密码")}<input id="confirmPassword" type="password" autocomplete="new-password" minlength="16"></label>
     <span class="form-hint">${t("密码至少 16 位；修改后会退出登录。")}</span>
-    <div class="form-actions"><button class="button" onclick="saveChangePassword()">${t("保存")}</button></div>
-  </div>`, false, "compact");
+    <div class="form-actions"><button type="button" class="button" onclick="saveChangePassword()">${t("保存")}</button></div>
+  </form>`, false, "compact");
 }
 
 async function saveChangePassword() {

@@ -17,7 +17,7 @@ python -m dagrunner.satellite --config var/satellite.yaml
 | `reverse` | 仅主动连接主程序（卫星能访问主程序端口） |
 | `forward` | 仅监听，等主程序连接（主程序能访问卫星端口） |
 
-配置示例见 `../../var/example_configs/satellite.example.yaml`；证书放 `var/satellite-certs/`（迁移整机拷目录）。
+配置示例见 `../../var/examples/satellite.example.yaml`；证书放 `var/satellite-certs/`（迁移整机拷目录）。
 
 ## 模块
 

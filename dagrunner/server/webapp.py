@@ -39,7 +39,12 @@ from .maintenance import (
     DEFAULT_RETENTION_DAYS,
     MaintenanceService,
 )
-from ..notifier import load_email_config, load_notifier, save_email_config
+from ..notifier import (
+    DatabaseNotifier,
+    load_email_config,
+    send_test_channel,
+    validate_channel_config,
+)
 from ..tools.migrate_workflows import (
     SOURCE_DOLPHINSCHEDULER,
     SOURCE_WINDOWS_TASK_SCHEDULER,
@@ -61,11 +66,18 @@ from .service import (
     decode_cron_expressions,
 )
 from .update import UpdateError, UpdateService
-from ..workflow import Workflow, WorkflowError, migrate_legacy_env, uniquify_task_ids
+from ..workflow import (
+    Workflow,
+    WorkflowError,
+    migrate_legacy_env,
+    regenerate_import_definition,
+    uniquify_task_ids,
+)
 from ..tools.workflow_editor import (
     build_model,
     demo_command,
     demo_setup,
+    draft_preview_definition,
     extend_definition,
     merge_model,
     preview_definition,
@@ -295,7 +307,34 @@ def create_app(
     account_service = AccountService(database)
     logs = TaskLogManager(logs_path)
     notifier_var_dir = state_dir.resolve()
-    notifier = load_notifier(notifier_config_path, var_dir=notifier_var_dir)
+    notifier = DatabaseNotifier(database)
+    # 首次启动平滑迁移：若数据库尚无通知渠道且旧 notifier.yaml 存在，则一次性导入。
+    if not database.list_notification_channels():
+        try:
+            legacy_email = load_email_config(
+                notifier_config_path, var_dir=notifier_var_dir
+            )
+        except ValueError:
+            legacy_email = None
+        if legacy_email is not None:
+            database.upsert_notification_channel(
+                None,
+                name="默认邮箱",
+                channel_type="email",
+                enabled=True,
+                config={
+                    "host": legacy_email.host,
+                    "port": legacy_email.port,
+                    "username": legacy_email.username or "",
+                    "password": legacy_email.password or "",
+                    "from": legacy_email.sender,
+                    "use_ssl": legacy_email.use_ssl,
+                    "starttls": legacy_email.starttls,
+                    "security": "ssl" if legacy_email.use_ssl else "starttls" if legacy_email.starttls else "plain",
+                    "timeout": legacy_email.timeout,
+                    "subject_prefix": legacy_email.subject_prefix,
+                },
+            )
     executions = ExecutionService(
         database, registry, logs, notifier=notifier, satellite_manager=satellite_manager
     )
@@ -626,86 +665,112 @@ def create_app(
             }
         )
 
-    @app.get("/api/notifier")
-    def notifier_settings():
-        _require_admin()
-        try:
-            email = load_email_config(
-                notifier_config_path, var_dir=notifier_var_dir
-            )
-        except ValueError as exc:
-            raise ServiceError(str(exc)) from exc
-        if email is None:
-            return jsonify(
-                {
-                    "email": {
-                        "configured": False,
-                        "host": "",
-                        "port": 465,
-                        "username": "",
-                        "has_password": False,
-                        "from": "",
-                        "security": "ssl",
-                        "timeout": 10,
-                        "subject_prefix": "[DAG Runner]",
-                    }
-                }
-            )
-        security = "ssl" if email.use_ssl else "starttls" if email.starttls else "plain"
-        return jsonify(
-            {
-                "email": {
-                    "configured": True,
-                    "host": email.host,
-                    "port": email.port,
-                    "username": email.username or "",
-                    "has_password": bool(email.password),
-                    "from": email.sender,
-                    "security": security,
-                    "timeout": email.timeout,
-                    "subject_prefix": email.subject_prefix,
-                }
-            }
-        )
+    def _mask_channel(channel: dict, include_config: bool) -> dict:
+        base = {
+            "id": channel["id"],
+            "name": channel["name"],
+            "channel_type": channel["channel_type"],
+            "enabled": bool(channel["enabled"]),
+            "created_time": channel["created_time"],
+            "updated_time": channel["updated_time"],
+        }
+        if not include_config:
+            return base
+        cfg = dict(channel.get("config") or {})
+        if channel["channel_type"] == "email":
+            cfg["has_password"] = bool(cfg.pop("password", ""))
+        elif channel["channel_type"] == "feishu":
+            cfg["has_secret"] = bool(cfg.pop("secret", ""))
+        base["config"] = cfg
+        return base
 
-    @app.put("/api/notifier")
-    def update_notifier_settings():
+    @app.get("/api/notifier/channels")
+    def list_notifier_channels():
+        is_admin = bool(getattr(g, "is_admin", False))
+        channels = [
+            _mask_channel(ch, include_config=is_admin)
+            for ch in database.list_notification_channels()
+        ]
+        return jsonify({"channels": channels})
+
+    @app.post("/api/notifier/channels")
+    def create_notifier_channel():
         _require_admin()
         payload = request.get_json(silent=True) or {}
-        email = payload.get("email")
-        if not isinstance(email, dict):
-            raise ServiceError("email notifier settings must be a mapping")
-        security = email.get("security", "ssl")
-        if security not in {"ssl", "starttls", "plain"}:
-            raise ServiceError("email security must be ssl, starttls, or plain")
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ServiceError("渠道名称不能为空")
+        channel_type = str(payload.get("channel_type") or "").strip().lower()
+        enabled = bool(payload.get("enabled", True))
+        raw_config = payload.get("config")
+        if not isinstance(raw_config, dict):
+            raise ServiceError("渠道配置必须是对象")
         try:
-            current = load_email_config(
-                notifier_config_path, var_dir=notifier_var_dir
-            )
+            config = validate_channel_config(channel_type, raw_config)
         except ValueError as exc:
             raise ServiceError(str(exc)) from exc
-        password = email.get("password", "")
-        if password == "" and current is not None:
-            password = current.password or ""
+        saved = database.upsert_notification_channel(
+            None,
+            name=name,
+            channel_type=channel_type,
+            enabled=enabled,
+            config=config,
+        )
+        return jsonify({"ok": True, "channel": _mask_channel(saved, include_config=True)}), 201
+
+    @app.put("/api/notifier/channels/<channel_id>")
+    def update_notifier_channel(channel_id: str):
+        _require_admin()
+        current = database.get_notification_channel(channel_id)
+        if current is None:
+            raise ServiceError("通知渠道不存在")
+        payload = request.get_json(silent=True) or {}
+        name = str(payload.get("name") or current["name"]).strip()
+        if not name:
+            raise ServiceError("渠道名称不能为空")
+        channel_type = str(payload.get("channel_type") or current["channel_type"]).strip().lower()
+        enabled = bool(payload.get("enabled", current["enabled"]))
+        raw_config = payload.get("config")
+        if not isinstance(raw_config, dict):
+            raise ServiceError("渠道配置必须是对象")
+        merged = dict(raw_config)
+        prev_cfg = current.get("config") or {}
+        if channel_type == "email" and not merged.get("password") and prev_cfg.get("password"):
+            merged["password"] = prev_cfg["password"]
+        if channel_type == "feishu" and not merged.get("secret") and prev_cfg.get("secret"):
+            merged["secret"] = prev_cfg["secret"]
         try:
-            saved = save_email_config(
-                {
-                    "host": email.get("host"),
-                    "port": email.get("port"),
-                    "username": email.get("username", ""),
-                    "password": password,
-                    "from": email.get("from"),
-                    "use_ssl": security == "ssl",
-                    "starttls": security == "starttls",
-                    "timeout": email.get("timeout", 10),
-                    "subject_prefix": email.get("subject_prefix", "[DAG Runner]"),
-                },
-                notifier_config_path,
-                var_dir=notifier_var_dir,
-            )
+            config = validate_channel_config(channel_type, merged)
         except ValueError as exc:
             raise ServiceError(str(exc)) from exc
-        executions.notifier = saved
+        saved = database.upsert_notification_channel(
+            channel_id,
+            name=name,
+            channel_type=channel_type,
+            enabled=enabled,
+            config=config,
+        )
+        return jsonify({"ok": True, "channel": _mask_channel(saved, include_config=True)})
+
+    @app.delete("/api/notifier/channels/<channel_id>")
+    def delete_notifier_channel(channel_id: str):
+        _require_admin()
+        if not database.delete_notification_channel(channel_id):
+            raise ServiceError("通知渠道不存在")
+        return jsonify({"ok": True})
+
+    @app.post("/api/notifier/channels/<channel_id>/test")
+    def test_notifier_channel(channel_id: str):
+        _require_admin()
+        channel = database.get_notification_channel(channel_id)
+        if channel is None:
+            raise ServiceError("通知渠道不存在")
+        payload = request.get_json(silent=True) or {}
+        target = str(payload.get("target") or "").strip()
+        try:
+            send_test_channel(channel, target)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise ServiceError(str(exc)) from exc
         return jsonify({"ok": True})
 
     @app.get("/api/satellites")
@@ -915,6 +980,7 @@ def create_app(
         schedule_rows = {
             row["workflow_name"]: row for row in database.list_schedules()
         }
+        notification_counts = database.all_workflow_notification_counts()
         visible = _visible_workflow_keys()
         result = []
         for name, workflow in sorted(registry.workflows.items()):
@@ -956,6 +1022,7 @@ def create_app(
                     "description": workflow.description,
                     "last_run_time": last_run_times.get(name),
                     "task_count": len(workflow.tasks),
+                    "notification_count": notification_counts.get(name, 0),
                     "notification": {
                         "email": {
                             "send_on": workflow.email_notification.send_on,
@@ -1065,7 +1132,10 @@ def create_app(
                 "工作流文件编码无法识别（请使用 UTF-8 或 UTF-16）"
             ) from exc
         definition, replacements = _unique_import_definition(
-            str(preview["definition"]), Path(str(preview["filename"])).stem, registry
+            str(preview["definition"]),
+            Path(str(preview["filename"])).stem,
+            registry,
+            regenerate_all=True,
         )
         preview["definition"] = definition
         preview["task_id_replacements"] = replacements
@@ -1085,7 +1155,10 @@ def create_app(
             raise ServiceError(f"Crontab 转换失败：{exc}") from exc
         definition = dump_workflow_yaml(config)
         definition, replacements = _unique_import_definition(
-            definition, str(config.get("name") or "crontab"), registry
+            definition,
+            str(config.get("name") or "crontab"),
+            registry,
+            regenerate_all=True,
         )
         return jsonify({
             "source": "crontab",
@@ -1172,8 +1245,12 @@ def create_app(
         _require_permission(workflow_name, "edit")
         payload = request.get_json(silent=True) or {}
         try:
-            merged = merge_model(registry.definition(workflow_name), payload)
-            return jsonify({"definition": merged, **preview_definition(merged)})
+            merged = merge_model(registry.definition(workflow_name), payload, validate=False)
+            try:
+                preview = preview_definition(merged)
+            except WorkflowError as exc:
+                preview = {**draft_preview_definition(merged), "warning": str(exc)}
+            return jsonify({"definition": merged, **preview})
         except WorkflowError as exc:
             raise ServiceError(str(exc)) from exc
 
@@ -1195,8 +1272,12 @@ def create_app(
         payload = request.get_json(silent=True) or {}
         definition = str(payload.get("definition", ""))
         try:
-            merged = merge_model(definition, payload.get("model") or {})
-            return jsonify({"definition": merged, **preview_definition(merged)})
+            merged = merge_model(definition, payload.get("model") or {}, validate=False)
+            try:
+                preview = preview_definition(merged)
+            except WorkflowError as exc:
+                preview = {**draft_preview_definition(merged), "warning": str(exc)}
+            return jsonify({"definition": merged, **preview})
         except WorkflowError as exc:
             raise ServiceError(str(exc)) from exc
 
@@ -1246,6 +1327,61 @@ def create_app(
         enabled = bool(payload.get("enabled", False))
         schedules.update(workflow_name, cron_expressions, timezone_name, enabled)
         return jsonify({"ok": True, "next_run_time": schedules.next_run_time(workflow_name)})
+
+    @app.get("/api/workflows/<workflow_name>/notifications")
+    def workflow_notifications(workflow_name: str):
+        _require_permission(workflow_name, "read")
+        channels = [
+            _mask_channel(ch, include_config=False)
+            for ch in database.list_notification_channels()
+        ]
+        rules = database.list_workflow_notifications(workflow_name)
+        return jsonify({"rules": rules, "channels": channels})
+
+    @app.put("/api/workflows/<workflow_name>/notifications")
+    def save_workflow_notifications(workflow_name: str):
+        _require_permission(workflow_name, "edit")
+        if database.get_workflow(workflow_name) is None:
+            raise ServiceError(f"workflow not found: {workflow_name}")
+        payload = request.get_json(silent=True) or {}
+        raw_rules = payload.get("rules")
+        if not isinstance(raw_rules, list):
+            raise ServiceError("rules must be a list")
+        valid_channels = {
+            ch["id"]: ch for ch in database.list_notification_channels()
+        }
+        cleaned: list[dict] = []
+        for idx, item in enumerate(raw_rules, start=1):
+            if not isinstance(item, dict):
+                raise ServiceError(f"第 {idx} 条通知规则格式无效")
+            channel_id = str(item.get("channel_id") or "").strip()
+            channel = valid_channels.get(channel_id)
+            if channel is None:
+                raise ServiceError(f"第 {idx} 条规则选择了不存在的通知渠道")
+            send_on = str(item.get("send_on") or "failure").strip()
+            if send_on not in {"success", "failure", "always"}:
+                raise ServiceError(f"第 {idx} 条规则的发送时机无效")
+            raw_targets = item.get("targets") or []
+            if isinstance(raw_targets, str):
+                raw_targets = re.split(r"[\n,;]+", raw_targets)
+            targets = list(
+                dict.fromkeys(
+                    str(t).strip() for t in raw_targets if str(t).strip()
+                )
+            )
+            enabled = bool(item.get("enabled", True))
+            if channel["channel_type"] == "email" and enabled and not targets:
+                raise ServiceError(f"第 {idx} 条邮件通知规则至少需要填写一个收件邮箱")
+            cleaned.append(
+                {
+                    "channel_id": channel_id,
+                    "send_on": send_on,
+                    "targets": targets,
+                    "enabled": enabled,
+                }
+            )
+        saved = database.replace_workflow_notifications(workflow_name, cleaned)
+        return jsonify({"ok": True, "rules": saved})
 
     @app.put("/api/workflows/<workflow_name>/notification")
     def update_notification(workflow_name: str):
@@ -1390,6 +1526,11 @@ def create_app(
             if workflow and workflow.description
             else run["workflow_name"]
         )
+        run_data["setup"] = workflow.setup_for_current_platform() if workflow else ""
+        run_data["runner"] = (
+            run_data.get("runner")
+            or (workflow.runner if workflow and workflow.runner else "local")
+        )
         tasks = []
         graph_tasks = []
         # Keep the table in DAG order so out-of-scope tasks stay where they belong.
@@ -1434,6 +1575,15 @@ def create_app(
                     "skip_kind": row["skip_kind"],
                     "code": dump_workflow_yaml({row["task_name"]: raw_tasks[row["task_name"]]}) if row["task_name"] in raw_tasks else None,
                     "code_source": "current",
+                    "command": (
+                        definition.command
+                        if definition and isinstance(definition.command, str)
+                        else (
+                            "\n".join(definition.command)
+                            if definition and isinstance(definition.command, (list, tuple))
+                            else ""
+                        )
+                    ),
                     "success": list(definition.success) if definition else [],
                     "failure": list(definition.failure) if definition else [],
                 }
@@ -1637,9 +1787,13 @@ def _example_python_command(command: object) -> str:
 
 
 def _unique_import_definition(
-    definition: str, fallback_name: str, registry: WorkflowRegistry
+    definition: str,
+    fallback_name: str,
+    registry: WorkflowRegistry,
+    *,
+    regenerate_all: bool = False,
 ) -> tuple[str, dict[str, str]]:
-    """Validate an import and namespace colliding task IDs with hash IDs."""
+    """Validate an import and rewrite task IDs (all IDs on preview, collisions on save)."""
     Workflow.from_yaml(definition, fallback_name=fallback_name)
     registry.refresh()
     unavailable = {
@@ -1647,8 +1801,11 @@ def _unique_import_definition(
         for workflow in registry.workflows.values()
         for task_id in workflow.tasks
     }
-    rewritten, replacements = uniquify_task_ids(definition, unavailable)
-    if replacements:
+    if regenerate_all:
+        rewritten, replacements = regenerate_import_definition(definition, unavailable)
+    else:
+        rewritten, replacements = uniquify_task_ids(definition, unavailable)
+    if replacements or regenerate_all:
         Workflow.from_yaml(rewritten, fallback_name=fallback_name)
     return rewritten, replacements
 

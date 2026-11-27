@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import yaml
 
-from .base import Notifier, NullNotifier
+from .base import Notifier, NullNotifier, WatchdogEvent, WorkflowEvent
 from .email import EmailConfig, EmailNotifier
+from .feishu import FeishuConfig, FeishuNotifier
 
 
 DEFAULT_CONFIG_NAMES = ("notifier.yaml", "notifier.yml", "notifier.json")
@@ -184,3 +186,169 @@ def _positive_number(raw, key, default, number_type):
     if converted <= 0:
         raise ValueError(f"email '{key}' must be a positive number")
     return converted
+
+
+def parse_feishu_config(raw: dict[str, Any]) -> FeishuConfig:
+    webhook_url = raw.get("webhook_url")
+    if not isinstance(webhook_url, str) or not webhook_url.strip().startswith(("http://", "https://")):
+        raise ValueError("飞书 webhook_url 必须是 http:// 或 https:// 链接")
+    secret = _optional_string(raw, "secret") or ""
+    subject_prefix = _optional_string(raw, "subject_prefix") or "[DAG Runner]"
+    timeout = _positive_number(raw, "timeout", 10.0, float)
+    raw_mobiles = raw.get("mention_mobiles") or []
+    if isinstance(raw_mobiles, str):
+        raw_mobiles = [item.strip() for item in raw_mobiles.replace(";", ",").splitlines() if item.strip()]
+    mobiles = tuple(str(item).strip() for item in raw_mobiles if str(item).strip())
+    return FeishuConfig(
+        webhook_url=webhook_url.strip(),
+        secret=secret.strip(),
+        mention_mobiles=mobiles,
+        subject_prefix=subject_prefix,
+        timeout=timeout,
+    )
+
+
+def validate_channel_config(channel_type: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize a database-stored notification channel config."""
+    if channel_type == "email":
+        security = str(raw.get("security") or "").lower()
+        use_ssl = raw.get("use_ssl")
+        starttls = raw.get("starttls")
+        if security in {"ssl", "starttls", "plain"}:
+            use_ssl = security == "ssl"
+            starttls = security == "starttls"
+        parsed = _parse_email_config(
+            {
+                **raw,
+                "use_ssl": True if use_ssl is None else bool(use_ssl),
+                "starttls": False if starttls is None else bool(starttls),
+            }
+        )
+        return {
+            "host": parsed.host,
+            "port": parsed.port,
+            "username": parsed.username or "",
+            "password": parsed.password or "",
+            "from": parsed.sender,
+            "use_ssl": parsed.use_ssl,
+            "starttls": parsed.starttls,
+            "security": "ssl" if parsed.use_ssl else "starttls" if parsed.starttls else "plain",
+            "timeout": parsed.timeout,
+            "subject_prefix": parsed.subject_prefix,
+        }
+    if channel_type == "feishu":
+        parsed_fs = parse_feishu_config(raw)
+        return {
+            "webhook_url": parsed_fs.webhook_url,
+            "secret": parsed_fs.secret,
+            "mention_mobiles": list(parsed_fs.mention_mobiles),
+            "subject_prefix": parsed_fs.subject_prefix,
+            "timeout": parsed_fs.timeout,
+        }
+    raise ValueError(f"不支持的通知渠道类型：{channel_type}")
+
+
+def send_test_channel(channel: dict[str, Any], target: str = "") -> None:
+    """Send a test notification through a single database channel."""
+    channel_type = channel.get("channel_type")
+    cfg = channel.get("config") or {}
+    if channel_type == "email":
+        recipient = target.strip() or str(cfg.get("from") or "").strip()
+        if not recipient:
+            raise ValueError("测试邮件需要指定收件邮箱")
+        notifier = EmailNotifier(_parse_email_config(cfg))
+        event = WorkflowEvent(
+            workflow_name="test_notification",
+            run_id="test",
+            status="SUCCESS",
+            recipients=(recipient,),
+        )
+        notifier.on_workflow_success(event)
+        return
+    if channel_type == "feishu":
+        notifier = FeishuNotifier(parse_feishu_config(cfg))
+        notifier.send_test()
+        return
+    raise ValueError(f"不支持的通知渠道类型：{channel_type}")
+
+
+class DatabaseNotifier(Notifier):
+    """Dispatches workflow notifications using database-stored channels and rules."""
+
+    manages_rules = True
+
+    def __init__(self, database):
+        self.database = database
+
+    def on_workflow_success(self, event: WorkflowEvent) -> None:
+        self._dispatch(event, "success")
+
+    def on_workflow_failed(self, event: WorkflowEvent) -> None:
+        self._dispatch(event, "failure")
+
+    def on_watchdog_event(self, event: WatchdogEvent) -> None:
+        for channel in self.database.list_notification_channels():
+            if not channel["enabled"]:
+                continue
+            try:
+                if channel["channel_type"] == "email" and event.recipients:
+                    EmailNotifier(_parse_email_config(channel["config"])).on_watchdog_event(event)
+                elif channel["channel_type"] == "feishu":
+                    FeishuNotifier(parse_feishu_config(channel["config"])).on_watchdog_event(event)
+            except Exception as exc:
+                print(
+                    f"warning: watchdog notifier {channel['name']!r} failed: {exc}",
+                    file=sys.stderr,
+                )
+
+    def _dispatch(self, event: WorkflowEvent, outcome: str) -> None:
+        rules = self.database.list_workflow_notifications(event.workflow_name)
+        channels = {
+            ch["id"]: ch for ch in self.database.list_notification_channels() if ch["enabled"]
+        }
+        for rule in rules:
+            if not rule["enabled"]:
+                continue
+            send_on = rule["send_on"]
+            if send_on != "always" and send_on != outcome:
+                continue
+            channel = channels.get(rule["channel_id"])
+            if not channel:
+                continue
+            targets = tuple(rule.get("targets") or ())
+            try:
+                if channel["channel_type"] == "email":
+                    if not targets:
+                        continue
+                    scoped = WorkflowEvent(
+                        workflow_name=event.workflow_name,
+                        run_id=event.run_id,
+                        status=event.status,
+                        recipients=targets,
+                        error_message=event.error_message,
+                        failed_tasks=event.failed_tasks,
+                    )
+                    notifier = EmailNotifier(_parse_email_config(channel["config"]))
+                    if outcome == "success":
+                        notifier.on_workflow_success(scoped)
+                    else:
+                        notifier.on_workflow_failed(scoped)
+                elif channel["channel_type"] == "feishu":
+                    scoped = WorkflowEvent(
+                        workflow_name=event.workflow_name,
+                        run_id=event.run_id,
+                        status=event.status,
+                        recipients=targets,
+                        error_message=event.error_message,
+                        failed_tasks=event.failed_tasks,
+                    )
+                    notifier = FeishuNotifier(parse_feishu_config(channel["config"]))
+                    if outcome == "success":
+                        notifier.on_workflow_success(scoped)
+                    else:
+                        notifier.on_workflow_failed(scoped)
+            except Exception as exc:
+                print(
+                    f"warning: notifier channel {channel['name']!r} failed for {event.workflow_name}: {exc}",
+                    file=sys.stderr,
+                )

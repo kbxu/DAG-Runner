@@ -8,7 +8,14 @@ from dagrunner.database import StateDatabase
 from dagrunner.server.executor import ExecutionResult
 from dagrunner.server.logger import TaskLogManager
 from dagrunner.server.runner import WorkflowRunner
-from dagrunner.workflow import Task, Workflow, WorkflowError
+from dagrunner.workflow import (
+    ConditionGroup,
+    ConditionItem,
+    ConditionSpec,
+    Task,
+    Workflow,
+    WorkflowError,
+)
 
 
 class FixedExecutor:
@@ -197,6 +204,76 @@ class TaskScopeTests(unittest.TestCase):
         self.assertEqual(executor.ran, ["first", "second", "third"])
         states = self.database.task_states(run_id)
         self.assertTrue(all(row["status"] == "SUCCESS" for row in states.values()))
+
+    def test_chained_resume_keeps_reused_tasks_and_from_task(self) -> None:
+        workflow = Workflow(
+            name="chain",
+            tasks={
+                "a": Task(name="a", command="a"),
+                "b": Task(name="b", command="b", depends=("a",)),
+                "c": Task(name="c", command="c", depends=("b",)),
+                "d": Task(name="d", command="d", depends=("c",)),
+            },
+            config_dir=self.root,
+        )
+        r1, s1 = self.runner(FixedExecutor({"c": ExecutionResult(1, "c boom")})).run(
+            workflow, "b"
+        )
+        self.assertEqual(s1, "FAILED")
+
+        exec2 = FixedExecutor({"d": ExecutionResult(1, "d boom")})
+        r2, s2 = self.runner(exec2).run(workflow, resume_run_id=r1)
+        self.assertEqual(s2, "FAILED")
+        self.assertEqual(exec2.ran, ["c", "d"])
+        self.assertEqual(self.database.get_run(r2)["from_task"], "b")
+
+        exec3 = FixedExecutor()
+        r3, s3 = self.runner(exec3).run(workflow, resume_run_id=r2)
+        self.assertEqual(s3, "SUCCESS")
+        self.assertEqual(exec3.ran, ["d"])
+        self.assertEqual(self.database.get_run(r3)["from_task"], "b")
+        states3 = self.database.task_states(r3)
+        self.assertEqual(states3["a"]["skip_kind"], "OUTSIDE_SCOPE")
+        self.assertEqual(states3["b"]["skip_kind"], "REUSED")
+        self.assertEqual(states3["c"]["skip_kind"], "REUSED")
+        self.assertEqual(states3["d"]["status"], "SUCCESS")
+
+    def test_resume_preserves_condition_branch_and_skips_unselected(self) -> None:
+        workflow = Workflow(
+            name="cond_resume",
+            tasks={
+                "a": Task(name="a", command="a"),
+                "cond": Task(
+                    name="cond",
+                    task_type="condition",
+                    depends=("a",),
+                    condition=ConditionSpec(
+                        "AND", (ConditionGroup("AND", (ConditionItem("a", "SUCCESS"),)),)
+                    ),
+                    success=("ok_task",),
+                    failure=("fail_task",),
+                ),
+                "ok_task": Task(name="ok_task", command="ok", depends=("cond",)),
+                "fail_task": Task(name="fail_task", command="fail", depends=("cond",)),
+            },
+            config_dir=self.root,
+        )
+        r1, s1 = self.runner(
+            FixedExecutor({"ok_task": ExecutionResult(1, "boom")})
+        ).run(workflow)
+        self.assertEqual(s1, "FAILED")
+
+        exec2 = FixedExecutor()
+        r2, s2 = self.runner(exec2).run(workflow, resume_run_id=r1)
+        self.assertEqual(s2, "SUCCESS")
+        self.assertEqual(exec2.ran, ["ok_task"])
+        states2 = self.database.task_states(r2)
+        self.assertEqual(states2["a"]["skip_kind"], "REUSED")
+        self.assertEqual(states2["cond"]["skip_kind"], "REUSED")
+        self.assertEqual(states2["cond"]["condition_result"], "success")
+        self.assertEqual(states2["fail_task"]["status"], "SKIPPED")
+        self.assertEqual(states2["fail_task"]["skip_kind"], "CONDITION_NOT_SELECTED")
+        self.assertEqual(states2["ok_task"]["status"], "SUCCESS")
 
 
 if __name__ == "__main__":

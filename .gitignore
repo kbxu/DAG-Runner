@@ -19,8 +19,8 @@ data/
 var/*
 !var/.gitkeep
 # Tracked templates: copy a file to var/ (or var/logs/ for output) to use it.
-!var/example_configs/
-!var/example_configs/**
+!var/examples/
+!var/examples/**
 
 # Demo execution output.
 .demo_data/

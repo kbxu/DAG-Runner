@@ -37,7 +37,7 @@ python -m dagrunner.server --config var/config.yaml   # 默认 var/config.yaml
 
 ## 配置
 
-读取 `var/config.yaml`：`host/port/threads/db/logs/language/notifier_config`、`satellite.*`、`update.*`、`maintenance.*`、`watchdog.*`。示例见 `../../var/example_configs/config.example.yaml`。
+读取 `var/config.yaml`：`host/port/threads/db/logs/language/notifier_config`、`satellite.*`、`update.*`、`maintenance.*`、`watchdog.*`。示例见 `../../var/examples/config.example.yaml`。
 
 ## 依赖方向
 

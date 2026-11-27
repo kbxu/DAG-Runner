@@ -188,7 +188,7 @@ class AccountApiTests(unittest.TestCase):
         with self.app.test_client() as client:
             self._login(client, "bob", USER_PASSWORD)
             self.assertEqual(client.get("/api/accounts").status_code, 403)
-            self.assertEqual(client.get("/api/notifier").status_code, 403)
+            self.assertEqual(client.post("/api/notifier/channels", json={}).status_code, 403)
             self.assertEqual(client.get("/api/satellites").status_code, 403)
             self.assertEqual(client.get("/api/update/status").status_code, 403)
 

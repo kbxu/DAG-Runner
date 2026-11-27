@@ -23,7 +23,7 @@ from ..satellite.server import serve_ssl
 from .webapp import create_app
 
 
-DEFAULT_CONFIG_PATH = Path("var") / "example_configs" / "config.example.yaml"
+DEFAULT_CONFIG_PATH = Path("var") / "examples" / "config.example.yaml"
 
 
 def load_config_file(path: Path) -> dict:
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="startup YAML config (default: var/example_configs/config.example.yaml)",
+        help="startup YAML config (default: var/examples/config.example.yaml)",
     )
     args = parser.parse_args(argv)
     config = load_config_file(args.config)

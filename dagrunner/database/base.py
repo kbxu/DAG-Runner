@@ -475,6 +475,57 @@ SCHEMA: tuple[TableSpec, ...] = (
         primary_key=("alias",),
     ),
     TableSpec(
+        name="notification_channels",
+        columns=(
+            ColumnSpec("id", "TEXT", "VARCHAR(64)", not_null=True),
+            ColumnSpec("name", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec(
+                "channel_type",
+                "TEXT",
+                "VARCHAR(32)",
+                not_null=True,
+                check="channel_type IN ('email','feishu')",
+            ),
+            ColumnSpec("enabled", "INTEGER", "INT", not_null=True, default="1"),
+            ColumnSpec("config_json", "TEXT", "TEXT", not_null=True),
+            ColumnSpec("created_time", "TEXT", "VARCHAR(64)", not_null=True),
+            ColumnSpec("updated_time", "TEXT", "VARCHAR(64)", not_null=True),
+        ),
+        primary_key=("id",),
+    ),
+    TableSpec(
+        name="workflow_notifications",
+        columns=(
+            ColumnSpec(
+                "id", "INTEGER", "INT", not_null=True, auto_increment=True
+            ),
+            ColumnSpec("workflow_name", "TEXT", "VARCHAR(255)", not_null=True),
+            ColumnSpec("channel_id", "TEXT", "VARCHAR(64)", not_null=True),
+            ColumnSpec(
+                "send_on",
+                "TEXT",
+                "VARCHAR(16)",
+                not_null=True,
+                default="'failure'",
+                check="send_on IN ('success','failure','always')",
+            ),
+            ColumnSpec("targets_json", "TEXT", "TEXT", not_null=True),
+            ColumnSpec("enabled", "INTEGER", "INT", not_null=True, default="1"),
+        ),
+        primary_key=("id",),
+        foreign_keys=(
+            ForeignKeySpec(
+                ("channel_id",),
+                "notification_channels",
+                ("id",),
+                on_delete="CASCADE",
+            ),
+        ),
+        indexes=(
+            IndexSpec("idx_workflow_notifications_wf", ("workflow_name",)),
+        ),
+    ),
+    TableSpec(
         name="satellite_jobs",
         columns=(
             ColumnSpec("job_id", "TEXT", "VARCHAR(255)", not_null=True),
@@ -1336,10 +1387,10 @@ class BaseStateDatabase:
             parameters.append(trigger_type)
         if tag.startswith("tag:"):
             label = tag[4:]
-            conditions.append("w.name LIKE ?")
-            parameters.append(f"【{label}】%")
+            conditions.append("(w.name LIKE ? OR w.name LIKE ?)")
+            parameters.extend([f"%【{label}】%", f"%[{label}]%"])
         elif tag == "other":
-            conditions.append("w.name NOT LIKE '【%】%'")
+            conditions.append("(w.name NOT LIKE '【%】%' AND w.name NOT LIKE '[%]%')")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         from_clause = (
             "FROM workflow_runs wr "
@@ -1808,3 +1859,163 @@ class BaseStateDatabase:
                     "SELECT DISTINCT workflow_name FROM workflow_runs WHERE status = 'RUNNING'"
                 ).fetchall()
             ]
+
+    # -- notification channels & workflow bindings -------------------------
+
+    def list_notification_channels(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT id, name, channel_type, enabled, config_json, created_time, updated_time
+                   FROM notification_channels ORDER BY created_time ASC, id ASC"""
+            ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            try:
+                config = json.loads(row["config_json"]) if row["config_json"] else {}
+            except (TypeError, ValueError):
+                config = {}
+            result.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "channel_type": row["channel_type"],
+                    "enabled": bool(row["enabled"]),
+                    "config": config if isinstance(config, dict) else {},
+                    "created_time": row["created_time"],
+                    "updated_time": row["updated_time"],
+                }
+            )
+        return result
+
+    def get_notification_channel(self, channel_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT id, name, channel_type, enabled, config_json, created_time, updated_time
+                   FROM notification_channels WHERE id = ?""",
+                (channel_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            config = json.loads(row["config_json"]) if row["config_json"] else {}
+        except (TypeError, ValueError):
+            config = {}
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "channel_type": row["channel_type"],
+            "enabled": bool(row["enabled"]),
+            "config": config if isinstance(config, dict) else {},
+            "created_time": row["created_time"],
+            "updated_time": row["updated_time"],
+        }
+
+    def upsert_notification_channel(
+        self,
+        channel_id: str | None,
+        *,
+        name: str,
+        channel_type: str,
+        enabled: bool,
+        config: dict,
+    ) -> dict:
+        now = local_now()
+        cid = (channel_id or "").strip() or f"ch_{secrets.token_hex(6)}"
+        config_json = json.dumps(config, ensure_ascii=False)
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM notification_channels WHERE id = ?", (cid,)
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """INSERT INTO notification_channels
+                       (id, name, channel_type, enabled, config_json, created_time, updated_time)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (cid, name, channel_type, 1 if enabled else 0, config_json, now, now),
+                )
+            else:
+                connection.execute(
+                    """UPDATE notification_channels
+                       SET name = ?, channel_type = ?, enabled = ?, config_json = ?, updated_time = ?
+                       WHERE id = ?""",
+                    (name, channel_type, 1 if enabled else 0, config_json, now, cid),
+                )
+        loaded = self.get_notification_channel(cid)
+        assert loaded is not None
+        return loaded
+
+    def delete_notification_channel(self, channel_id: str) -> bool:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM workflow_notifications WHERE channel_id = ?",
+                (channel_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM notification_channels WHERE id = ?",
+                (channel_id,),
+            )
+            return cursor.rowcount > 0
+
+    def list_workflow_notifications(self, workflow_name: str) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT id, workflow_name, channel_id, send_on, targets_json, enabled
+                   FROM workflow_notifications WHERE workflow_name = ? ORDER BY id ASC""",
+                (workflow_name,),
+            ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            try:
+                targets = json.loads(row["targets_json"]) if row["targets_json"] else []
+            except (TypeError, ValueError):
+                targets = []
+            result.append(
+                {
+                    "id": row["id"],
+                    "workflow_name": row["workflow_name"],
+                    "channel_id": row["channel_id"],
+                    "send_on": row["send_on"],
+                    "targets": [str(item) for item in targets if str(item).strip()],
+                    "enabled": bool(row["enabled"]),
+                }
+            )
+        return result
+
+    def replace_workflow_notifications(
+        self, workflow_name: str, rules: list[dict]
+    ) -> list[dict]:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM workflow_notifications WHERE workflow_name = ?",
+                (workflow_name,),
+            )
+            for rule in rules:
+                targets = [
+                    str(item).strip()
+                    for item in (rule.get("targets") or [])
+                    if str(item).strip()
+                ]
+                connection.execute(
+                    """INSERT INTO workflow_notifications
+                       (workflow_name, channel_id, send_on, targets_json, enabled)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        workflow_name,
+                        str(rule["channel_id"]),
+                        str(rule.get("send_on") or "failure"),
+                        json.dumps(targets, ensure_ascii=False),
+                        1 if rule.get("enabled", True) else 0,
+                    ),
+                )
+        return self.list_workflow_notifications(workflow_name)
+
+    def all_workflow_notification_counts(self) -> dict[str, int]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT wn.workflow_name, COUNT(*) AS cnt
+                   FROM workflow_notifications wn
+                   JOIN notification_channels nc ON nc.id = wn.channel_id
+                   WHERE wn.enabled = 1 AND nc.enabled = 1
+                   GROUP BY wn.workflow_name"""
+            ).fetchall()
+        return {row["workflow_name"]: int(row["cnt"]) for row in rows}
