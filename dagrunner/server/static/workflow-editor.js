@@ -522,7 +522,7 @@ function setupPanelHtml(model, options = {}) {
   const runnerBlock = options.runnerFieldHtml || `<label>${t("运行位置")}<select class="ui-select"${disabled}><option>${esc(model.runner || 'local')}</option></select></label>`;
   return `<details class="tf-panel tf-collapse" data-section="setup"${open ? ' open' : ''}>
     <summary class="tf-panel-head">
-      <span class="tf-section-head">环境配置<span class="tf-subhint">每个任务前执行</span></span>
+      <span class="tf-section-head">环境配置<span class="tf-subhint">仅对与工作流相同运行位置的任务生效</span></span>
       <span class="tf-section-right"><span class="tf-section-summary">${setupSummaryBadge(model)}</span><span class="tf-head-caret">▶</span></span>
     </summary>
     <div class="tf-collapse-body">
@@ -530,6 +530,7 @@ function setupPanelHtml(model, options = {}) {
         <label class="f">预跑命令<textarea id="tfSetup" class="tf-setup" rows="1" data-field="setup" placeholder="如：激活虚拟环境、切换目录或设置环境变量"${disabled}>${esc(model.setup)}</textarea></label>
         <div class="tf-runner-slot">${runnerBlock}</div>
       </div>
+      <p class="form-hint">预跑命令仅对与工作流「运行位置」相同的任务生效；单独指定了其他运行位置的任务不会执行该预跑命令。</p>
     </div>
   </details>`;
 }

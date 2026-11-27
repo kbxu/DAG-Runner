@@ -343,13 +343,18 @@ class WorkflowRunner:
                             log_file=str(log_file),
                         )
                         states[task_name] = "RUNNING"
+                        task_runner = workflow.task_runner(task)
+                        workflow_runner = workflow.runner or "local"
+                        task_setup = (
+                            workflow.setup_for_platform(_executor_platform(executor))
+                            if task_runner == workflow_runner
+                            else ""
+                        )
                         future = pool.submit(
                             executor.execute,
                             task,
                             cwd=workflow.task_cwd(task),
-                            workflow_setup=workflow.setup_for_platform(
-                                _executor_platform(executor)
-                            ),
+                            workflow_setup=task_setup,
                             log_file=log_file,
                             cancel_event=cancel_event,
                             workflow_timeout_event=workflow_timeout_event,

@@ -21,10 +21,12 @@ from dagrunner.workflow import (
 class FixedExecutor:
     def __init__(self, results: dict[str, ExecutionResult] | None = None) -> None:
         self.ran: list[str] = []
+        self.setups: dict[str, str] = {}
         self.results = results or {}
 
     def execute(self, task, **kwargs) -> ExecutionResult:
         self.ran.append(task.name)
+        self.setups[task.name] = kwargs.get("workflow_setup", "")
         return self.results.get(task.name, ExecutionResult(0))
 
 
@@ -274,6 +276,31 @@ class TaskScopeTests(unittest.TestCase):
         self.assertEqual(states2["fail_task"]["status"], "SKIPPED")
         self.assertEqual(states2["fail_task"]["skip_kind"], "CONDITION_NOT_SELECTED")
         self.assertEqual(states2["ok_task"]["status"], "SUCCESS")
+
+    def test_setup_applies_only_to_tasks_matching_workflow_runner(self) -> None:
+        workflow = Workflow(
+            name="mixed_runner_setup",
+            runner="local",
+            setup="export FOO=1",
+            tasks={
+                "local_default": Task(name="local_default", command="echo 1"),
+                "local_explicit": Task(name="local_explicit", command="echo 2", runner="local"),
+                "remote_sat": Task(name="remote_sat", command="echo 3", runner="sat-01"),
+            },
+            config_dir=self.root,
+        )
+        executor = FixedExecutor()
+        runner = WorkflowRunner(
+            self.database,
+            TaskLogManager(self.root / "logs"),
+            executor=executor,
+            executor_resolver=lambda alias: executor,
+        )
+        _, status = runner.run(workflow)
+        self.assertEqual(status, "SUCCESS")
+        self.assertEqual(executor.setups["local_default"], "export FOO=1")
+        self.assertEqual(executor.setups["local_explicit"], "export FOO=1")
+        self.assertEqual(executor.setups["remote_sat"], "")
 
 
 if __name__ == "__main__":

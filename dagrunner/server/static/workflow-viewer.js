@@ -166,7 +166,7 @@ function renderViewerSetupHtml(view) {
   const setupText = String(run.setup || '').trim();
   return `<details class="tf-panel tf-collapse" data-section="setup"${open ? ' open' : ''}>
     <summary class="tf-panel-head">
-      <span class="tf-section-head">环境配置<span class="tf-subhint">每个任务前执行</span></span>
+      <span class="tf-section-head">环境配置<span class="tf-subhint">仅对与工作流相同运行位置的任务生效</span></span>
       <span class="tf-section-right"><span class="tf-meta-pill">${esc(runnerLabel)}${setupText ? ' · 含预跑' : ''}</span><span class="tf-head-caret">▶</span></span>
     </summary>
     <div class="tf-collapse-body">
