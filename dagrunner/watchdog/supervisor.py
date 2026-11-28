@@ -28,6 +28,7 @@ from .state import (
     WatchdogLocked,
     get_intent,
     heartbeat,
+    read_state,
     set_intent,
     update_state,
     watchdog_lock,
@@ -450,6 +451,19 @@ class Watchdog:
         if proc is None:
             return
         if proc.poll() is None:
+            state = read_state(self.root, self.role)
+            intent = str(state.get("intent") or INTENT_RUN)
+            intent_pid = state.get("intent_pid")
+            child_pid = getattr(proc, "pid", None)
+            external_intent = intent_pid is None or intent_pid != child_pid
+            if intent == INTENT_STOP and external_intent:
+                self._log(f"收到外部停止指令（intent_pid={intent_pid}），停止子进程并退出")
+                self._stop.set()
+                return
+            if intent == INTENT_RESTART and external_intent:
+                self._log(f"收到外部重启指令（intent_pid={intent_pid}），重启子进程")
+                self._restart_requested(proc)
+                return
             ok, reason = self._safe_probe()
             actions = self._tracker.observe(ok, now)
             for action in actions:
@@ -502,6 +516,7 @@ class Watchdog:
             return
         if intent == INTENT_RESTART:
             set_intent(self.root, self.role, INTENT_RUN)
+            self._restart_count += 1
             self._consecutive_failures = 0
             self._tracker.reset()
             self._last_error = ""
@@ -509,6 +524,17 @@ class Watchdog:
             self._spawn_until_ready("更新重启")
             return
         self._crash_restart(code)
+
+    def _restart_requested(self, proc: Process) -> None:
+        self._proc = None
+        self._terminator(proc)
+        set_intent(self.root, self.role, INTENT_RUN)
+        self._restart_count += 1
+        self._consecutive_failures = 0
+        self._tracker.reset()
+        self._last_error = ""
+        self._notify("update_ok", "代码更新完成，正在重启服务", force=True)
+        self._spawn_until_ready("更新重启")
 
     def _crash_restart(self, code: int | None) -> None:
         self._consecutive_failures += 1

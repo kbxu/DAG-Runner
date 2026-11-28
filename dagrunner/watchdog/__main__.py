@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from ..install import repo_root
 from .launch import LaunchError
-from .state import read_state
+from .state import is_active, read_state, request_restart, request_stop
 from .supervisor import (
     EXIT_DISABLED,
     EXIT_ERROR,
@@ -38,6 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只拉起一次并校验，不进入守护循环",
     )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="通知运行中的看门狗重启子服务",
+    )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="通知运行中的看门狗优雅停止子服务并退出",
+    )
     return parser
 
 
@@ -48,6 +59,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.status:
         print(json.dumps(read_state(root, args.role), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.restart or args.stop:
+        if not is_active(root, args.role):
+            print(f"未检测到运行中的 {args.role} 看门狗", file=sys.stderr)
+            return EXIT_ERROR
+        if args.restart:
+            request_restart(root, args.role, pid=os.getpid())
+            print(f"已通知 {args.role} 看门狗重启子服务（约数秒内生效）")
+        else:
+            request_stop(root, args.role, pid=os.getpid())
+            print(f"已通知 {args.role} 看门狗停止服务并退出")
         return 0
 
     try:

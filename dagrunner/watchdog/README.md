@@ -8,6 +8,8 @@
 python -m dagrunner.watchdog --role master      # 通常由 var/start.bat / var/start.sh 拉起
 python -m dagrunner.watchdog --role satellite   # 通常由 var/start-satellite.bat / .sh 拉起
 python -m dagrunner.watchdog --status --role master
+python -m dagrunner.watchdog --restart --role master # 通知运行中的看门狗重启子服务
+python -m dagrunner.watchdog --stop --role master    # 通知运行中的看门狗优雅停止并退出
 python -m dagrunner.watchdog --once  --role master   # 只拉起并校验一次
 ```
 

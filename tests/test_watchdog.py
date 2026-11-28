@@ -437,7 +437,9 @@ class SupervisorDefaultProbeTests(TempDirTestCase):
 
 
 class SupervisorTests(TempDirTestCase):
-    def _watchdog(self, *, probe, startup_probe=None, notifier=None, **config):
+    def _watchdog(
+        self, *, probe, startup_probe=None, notifier=None, terminator=None, **config
+    ):
         settings = make_settings(self.root, **config)
         return Watchdog(
             "master",
@@ -446,7 +448,7 @@ class SupervisorTests(TempDirTestCase):
             spawner=self._spawner,
             probe=probe,
             startup_probe=startup_probe or (lambda: (False, "")),
-            terminator=lambda proc: None,
+            terminator=terminator or (lambda proc: None),
             notifier=notifier or FakeNotifier(),
             output=io.StringIO(),
             error=io.StringIO(),
@@ -532,6 +534,54 @@ class SupervisorTests(TempDirTestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(get_intent(self.root, "master"), INTENT_RUN)
         self.assertIn("update_ok", [event.action for event in notifier.events])
+        self.assertEqual(result, [EXIT_OK])
+
+    def test_external_restart_intent_restarts_running_child(self) -> None:
+        self.spawned = []
+        terminated = []
+
+        def spawner() -> FakeProc:
+            proc = FakeProc(code=None)
+            self.spawned.append(proc)
+            return proc
+
+        self._spawner = spawner
+        notifier = FakeNotifier()
+        watchdog = self._watchdog(
+            probe=lambda: (True, ""),
+            notifier=notifier,
+            terminator=lambda proc: terminated.append(proc.pid),
+        )
+        result, thread = self._run_async(watchdog)
+        self.assertTrue(wait_for(lambda: len(self.spawned) == 1))
+        first_pid = self.spawned[0].pid
+        request_restart(self.root, "master", pid=first_pid + 999)
+        self.assertTrue(
+            wait_for(lambda: len(self.spawned) >= 2, timeout=5.0),
+            "外部 restart 指令未触发重启",
+        )
+        watchdog.shutdown()
+        thread.join(timeout=5.0)
+        self.assertIn(first_pid, terminated)
+        self.assertEqual(get_intent(self.root, "master"), INTENT_RUN)
+        self.assertIn("update_ok", [event.action for event in notifier.events])
+        self.assertEqual(result, [EXIT_OK])
+
+    def test_external_stop_intent_stops_watchdog(self) -> None:
+        self.spawned = []
+
+        def spawner() -> FakeProc:
+            proc = FakeProc(code=None)
+            self.spawned.append(proc)
+            return proc
+
+        self._spawner = spawner
+        watchdog = self._watchdog(probe=lambda: (True, ""))
+        result, thread = self._run_async(watchdog)
+        self.assertTrue(wait_for(lambda: len(self.spawned) == 1))
+        request_stop(self.root, "master", pid=self.spawned[0].pid + 999)
+        thread.join(timeout=5.0)
+        self.assertFalse(thread.is_alive())
         self.assertEqual(result, [EXIT_OK])
 
     def test_unhealthy_threshold_restarts_and_alerts(self) -> None:
