@@ -246,6 +246,27 @@ async function checkBranchUpdate(manual = false) {
   }
 }
 
+function waitForRestartAndReload() {
+  const deadline = Date.now() + 60000;
+  async function probe() {
+    if (Date.now() >= deadline) {
+      window.location.reload();
+      return;
+    }
+    try {
+      const res = await fetch("/api/system/overview", { cache: "no-store" });
+      if (res.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {
+      /* expected while the service is restarting */
+    }
+    setTimeout(probe, 1000);
+  }
+  setTimeout(probe, 2200);
+}
+
 async function applyUpdate() {
   if (!updateReady()) return;
   const target = updateStatus?.target_version || updateBranch?.remote_sha || "";
@@ -254,7 +275,11 @@ async function applyUpdate() {
     return;
   }
   const ref = updateBranch?.name || updateStatus?.branch?.configured?.name || "main";
-  if (!await confirmDelete(t("同步 {ref} 分支？", { ref }), t("将执行 git pull --ff-only 并重启主程序；工作区必须干净，本地不能有未推送提交。"))) return;
+  if (!await confirmDialog(
+    t("确认更新 {ref} 分支？", { ref }),
+    t("将拉取最新代码并重启主程序，拉取失败会提示报错信息。"),
+    { confirmText: t("确认"), danger: false }
+  )) return;
   updateApplying = true;
   if (updateModalVisible()) renderUpdateModal();
   try {
@@ -263,8 +288,14 @@ async function applyUpdate() {
       body: JSON.stringify({ target }),
     });
     if (data.ok) {
-      toast(t("已拉取最新代码，正在通过看门狗重启…"));
-      setTimeout(() => window.location.reload(), 4000);
+      expectedRestarting = true;
+      stopPoller("workflows");
+      stopPoller("runs");
+      stopPoller("system");
+      stopPoller("update");
+      setServiceStatus("checking");
+      toast(t("已拉取最新代码，正在重启服务…"));
+      waitForRestartAndReload();
     } else {
       updateApplying = false;
       toast(data.error || t("更新已中止"), true);

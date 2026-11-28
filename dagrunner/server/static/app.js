@@ -12,6 +12,7 @@ const state = {
   auth: { username: "", is_admin: false, unrestricted: false, workflows: [] },
 };
 let serviceState = "checking";
+let expectedRestarting = false;
 let runLoadSequence = 0;
 let runSearchTimer = null;
 
@@ -23,23 +24,40 @@ async function api(url, options = {}) {
       ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
     };
     response = await fetch(url, { headers, ...options });
+    if (response.status === 502 || response.status === 503 || response.status === 504) {
+      setServiceStatus(expectedRestarting ? "checking" : "offline");
+      const error = new Error(expectedRestarting ? t("服务正在重启…") : t("后端服务已断开"));
+      error.offline = true;
+      error.restarting = expectedRestarting;
+      throw error;
+    }
     setServiceStatus("online");
   } catch (cause) {
-    setServiceStatus("offline");
-    const error = new Error(t("后端服务已断开"));
+    if (cause?.offline) throw cause;
+    setServiceStatus(expectedRestarting ? "checking" : "offline");
+    const error = new Error(expectedRestarting ? t("服务正在重启…") : t("后端服务已断开"));
     error.offline = true;
+    error.restarting = expectedRestarting;
     error.cause = cause;
     throw error;
   }
   const type = response.headers.get("content-type") || "";
-  const body = type.includes("application/json") ? await response.json() : await response.text();
+  const isJson = type.includes("application/json");
+  const body = isJson ? await response.json() : await response.text();
   if (response.status === 401 && body?.login_url) {
     window.location.assign(body.login_url);
     const error = new Error(t("登录已失效，请重新登录"));
     error.loginRequired = true;
     throw error;
   }
-  if (!response.ok) { const error = new Error(t(body.error || body || `HTTP ${response.status}`)); error.data = body; throw error; }
+  if (!response.ok) {
+    const rawMessage = isJson
+      ? (body?.error || `HTTP ${response.status}`)
+      : (typeof body === "string" && body.trim() && !/^\s*</.test(body) ? body.trim().slice(0, 300) : `HTTP ${response.status}`);
+    const error = new Error(t(rawMessage));
+    error.data = body;
+    throw error;
+  }
   return body;
 }
 
@@ -1405,12 +1423,20 @@ async function deleteRun(id) {
 }
 
 let deleteConfirmResolver = null;
-function confirmDelete(title, message) {
+function confirmDialog(title, message, options = {}) {
   if (deleteConfirmResolver) deleteConfirmResolver(false);
   document.getElementById("deleteConfirmTitle").textContent = title;
   document.getElementById("deleteConfirmMessage").textContent = message;
+  const submit = document.getElementById("deleteConfirmSubmit");
+  if (submit) {
+    submit.textContent = options.confirmText || t("确认");
+    submit.classList.toggle("danger", Boolean(options.danger));
+  }
   document.getElementById("deleteConfirmModal").classList.remove("hidden");
   return new Promise(resolve => { deleteConfirmResolver = resolve; });
+}
+function confirmDelete(title, message) {
+  return confirmDialog(title, message, { confirmText: t("确认删除"), danger: true });
 }
 function resolveDeleteConfirm(confirmed) {
   document.getElementById("deleteConfirmModal").classList.add("hidden");

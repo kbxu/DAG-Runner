@@ -178,10 +178,11 @@ class UpdateServiceTests(unittest.TestCase):
         self.assertEqual(result["satellites"]["sat-online"]["state"], "restarting")
         self.assertEqual(result["satellites"]["sat-offline"]["state"], "skipped")
 
-        # On next startup, recover() transitions restarting -> done
+        # On next startup, recover() transitions restarting -> done and clears restart notice
         svc2 = self._service()
         svc2.recover()
         self.assertEqual(svc2.status()["state"], "done")
+        self.assertEqual(svc2.status()["message"], "")
 
     def test_satellite_updater_sync_branch(self) -> None:
         sat_root = self.base / "sat"

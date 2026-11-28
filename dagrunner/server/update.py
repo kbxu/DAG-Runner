@@ -100,7 +100,11 @@ class UpdateService:
         """Mark a pending restart as done once the new process boots up."""
         if self._state.get("state") in ("updating", "restarting"):
             self._state["state"] = "done"
+            self._state["message"] = ""
             self._state["updated"] = _now()
+            self._save()
+        elif self._state.get("state") == "done" and self._state.get("message"):
+            self._state["message"] = ""
             self._save()
 
     # -- check -------------------------------------------------------------
@@ -257,6 +261,7 @@ class UpdateService:
     def abort(self) -> dict:
         with self._lock:
             self._state["state"] = "idle"
+            self._state["message"] = ""
             self._state["updated"] = _now()
             self._save()
             return {"ok": True, "state": "idle"}
