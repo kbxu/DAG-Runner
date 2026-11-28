@@ -130,49 +130,30 @@ The top bar shows the current version `vX.Y.Z`; the satellite panel shows each s
 
 **Version source**: `dagrunner/__init__.py::__version__`. `pyproject.toml` reads it through a `dynamic version`, and release tags must match it.
 
-**Versioned install**: code lives in `var/versions/<version>/` and `var/current` holds the active version. The launchers (`var/start.bat` / `var/start.sh`) read `var/current` to pick the directory; without that file they fall back to the repository root (development mode). An update only switches `var/current`, and so does a rollback.
+**Online updates (`git clone` deployments only)**:
 
-**Update sources** (the `update` block in `var/config.yaml`):
-
-| Source | Description |
-| --- | --- |
-| `git` | `git archive <tag>` into `var/versions/<version>/`; the working tree is never touched, so local changes cannot break an update |
-| `release` | Download `dagrunner-<version>.tar.gz` from a GitHub release and verify its sha256 |
-
-**Update flow** (manual from the web console, or `python -m dagrunner.server.update`; both run the same steps):
-
-1. Preflight: refuse while a task is running, a run record is unfinished, or a satellite job is pending/running;
-2. Stage the new version and pause the scheduler;
-3. Distribute the package to online satellites (they pull it from the master, falling back to the release URL) and verify the sha256;
-4. Commit together: satellites restart first, the master last; scheduled runs missed during the update are not replayed;
-5. Verify every satellite version after startup and roll back to the previous version on failure.
-
-Offline satellites are skipped; a satellite can also be updated on its own with `python -m dagrunner.server.update --role satellite --to <version>`. An update is refused while tasks are running.
-
-### Branch mode (git clone / development installs)
-
-When the service runs from a git checkout, the web update panel offers **Git branch** as the source:
-
-- The check compares `origin/<name>` with the local HEAD and shows how many commits are behind plus the latest short sha/subject.
-- After confirmation the **watchdog runs `git pull --ff-only` and restarts** (the server only writes the handoff request).
-- Dirty worktrees, unpushed local commits or a moved remote cause refusal with a message.
-- Release-package installs (no `.git`) do not support this mode; keep using release/tag updates.
-- The satellite panel shows whether each node could use branch updates (`.git` + remote); actual satellite sync lands in a later phase.
+- Services run directly from the repository root via `var/start.sh` / `var/start.bat` (or `var/start-satellite.sh` / `var/start-satellite.bat`), with no `var/versions/` directory.
+- Extracted release archives (without `.git`) do not support online updates; replace files manually.
+- Update flow (from the web console or `python -m dagrunner.server.update`):
+  1. Check tracked files for local edits, unpushed commits, and active tasks (refuse without pulling if any check fails).
+  2. Run `git merge --ff-only origin/<branch>` in place (if pull fails, the running service is unaffected).
+  3. Trigger the same pull + restart on connected satellites (offline satellites auto-trigger an update on reconnect if a version mismatch is detected and their watchdog is active).
+  4. Record `intent=restart` and exit so the watchdog immediately relaunches the service.
 
 ## Process watchdog
 
 Each role runs a resident supervisor process, launched by the start scripts through `run_tee.py`:
 
 ```bash
-python -m dagrunner.watchdog --role master          # normally started by start.bat / start.sh
-python -m dagrunner.watchdog --role satellite
+python -m dagrunner.watchdog --role master          # normally started by var/start.bat / var/start.sh
+python -m dagrunner.watchdog --role satellite       # normally started by var/start-satellite.bat / .sh
 python -m dagrunner.watchdog --status --role master  # print supervisor status
 ```
 
 - Unexpected child exit: immediate restart with exponential backoff (`5s -> 300s`); the failure counter clears after a stable run.
 - Health probe failures: alert after 2 minutes, restart only after 5 consecutive minutes so long tasks are not killed by a transient hiccup.
-- Intentional stop (`Ctrl+C` / `SIGTERM`): the service records its intent first and the watchdog exits without restarting it.
-- Updates: when a watchdog is active it performs the version switch, verification and rollback; otherwise the original `watchdog/restart.py` path is used unchanged.
+- Intentional stop (`Ctrl+C` / `SIGTERM`): the service records `intent=stop` and the watchdog exits without restarting it.
+- Update restart: after pulling new code, the service records `intent=restart` and exits; the watchdog immediately relaunches it without backoff.
 - `mode: notify` disables automatic restarts (alert only); a per-role lock prevents duplicate supervisors.
 
 Defaults live in the `watchdog` section of `var/examples/config.example.yaml`. Restarting on an unhealthy process interrupts running tasks; use `mode: notify` if that is not acceptable.

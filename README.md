@@ -131,49 +131,30 @@ python -m dagrunner.satellite --config var/satellite.yaml
 
 **版本号来源**：`dagrunner/__init__.py::__version__`，`pyproject.toml` 通过 `dynamic version` 读取，发版 tag 必须与它一致。
 
-**版本化安装**：代码放在 `var/versions/<version>/`，`var/current` 保存当前版本号。启动脚本（`var/start.bat` / `var/start.sh`）读取 `var/current` 决定运行哪个目录；没有该文件时回退到仓库根目录（开发模式）。更新只切换 `var/current`，回滚也只是切回去。
+**在线更新（仅支持 `git clone` 部署）**：
 
-**两种更新来源**（`var/config.yaml` 的 `update`）：
-
-| 来源 | 说明 |
-| --- | --- |
-| `git` | `git archive <tag>` 导出到 `var/versions/<version>/`，不碰工作区，本地未提交改动不会影响更新 |
-| `release` | 从 GitHub Release 下载 `dagrunner-<version>.tar.gz`，校验 sha256 后解压 |
-
-**更新流程**（Web 手动，或命令行 `python -m dagrunner.server.update`，两者流程一致）：
-
-1. 预检：有运行中任务、未完成运行记录或未结束的卫星任务时拒绝更新；
-2. 暂存新版本，暂停定时调度；
-3. 主机把更新包下发给在线卫星（卫星从主机下载，失败再直连发布地址），校验 sha256 后暂存；
-4. 一起提交：卫星先重启，主机最后重启；更新期间错过的定时触发不补跑；
-5. 启动后自动校验各卫星版本，失败自动回滚到上一版本。
-
-离线卫星跳过更新，也可以单独更新卫星：`python -m dagrunner.server.update --role satellite --to <version>`。有运行中任务时更新会被拒绝。
-
-### 分支模式（git clone / 开发部署）
-
-如果服务是从 git 仓库克隆运行的（目录里有 `.git`），Web「版本与更新」的来源可选 **git 分支**：
-
-- 检查更新会对比 `origin/<name>` 与本地 HEAD，显示落后提交数、最新提交的短 sha/标题；
-- 确认后**由看门狗执行 `git pull --ff-only` 并重启**（服务器只写交接请求）；
-- 工作区有未提交改动、本地有未推送提交或远端已变化时会拒绝并提示；
-- 发布包安装（无 `.git`）不支持该模式，请继续用 release/tag 手动更新；
-- 卫星面板会显示每台节点是否具备分支更新条件（`.git` + 远端），实际同步下一期支持。
+- 直接运行仓库根目录代码，由 `var/start.sh` / `var/start.bat`（卫星机为 `var/start-satellite.sh` / `var/start-satellite.bat`）拉起看门狗守护，不再使用 `var/versions/` 多版本目录；
+- 发布包解压安装（目录无 `.git`）不支持在线更新，请手动替换文件；
+- 更新流程（Web 手动点击，或命令行 `python -m dagrunner.server.update`）：
+  1. 检查本地已跟踪文件有无未提交改动、有无未推送提交，以及有无运行中任务（任一不满足则不执行 pull）；
+  2. 原地执行 `git merge --ff-only origin/<branch>` 拉取最新代码（pull 失败不影响当前运行中的服务）；
+  3. 同步触发在线卫星机执行同样的检查、pull 与重启（离线卫星机后续重连遇到版本不一致时，若为 git 仓库且看门狗在线会自动拉取更新并重启）；
+  4. 主服务写入重启意图后退出，由看门狗立即拉起新进程。
 
 ## 进程看门狗
 
 主服务与卫星各自有一个常驻看门狗（独立 supervisor 进程），由启动脚本经 `run_tee.py` 拉起：
 
 ```bash
-python -m dagrunner.watchdog --role master          # 通常由 start.bat / start.sh 调用
-python -m dagrunner.watchdog --role satellite
+python -m dagrunner.watchdog --role master          # 通常由 var/start.bat / var/start.sh 调用
+python -m dagrunner.watchdog --role satellite       # 通常由 var/start-satellite.bat / .sh 调用
 python -m dagrunner.watchdog --status --role master  # 查看运行状态
 ```
 
 - 子进程异常退出：立即按指数退避重启（`5s → 300s` 封顶），连续稳定运行后清零失败计数；
 - 健康检查连续失败：**第 2 分钟发告警，满 5 分钟才判定假死并重启**，避免误杀长任务；
-- 主动停止（`Ctrl+C` / `SIGTERM`）：先写 intent，看门狗不重启并退出；
-- 更新提交：看门狗接管切版本、校验与回滚；没有看门狗时仍走原有 `watchdog/restart.py`；
+- 主动停止（`Ctrl+C` / `SIGTERM`）：先写 `intent=stop`，看门狗不重启并退出；
+- 更新重启：服务 pull 成功后写 `intent=restart` 并退出，看门狗跳过退避立即拉起新进程；
 - `mode: notify` 可切换为只告警不重启；单例锁防止重复守护。
 
 默认配置见 `var/examples/config.example.yaml` 的 `watchdog` 段。**健康检查失败达到阈值时的自动重启会中断正在运行的任务**，必要时可用 `mode: notify` 人工兜底。

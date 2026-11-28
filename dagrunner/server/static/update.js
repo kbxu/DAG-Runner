@@ -1,7 +1,5 @@
-/* Version badge and manual update panel. Depends on app.js globals. */
+/* Version badge and git-pull update panel. Depends on app.js globals. */
 let updateStatus = { current_version: "", state: "idle", satellites: {} };
-let updateVersions = [];
-let updateSource = "";
 let updateBranch = null;
 let updateChecking = false;
 let updateApplying = false;
@@ -66,15 +64,12 @@ function updateStateBadge(stateName) {
   const labels = {
     idle: "空闲",
     ready: "可更新",
-    preparing: "准备中",
-    prepared: "已就绪",
-    staged: "已暂存",
-    committing: "应用中",
+    updating: "更新中",
+    restarting: "重启中",
+    up_to_date: "已是最新",
+    skipped: "已跳过",
     done: "已完成",
     failed: "失败",
-    prepare_failed: "准备失败",
-    commit_failed: "应用失败",
-    aborted: "已中止",
   };
   const label = t(labels[key] || key);
   return `<span class="update-state ${esc(key)}">${esc(label)}</span>`;
@@ -121,13 +116,19 @@ function updateBranchSummary() {
   if (!info || !Object.keys(info).length) {
     return updateStatus?.branch?.available
       ? { tone: "checking", title: t("等待检查远端分支"), detail: branchRefText() }
-      : { tone: "error", title: t("分支更新不可用"), detail: t("当前目录不是 git 仓库") };
+      : { tone: "error", title: t("不支持在线更新"), detail: t("非 git 仓库部署（发布包安装请手动替换代码）") };
   }
   if (!info.available) {
-    return { tone: "error", title: t("分支更新不可用"), detail: info.reason || "unknown" };
+    const detail = info.reason === "not_git"
+      ? t("非 git 仓库部署（发布包安装请手动替换代码）")
+      : (info.reason || "unknown");
+    return { tone: "error", title: t("不支持在线更新"), detail };
   }
   if (info.dirty) {
     return { tone: "warn", title: t("工作区有未提交改动，无法更新"), detail: t("请先提交或清理本地改动后再试") };
+  }
+  if (Number(info.ahead) > 0) {
+    return { tone: "warn", title: t("本地有未推送提交，无法更新"), detail: t("请先推送或清理本地提交后再试") };
   }
   if (Number(info.behind) > 0) {
     const detail = [info.latest_subject, info.remote_sha ? info.remote_sha.slice(0, 8) : ""].filter(Boolean).join(" · ");
@@ -148,6 +149,7 @@ function updateReady() {
     && !updateStatus?.active
     && info.available
     && !info.dirty
+    && Number(info.ahead || 0) === 0
     && Number(info.behind) > 0
   );
 }
@@ -226,11 +228,9 @@ async function checkBranchUpdate(manual = false) {
   try {
     const data = await api("/api/update/check", {
       method: "POST",
-      body: JSON.stringify({ source: "branch", target: "" }),
+      body: JSON.stringify({ target: "" }),
     });
     updateBranch = data.branch || {};
-    updateVersions = [];
-    updateSource = "branch";
     updateStatus = { ...updateStatus, target_version: data.target || "" };
     if (manual) {
       toast(updateBranch.behind > 0
@@ -260,10 +260,10 @@ async function applyUpdate() {
   try {
     const data = await api("/api/update", {
       method: "POST",
-      body: JSON.stringify({ target, source: "branch" }),
+      body: JSON.stringify({ target }),
     });
     if (data.ok) {
-      toast(t("正在同步分支并重启，请稍候…"));
+      toast(t("已拉取最新代码，正在通过看门狗重启…"));
       setTimeout(() => window.location.reload(), 4000);
     } else {
       updateApplying = false;
@@ -283,22 +283,6 @@ async function abortUpdate() {
     updateApplying = false;
     toast(t("更新已中止"));
     await refreshUpdateStatus();
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-async function rollbackUpdate() {
-  const version = updateStatus?.previous_version || "";
-  if (!version) {
-    toast(t("没有可回滚的版本"), true);
-    return;
-  }
-  if (!await confirmDelete(t("回滚到 v{version}？", { version }), t("服务将重启。"))) return;
-  try {
-    await api("/api/update/rollback", { method: "POST", body: JSON.stringify({ version }) });
-    toast(t("正在回滚，请稍候…"));
-    setTimeout(() => window.location.reload(), 4000);
   } catch (e) {
     toast(e.message, true);
   }

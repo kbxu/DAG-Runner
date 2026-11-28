@@ -10,8 +10,6 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from ..install import resolve_code_dir
-
 
 class LaunchError(RuntimeError):
     pass
@@ -99,16 +97,14 @@ def _detached_flags() -> dict:
 def launch_child(
     role: str,
     root: str | Path,
-    version: str = "",
     config: str | Path | None = None,
     *,
     stdout=None,
     stderr=None,
 ) -> subprocess.Popen:
-    """Start the supervised service for ``role`` from its version directory."""
+    """Start the supervised service for ``role`` directly from ``root``."""
     root = Path(root).resolve()
-    code = resolve_code_dir(root, version or None)
-    script = child_script(code, role)
+    script = child_script(root, role)
     if config is None:
         config = root / "var" / ("config.yaml" if role == "master" else "satellite.yaml")
     config = Path(config).resolve()
@@ -121,7 +117,7 @@ def launch_child(
         return subprocess.Popen(
             [sys.executable, str(script), "--config", str(config)],
             cwd=str(root),
-            env=build_environment(code, root),
+            env=build_environment(root, root),
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=err,

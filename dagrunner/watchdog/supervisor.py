@@ -12,9 +12,8 @@ from typing import Callable, TextIO
 
 import yaml
 
-from ..install import activate, active_version
+from .. import __version__
 from ..notifier import Notifier, NullNotifier
-from ..package import UpdateError, git_branch_sync
 from .health import HealthTracker, probe_master, probe_satellite
 from .launch import (
     LaunchError,
@@ -23,15 +22,12 @@ from .launch import (
     verify_process,
 )
 from .state import (
+    INTENT_RESTART,
     INTENT_RUN,
     INTENT_STOP,
-    INTENT_UPDATE,
     WatchdogLocked,
-    clear_handoff,
     get_intent,
     heartbeat,
-    read_handoff,
-    record_update_result,
     set_intent,
     update_state,
     watchdog_lock,
@@ -62,7 +58,6 @@ class WatchdogConfig:
     stop_timeout: float = 20.0
     alert_to: tuple[str, ...] = ()
     alert_cooldown: float = 3600.0
-    handoff_wait: float = 15.0
     require_scheduler: bool = True
     require_db: bool = True
 
@@ -86,14 +81,6 @@ def _as_float(raw: object, default: float) -> float:
 
 def _as_bool(raw: object, default: bool) -> bool:
     return default if raw is None else bool(raw)
-
-
-def _as_nonnegative_float(raw: object, default: float) -> float:
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 0 else default
 
 
 def load_settings(path: str | Path, role: str) -> Settings:
@@ -149,7 +136,6 @@ def load_settings(path: str | Path, role: str) -> Settings:
         stop_timeout=_as_float(section.get("stop_timeout"), 20.0),
         alert_to=tuple(str(item) for item in alert_to),
         alert_cooldown=_as_float(section.get("alert_cooldown"), 3600.0),
-        handoff_wait=_as_nonnegative_float(section.get("handoff_wait"), 15.0),
         require_scheduler=_as_bool(health.get("require_scheduler"), True),
         require_db=_as_bool(health.get("require_db"), True),
     )
@@ -182,7 +168,7 @@ class Watchdog:
         settings: Settings | None = None,
         *,
         config_path: str | Path | None = None,
-        spawner: Callable[[str], Process] | None = None,
+        spawner: Callable[[], Process] | None = None,
         probe: Callable[[], object] | None = None,
         startup_probe: Callable[[], object] | None = None,
         terminator: Callable[[Process | None], None] | None = None,
@@ -259,10 +245,9 @@ class Watchdog:
             self._log(str(exc))
             return EXIT_LOCKED
         try:
-            version = self._version()
             self._heartbeat(status="starting", last_error="once")
             try:
-                process = self._spawner(version)
+                process = self._spawner()
             except Exception as exc:  # noqa: BLE001
                 self._log(f"拉起子进程失败: {exc}")
                 update_state(self.root, self.role, status="stopped", child_pid=None)
@@ -298,9 +283,9 @@ class Watchdog:
 
     # -- setup --------------------------------------------------------------
 
-    def _default_spawner(self) -> Callable[[str], Process]:
-        def spawn(version: str = "") -> Process:
-            return launch_child(self.role, self.root, version, self.settings.config_path)
+    def _default_spawner(self) -> Callable[[], Process]:
+        def spawn() -> Process:
+            return launch_child(self.role, self.root, self.settings.config_path)
 
         return spawn
 
@@ -355,13 +340,10 @@ class Watchdog:
         except Exception:  # noqa: BLE001
             pass
 
-    def _version(self) -> str:
-        return active_version(self.root) or ""
-
     def _heartbeat(self, **fields: object) -> None:
         state = {
             "watchdog_pid": os.getpid(),
-            "version": self._version(),
+            "version": __version__,
             "child_pid": getattr(self._proc, "pid", None) if self._proc else None,
             "restart_count": self._restart_count,
             "consecutive_failures": self._consecutive_failures,
@@ -414,7 +396,7 @@ class Watchdog:
                     action=action,
                     message=message,
                     recipients=tuple(self.cfg.alert_to),
-                    version=self._version(),
+                    version=__version__,
                     pid=pid,
                     exit_code=exit_code,
                     restarts=self._restart_count,
@@ -427,14 +409,13 @@ class Watchdog:
 
     def _run_with_lock(self) -> int:
         self._install_signals()
-        version = self._version()
         update_state(
             self.root,
             self.role,
             watchdog_pid=os.getpid(),
             status="starting",
             intent=INTENT_RUN,
-            version=version,
+            version=__version__,
             child_pid=None,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             restart_count=0,
@@ -448,7 +429,7 @@ class Watchdog:
             self._log(f"端口已有健康实例在运行（{reason}），拒绝双实例")
             update_state(self.root, self.role, status="port_busy")
             return EXIT_PORT_BUSY
-        if not self._spawn_until_ready(version, "初始启动"):
+        if not self._spawn_until_ready("初始启动"):
             update_state(self.root, self.role, status="stopped")
             return EXIT_OK if self._stop.is_set() else EXIT_ERROR
         return self._supervise()
@@ -513,43 +494,21 @@ class Watchdog:
         code = proc.poll()
         self._last_exit_code = code
         self._proc = None
-        handoff = read_handoff(self.root)
         intent = get_intent(self.root, self.role)
-        self._log(
-            f"子进程退出 code={code} intent={intent} handoff={'有' if handoff else '无'}"
-        )
+        self._log(f"子进程退出 code={code} intent={intent}")
         if intent == INTENT_STOP:
-            if not handoff:
-                # An update may still be writing its handoff request; give it a
-                # short window before treating this as a plain manual stop.
-                handoff = self._wait_for_handoff()
-            if handoff:
-                self._dispatch_handoff(handoff)
-                return
             update_state(self.root, self.role, status="stopped", child_pid=None)
             self._stop.set()
             return
-        if handoff:
-            self._dispatch_handoff(handoff)
+        if intent == INTENT_RESTART:
+            set_intent(self.root, self.role, INTENT_RUN)
+            self._consecutive_failures = 0
+            self._tracker.reset()
+            self._last_error = ""
+            self._notify("update_ok", "代码更新完成，正在重启服务", force=True)
+            self._spawn_until_ready("更新重启")
             return
         self._crash_restart(code)
-
-    def _dispatch_handoff(self, handoff: dict) -> None:
-        if str(handoff.get("action") or "") == "sync_branch":
-            self._handle_sync_branch(handoff)
-            return
-        self._handle_update(handoff)
-
-    def _wait_for_handoff(self) -> dict | None:
-        deadline = self._clock() + self.cfg.handoff_wait
-        while True:
-            handoff = read_handoff(self.root)
-            if handoff:
-                return handoff
-            remaining = deadline - self._clock()
-            if remaining <= 0 or self._stop.is_set():
-                return None
-            self._stop.wait(min(self.cfg.interval, remaining))
 
     def _crash_restart(self, code: int | None) -> None:
         self._consecutive_failures += 1
@@ -558,7 +517,7 @@ class Watchdog:
         self._interruptible_sleep(self._backoff_delay(self._consecutive_failures))
         if self._stop.is_set():
             return
-        self._spawn_until_ready(self._version(), "崩溃重启")
+        self._spawn_until_ready("崩溃重启")
 
     def _restart_unhealthy(self, reason: str) -> None:
         old = self._proc
@@ -569,9 +528,9 @@ class Watchdog:
         self._consecutive_failures = 0
         self._last_error = f"健康检查不健康：{reason}"
         self._notify("restarted", f"健康检查不健康，执行重启：{reason}")
-        self._spawn_until_ready(self._version(), "假死重启")
+        self._spawn_until_ready("假死重启")
 
-    def _spawn_until_ready(self, version: str, reason: str) -> bool:
+    def _spawn_until_ready(self, reason: str) -> bool:
         attempts = 0
         while not self._stop.is_set():
             attempts += 1
@@ -582,7 +541,7 @@ class Watchdog:
             )
             proc: Process | None = None
             try:
-                proc = self._spawner(version)
+                proc = self._spawner()
             except Exception as exc:  # noqa: BLE001
                 self._log(f"拉起子进程失败: {exc}")
             if proc is not None and verify_process(
@@ -622,110 +581,6 @@ class Watchdog:
                 delay = self.cfg.backoff_max
             self._interruptible_sleep(delay)
         return False
-
-    def _handle_update(self, handoff: dict) -> None:
-        target = str(handoff.get("version") or "")
-        previous = str(handoff.get("previous") or "")
-        update_state(
-            self.root,
-            self.role,
-            status="updating",
-            intent=INTENT_UPDATE,
-            unhealthy_since=None,
-        )
-        self._log(f"更新交接：切换到 {target}" + (f"（可回滚 {previous}）" if previous else ""))
-        try:
-            activate(target, self.root)
-        except OSError as exc:
-            self._log(f"activate {target} 失败: {exc}")
-        ok = bool(target) and self._spawn_until_ready(target, "更新交接")
-        if ok:
-            clear_handoff(self.root)
-            set_intent(self.root, self.role, INTENT_RUN)
-            self._notify("update_ok", f"已切换版本 {target}", force=True)
-            record_update_result(self.root, status="running", version=target)
-            self._heartbeat(status="running", version=target)
-            return
-        message = f"版本 {target} 启动失败"
-        self._notify("update_failed", message, force=True)
-        rollback_target = previous or target
-        if previous:
-            try:
-                activate(previous, self.root)
-            except OSError as exc:
-                self._log(f"回滚 activate 失败: {exc}")
-        rolled_back = self._spawn_until_ready(rollback_target, "更新回滚")
-        clear_handoff(self.root)
-        set_intent(self.root, self.role, INTENT_RUN)
-        if rolled_back:
-            record_update_result(
-                self.root,
-                status="rolled_back",
-                version=rollback_target,
-                error=message,
-            )
-        else:
-            record_update_result(self.root, status="rollback_failed", error=message)
-        self._heartbeat(
-            status="running" if rolled_back else "give_up",
-            version=rollback_target,
-        )
-        if rolled_back:
-            self._notify("update_failed", f"已回滚到 {rollback_target}", force=True)
-        else:
-            self._notify(
-                "update_failed",
-                f"回滚到 {rollback_target} 仍失败，需要人工介入",
-                force=True,
-            )
-
-    def _handle_sync_branch(self, handoff: dict) -> None:
-        ref = str(handoff.get("ref") or "main")
-        remote = str(handoff.get("remote") or "origin")
-        expected_sha = str(handoff.get("expected_sha") or "")
-        update_state(
-            self.root,
-            self.role,
-            status="updating",
-            intent=INTENT_UPDATE,
-            unhealthy_since=None,
-        )
-        self._log(f"分支交接：同步 {remote}/{ref}" + (f"（期望 {expected_sha[:8]}）" if expected_sha else ""))
-        failure: str = ""
-        result: dict | None = None
-        if active_version(self.root):
-            failure = "当前为版本化安装（var/current），不支持分支更新；请使用发布包或开发模式"
-        else:
-            try:
-                result = git_branch_sync(
-                    self.root, remote=remote, name=ref, expected_sha=expected_sha
-                )
-            except UpdateError as exc:
-                failure = str(exc)
-            except Exception as exc:  # noqa: BLE001
-                failure = f"分支同步异常: {exc}"
-        if failure:
-            self._log(f"分支同步失败: {failure}")
-            self._notify("update_failed", f"分支同步失败：{failure}", force=True)
-            record_update_result(self.root, status="failed", error=failure)
-            clear_handoff(self.root)
-            set_intent(self.root, self.role, INTENT_RUN)
-            self._spawn_until_ready(self._version(), "分支同步失败")
-            return
-        assert result is not None
-        clear_handoff(self.root)
-        set_intent(self.root, self.role, INTENT_RUN)
-        new_sha = str(result.get("new_sha") or "")
-        if result.get("updated"):
-            self._notify(
-                "update_ok",
-                f"已同步 {ref} 到 {new_sha[:8]}，正在重启",
-                force=True,
-            )
-        else:
-            self._notify("update_ok", f"{ref} 已是最新，正在重启", force=True)
-        record_update_result(self.root, status="running", version=self._version())
-        self._spawn_until_ready(self._version(), "分支同步重启")
 
     def _terminate(self, proc: Process | None) -> None:
         if proc is None:

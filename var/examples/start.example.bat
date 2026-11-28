@@ -23,20 +23,9 @@ goto :eof
 :direct
 set "LOG_OUT=%ROOT%\var\logs\server.out.log"
 set "LOG_ERR=%ROOT%\var\logs\server.err.log"
-set "CURRENT="
-if exist "%ROOT%\var\current" set /p "CURRENT=" < "%ROOT%\var\current"
 echo [dagrunner] root:    %ROOT%
 echo [dagrunner] log out: %LOG_OUT%
 echo [dagrunner] log err: %LOG_ERR%
-if defined CURRENT (
-  if exist "%ROOT%\var\versions\%CURRENT%\run_server.py" (
-    echo [dagrunner] version: %CURRENT%
-    echo [dagrunner] starting, this window stays open while the server runs ...
-    "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_tee.py" "%LOG_OUT%" "%LOG_ERR%" "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_server.py" --config "%ROOT%\var\config.yaml"
-    if errorlevel 1 pause
-    goto :eof
-  )
-)
 echo [dagrunner] starting, this window stays open while the server runs ...
 "%DAGR_PYTHON%" "%ROOT%\run_tee.py" "%LOG_OUT%" "%LOG_ERR%" "%DAGR_PYTHON%" -m dagrunner.server --config "%ROOT%\var\config.yaml"
 if errorlevel 1 pause

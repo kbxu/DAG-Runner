@@ -7,12 +7,12 @@
 | 模块 | 职责 | 主要消费者 |
 | --- | --- | --- |
 | `__init__.py` | 包标识与 `__version__`（版本号唯一来源） | 所有模块、发版 tag |
-| `install.py` | 版本化安装布局：`var/current`、`var/versions/<v>/`、`activate()`、原子写状态 | server、watchdog、update、restart |
-| `version.py` | 语义化版本解析与比较 | server/update |
+| `install.py` | 仓库根路径、数据目录与更新状态原子读写 | server、watchdog、update |
+| `version.py` | 语义化版本解析与比较 | satellite/agent |
 | `workflow.py` | 工作流 YAML 解析/校验、任务 ID 规范化、YAML 序列化（`dump_workflow_yaml`） | server、satellite/executor、tools |
 | `scripting.py` | shell 命令封装（bash/sh/cmd/powershell）、`ExecutionResult` | server/executor、satellite/executor |
 | `cron.py` | Linux 风格 cron 解析（`linux_cron_trigger`，0/7=周日） | server/service、tools/migrate_workflows |
-| `package.py` | 更新归档工具：`make_archive`/`extract_archive`/`archive_name`/`UpdateError` | server/update、satellite/update、satellite/master |
+| `package.py` | git 分支检查与快进拉取工具：`git_branch_status`/`git_branch_sync`/`UpdateError` | server/update、satellite/update |
 
 ## 子包
 
@@ -35,4 +35,4 @@
 ## 目录约定
 
 - 代码：本目录及子包；Web 资源在 `server/templates`、`server/static`。
-- 本地数据：仓库根 `var/`（数据库、日志、证书、`versions/`、`updates/`）。
+- 本地数据：仓库根 `var/`（数据库、日志、证书、`updates/`）。

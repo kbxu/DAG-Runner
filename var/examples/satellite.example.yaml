@@ -29,10 +29,10 @@ satellite:
   heartbeat_interval: 30
   probe_interval: 60
   timeout: 15
-  # Standalone satellite update:
-  #   python -m dagrunner.server.update --role satellite --to <version>
+  # Standalone satellite update (git clone deployments only):
+  #   python -m dagrunner.server.update --role satellite
 
-# Satellite process watchdog. Restarts the agent on crash or hang and handles version handoffs.
+# Satellite process watchdog. Restarts the agent on crash, hang, or after updates.
 watchdog:
   enabled: true
   mode: restart                 # restart | notify (alert only, no restart)
@@ -40,7 +40,6 @@ watchdog:
   timeout: 3
   alert_after: 120              # Send first alert after 2 minutes of consecutive failures
   unhealthy_after: 300          # Treat as hung and restart after 5 minutes
-  handoff_wait: 15
   backoff_base: 5
   backoff_max: 300
   stable_window: 300

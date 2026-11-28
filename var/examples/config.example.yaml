@@ -44,29 +44,11 @@ satellite:
   # Max seconds to wait for satellites to download, verify, and stage an update
   update_timeout: 300
 
-# Software updates. Preflight verifies no tasks are running; schedules pause during updates;
-# master and online satellites update together (offline satellites are skipped).
-# Versioned installs live under var/versions/<version>/ with active version in var/current.
+# Software updates (git clone deployments only; release archives do not support online updates).
+# Preflight checks no running tasks and clean tracked files, pulls fast-forward in place,
+# updates connected satellites, and exits for the watchdog to restart.
 update:
   enabled: true
-  # auto: prefer GitHub Release, then git; or set explicitly to git / release
-  source: auto
-  git:
-    remote: origin
-    # Target tag/branch; leave blank to look up vX.Y.Z or X.Y.Z
-    branch_or_tag: ""
-  release:
-    repo: kbxu/DAG-Runner
-    # Release asset filename templates (cross-platform tar.gz by default)
-    assets:
-      windows: "dagrunner-{version}.tar.gz"
-      linux: "dagrunner-{version}.tar.gz"
-    # Optional internal mirror URL template; leave blank to use GitHub
-    download_url: ""
-  rollback_on_failure: true
-  # Branch mode (git clone / development deployments): checks whether origin/<name> is ahead
-  # of HEAD and hands off git pull --ff-only + restart to the watchdog.
-  # Requires the working directory to be a git repository.
   branch:
     remote: origin
     name: main
@@ -82,8 +64,7 @@ maintenance:
   # Runs archived per batch
   batch_size: 50
 
-# Process watchdog. Restarts the server automatically on crash or hang, and handles
-# version switching / rollback during updates.
+# Process watchdog. Restarts the server automatically on crash, hang, or after updates.
 # Startup scripts launch python -m dagrunner.watchdog via run_tee.py; set enabled=false to run directly.
 watchdog:
   enabled: true
@@ -92,7 +73,6 @@ watchdog:
   timeout: 3                    # Single health probe timeout (seconds)
   alert_after: 120              # Send first alert after 2 minutes of consecutive failures
   unhealthy_after: 300          # Treat as hung and restart after 5 minutes
-  handoff_wait: 15              # Grace window for update handoff requests after graceful stop (seconds)
   backoff_base: 5               # Initial restart backoff (seconds)
   backoff_max: 300              # Maximum restart backoff (seconds)
   stable_window: 300            # Reset failure counter after staying healthy this long (seconds)

@@ -8,8 +8,8 @@ Run it with::
     python -m dagrunner.watchdog --role master
     python -m dagrunner.watchdog --role satellite
 
-Exports are resolved lazily so ``python -m dagrunner.watchdog.restart`` and
-submodule imports do not pay for the whole supervisor stack.
+Exports are resolved lazily so submodule imports do not pay for the whole
+supervisor stack.
 """
 from __future__ import annotations
 
@@ -30,21 +30,18 @@ _EXPORTS = {
     "terminate_tree": "launch",
     "verify_process": "launch",
     "wait_for_exit": "launch",
+    "INTENT_RESTART": "state",
     "INTENT_RUN": "state",
     "INTENT_STOP": "state",
-    "INTENT_UPDATE": "state",
     "WatchdogLocked": "state",
-    "clear_handoff": "state",
     "get_intent": "state",
-    "handoff_path": "state",
     "is_active": "state",
-    "read_handoff": "state",
     "read_state": "state",
+    "request_restart": "state",
     "request_stop": "state",
     "set_intent": "state",
     "update_state": "state",
     "watchdog_lock": "state",
-    "write_handoff": "state",
     "Watchdog": "supervisor",
     "WatchdogConfig": "supervisor",
     "load_settings": "supervisor",

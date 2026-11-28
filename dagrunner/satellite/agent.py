@@ -57,18 +57,13 @@ from .protocol import (
     PATH_PING,
     PATH_REGISTER,
     PATH_STREAM,
-    PATH_UPDATE_COMMIT,
-    PATH_UPDATE_PREPARE,
     PATH_UPDATE_REPORT,
-    PATH_UPDATE_ROLLBACK,
-    PATH_UPDATE_STATUS,
+    PATH_UPDATE_SYNC,
     ROUTE_JOB,
     ROUTE_JOB_CANCEL,
     SSE_EVENT_CANCEL,
     SSE_EVENT_JOB,
-    SSE_EVENT_UPDATE_COMMIT,
-    SSE_EVENT_UPDATE_PREPARE,
-    SSE_EVENT_UPDATE_ROLLBACK,
+    SSE_EVENT_UPDATE_SYNC,
     VERSION_MISMATCH,
     JobSpec,
     ProtocolError,
@@ -76,10 +71,11 @@ from .protocol import (
 )
 from .update import (
     SatelliteUpdater,
-    handle_commit,
     mark_update_done,
     recover_grace,
+    schedule_satellite_exit,
 )
+from ..version import is_newer
 from ..scripting import (
     append_error,
     remove_temp_script,
@@ -150,6 +146,7 @@ class SatelliteAgent:
         )
         self._last_error: str | None = None
         self._version_mismatch = False
+        self._auto_update_attempted = False
         self._update_deadline: float = 0.0
         self._update_worker: SatelliteUpdater | None = None
 
@@ -191,19 +188,7 @@ class SatelliteAgent:
 
     def _updater(self) -> SatelliteUpdater:
         if self._update_worker is None:
-            self._update_worker = SatelliteUpdater(
-                root=Path.cwd().resolve(),
-                alias=self.config.alias,
-                master_url=self.config.master_url,
-                token=self.config.token,
-                timeout=self.config.timeout,
-                client=self._master_client(),
-                host_key_policy=self.config.host_key_policy,
-                master_cert_fingerprint=self.config.master_cert_fingerprint,
-                cert_dir=Path(self.config.cert).resolve().parent,
-                listen_host=self.config.listen_host,
-                listen_port=self.config.listen_port,
-            )
+            self._update_worker = SatelliteUpdater(root=Path.cwd().resolve())
         return self._update_worker
 
     def _report_update(self, result: dict) -> None:
@@ -216,39 +201,65 @@ class SatelliteAgent:
                 if attempt < 2:
                     time.sleep(1 + attempt)
 
-    def _handle_update_prepare(self, data: str) -> None:
+    def _handle_update_sync(self, data: str) -> None:
         try:
             payload = json.loads(data)
         except ValueError:
-            return
+            payload = {}
 
         def run() -> None:
             try:
-                result = self._updater().prepare(payload)
+                result = self._updater().sync_branch(
+                    remote=str(payload.get("remote") or "origin"),
+                    branch=str(payload.get("branch") or "main"),
+                    expected_sha=str(payload.get("expected_sha") or ""),
+                )
             except Exception as exc:  # noqa: BLE001 - reported back to the master
                 result = {"ok": False, "state": "failed", "message": str(exc)[:300]}
             self._report_update(result)
+            if result.get("ok") and result.get("updated"):
+                self._mark_updating()
+                schedule_satellite_exit(1.0)
 
         threading.Thread(
             target=run, daemon=True, name="satellite-update"
         ).start()
 
-    def _handle_update_commit(self, data: str) -> None:
+    def _try_auto_update_on_mismatch(
+        self,
+        server_version: str = "",
+        branch: dict | None = None,
+    ) -> bool:
+        """Auto-pull and restart when reconnecting to a newer master."""
+        if self._auto_update_attempted:
+            return False
+        if server_version and not is_newer(server_version, AGENT_VERSION):
+            return False
+        self._auto_update_attempted = True
+        remote = str((branch or {}).get("remote") or "origin")
+        name = str((branch or {}).get("name") or "main")
         try:
-            payload = json.loads(data)
-        except ValueError:
-            return
-        self._mark_updating()
-        handle_commit(self._updater(), str(payload.get("version", "")))
-
-    def _handle_update_rollback(self, data: str) -> None:
-        try:
-            payload = json.loads(data)
-        except ValueError:
-            return
-        self._mark_updating()
-        self._updater().rollback(str(payload.get("version", "")))
-        threading.Timer(1.0, lambda: os._exit(0)).start()
+            result = self._updater().sync_branch(
+                remote=remote,
+                branch=name,
+                require_watchdog=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"satellite auto-update skipped on version mismatch: {exc}",
+                file=sys.stderr,
+            )
+            return False
+        if result.get("updated"):
+            print(
+                f"satellite version mismatch ({AGENT_VERSION} -> {server_version or 'newer'}): "
+                f"pulled {str(result.get('new_sha', ''))[:8]}, restarting via watchdog",
+                file=sys.stderr,
+            )
+            self._mark_updating()
+            schedule_satellite_exit(0.5)
+            return True
+        return False
 
     def _mark_updating(self) -> None:
         self._update_deadline = time.monotonic() + UPDATE_GRACE_SECONDS
@@ -354,6 +365,19 @@ class SatelliteAgent:
                         )
                         self._stop.wait(5)
                         continue
+                    server_version = ""
+                    branch_cfg: dict | None = None
+                    if exc.payload:
+                        try:
+                            body = json.loads(exc.payload)
+                            if isinstance(body, dict):
+                                server_version = str(body.get("server_version") or "")
+                                if isinstance(body.get("branch"), dict):
+                                    branch_cfg = body["branch"]
+                        except ValueError:
+                            pass
+                    if self._try_auto_update_on_mismatch(server_version, branch_cfg):
+                        return
                     print(
                         f"satellite reverse channel stopped "
                         f"({self.config.master_url}): {exc}",
@@ -404,12 +428,8 @@ class SatelliteAgent:
                     self._handle_job_event(data)
                 elif event == SSE_EVENT_CANCEL:
                     self._handle_cancel_event(data)
-                elif event == SSE_EVENT_UPDATE_PREPARE:
-                    self._handle_update_prepare(data)
-                elif event == SSE_EVENT_UPDATE_COMMIT:
-                    self._handle_update_commit(data)
-                elif event == SSE_EVENT_UPDATE_ROLLBACK:
-                    self._handle_update_rollback(data)
+                elif event == SSE_EVENT_UPDATE_SYNC:
+                    self._handle_update_sync(data)
         finally:
             stop_heartbeat.set()
             try:
@@ -712,6 +732,13 @@ def create_satellite_agent_app(agent: SatelliteAgent) -> Flask:
         payload = request.get_json(silent=True) or {}
         agent_version = str(payload.get("agent_version", "") or "")
         if agent_version != AGENT_VERSION:
+            if is_newer(agent_version, AGENT_VERSION):
+                threading.Thread(
+                    target=agent._try_auto_update_on_mismatch,
+                    args=(agent_version,),
+                    daemon=True,
+                    name="satellite-auto-update",
+                ).start()
             return jsonify(
                 {
                     "ok": False,
@@ -786,39 +813,21 @@ def create_satellite_agent_app(agent: SatelliteAgent) -> Flask:
             terminate_process(job.process)
         return jsonify({"ok": True})
 
-    @app.post(PATH_UPDATE_PREPARE)
+    @app.post(PATH_UPDATE_SYNC)
     @require_auth
-    def update_prepare():
+    def update_sync():
         payload = request.get_json(silent=True) or {}
         try:
-            return jsonify(agent._updater().prepare(payload))
+            result = agent._updater().sync_branch(
+                remote=str(payload.get("remote") or "origin"),
+                branch=str(payload.get("branch") or "main"),
+                expected_sha=str(payload.get("expected_sha") or ""),
+            )
         except Exception as exc:  # noqa: BLE001 - reported back to the master
             return jsonify({"ok": False, "state": "failed", "message": str(exc)[:300]})
-
-    @app.post(PATH_UPDATE_COMMIT)
-    @require_auth
-    def update_commit():
-        payload = request.get_json(silent=True) or {}
-        version = str(payload.get("version", ""))
-        agent._mark_updating()
-        handle_commit(agent._updater(), version)
-        return jsonify({"ok": True, "restarting": True})
-
-    @app.post(PATH_UPDATE_ROLLBACK)
-    @require_auth
-    def update_rollback():
-        payload = request.get_json(silent=True) or {}
-        version = str(payload.get("version", ""))
-        agent._mark_updating()
-        agent._updater().rollback(version)
-        threading.Timer(1.0, lambda: os._exit(0)).start()
-        return jsonify({"ok": True, "restarting": True})
-
-    @app.get(PATH_UPDATE_STATUS)
-    @require_auth
-    def update_status():
-        return jsonify(
-            {"ok": True, "version": AGENT_VERSION, "state": agent._updater().state}
-        )
+        if result.get("ok") and result.get("updated"):
+            agent._mark_updating()
+            schedule_satellite_exit(1.0)
+        return jsonify(result)
 
     return app

@@ -893,11 +893,7 @@ def create_app(
         _require_admin()
         payload = request.get_json(silent=True) or {}
         try:
-            return jsonify(
-                update_service.check(
-                    str(payload.get("target", "")), str(payload.get("source", ""))
-                )
-            )
+            return jsonify(update_service.check(str(payload.get("target", ""))))
         except UpdateError as exc:
             raise ServiceError(str(exc)) from exc
 
@@ -906,61 +902,17 @@ def create_app(
         _require_admin()
         payload = request.get_json(silent=True) or {}
         target = str(payload.get("target", "")).strip()
-        source = str(payload.get("source", ""))
-        if source == "branch":
-            try:
-                result = update_service.begin_branch(target)
-            except UpdateError as exc:
-                raise ServiceError(str(exc)) from exc
-            _schedule_restart()
-            return jsonify({"ok": True, "restarting": True, "branch": True, **result})
-        if not target:
-            raise ServiceError("缺少目标版本")
         try:
-            checked = update_service.check(target, source)
-            staged = update_service.begin(checked["target"], source)
-            prepared = update_service.prepare()
-        except UpdateError as exc:
-            raise ServiceError(str(exc)) from exc
-        if prepared["state"] != "prepared":
-            update_service.abort()
-            return jsonify(
-                {
-                    "ok": False,
-                    "state": prepared["state"],
-                    "satellites": prepared["satellites"],
-                    "error": "部分卫星准备失败，已中止",
-                }
-            )
-        try:
-            update_service.commit()
+            result = update_service.apply(target)
         except UpdateError as exc:
             raise ServiceError(str(exc)) from exc
         _schedule_restart()
-        return jsonify(
-            {
-                "ok": True,
-                "restarting": True,
-                "version": staged["version"],
-                "satellites": prepared["satellites"],
-            }
-        )
+        return jsonify({"ok": True, "restarting": True, "branch": True, **result})
 
     @app.post("/api/update/abort")
     def update_abort():
         _require_admin()
         return jsonify(update_service.abort())
-
-    @app.post("/api/update/rollback")
-    def update_rollback():
-        _require_admin()
-        payload = request.get_json(silent=True) or {}
-        try:
-            result = update_service.rollback(str(payload.get("version", "")))
-        except UpdateError as exc:
-            raise ServiceError(str(exc)) from exc
-        _schedule_restart()
-        return jsonify(result)
 
     @app.get("/api/system/overview")
     def api_system_overview():

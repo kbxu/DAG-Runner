@@ -2,406 +2,210 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from dagrunner import __version__
-from dagrunner.server.auth import client_password_hash, store_password
-from dagrunner.database import StateDatabase
-from dagrunner.install import (
-    activate,
-    active_version,
-    resolve_code_dir,
-    tree_hash,
-    versions_dir,
-)
-from dagrunner.server.service import ServiceError
-from dagrunner.server.update import GitSource, UpdateError, make_archive
-from dagrunner.version import compare_versions, is_newer, parse_version
-from dagrunner.server.webapp import create_app
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dagrunner.database import StateDatabase  # noqa: E402
+from dagrunner.package import UpdateError, git_branch_status  # noqa: E402
+from dagrunner.satellite.protocol import SatelliteConfig  # noqa: E402
+from dagrunner.satellite.update import SatelliteUpdater  # noqa: E402
+from dagrunner.server.update import UpdateService  # noqa: E402
+from dagrunner.watchdog import state as watchdog_state  # noqa: E402
 
 
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "tester",
-        "GIT_AUTHOR_EMAIL": "tester@example.com",
-        "GIT_COMMITTER_NAME": "tester",
-        "GIT_COMMITTER_EMAIL": "tester@example.com",
-    }
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
-def _make_git_repo(root: Path, tag: str) -> None:
-    _git(root, "init", "-q")
-    package = root / "dagrunner"
-    package.mkdir()
-    (package / "__init__.py").write_text('__version__ = "0.2.0"\n', encoding="utf-8")
-    (root / "run_server.py").write_text(
-        'print("versioned")\n', encoding="utf-8"
+def _commit(path: Path, name: str, text: str) -> str:
+    (path / name).write_text(text, encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(
+        path,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-m",
+        f"commit {name}",
     )
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "initial")
-    _git(root, "tag", tag)
+    result = _git(path, "rev-parse", "HEAD")
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
 
 
-class VersionTests(unittest.TestCase):
-    def test_parse_and_str(self) -> None:
-        self.assertEqual(str(parse_version("v0.2.0")), "0.2.0")
-        self.assertEqual(str(parse_version("0.2.0-rc.1+build")), "0.2.0-rc.1+build")
-        self.assertIsNone(parse_version("not-a-version"))
+class _FakeExecutions:
+    def __init__(self, active: list[str] | None = None):
+        self._active = list(active or [])
 
-    def test_compare(self) -> None:
-        self.assertEqual(compare_versions("0.1.0", "0.1.0"), 0)
-        self.assertLess(compare_versions("0.1.0", "0.2.0"), 0)
-        self.assertGreater(compare_versions("0.10.0", "0.9.0"), 0)
-
-    def test_prerelease_ordering(self) -> None:
-        self.assertLess(compare_versions("0.2.0-rc1", "0.2.0"), 0)
-        self.assertLess(compare_versions("0.2.0-alpha", "0.2.0-alpha.1"), 0)
-        self.assertLess(compare_versions("0.2.0-alpha.1", "0.2.0-beta"), 0)
-        self.assertTrue(is_newer("0.2.0", "0.2.0-rc1"))
-        self.assertFalse(is_newer("0.1.0", "0.2.0"))
+    def active_run_ids(self) -> list[str]:
+        return list(self._active)
 
 
-class InstallTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self._directory.name)
-        self._previous = os.environ.get("DAGRUNNER_ROOT")
-        os.environ["DAGRUNNER_ROOT"] = str(self.root)
-
-    def tearDown(self) -> None:
-        if self._previous is None:
-            os.environ.pop("DAGRUNNER_ROOT", None)
-        else:
-            os.environ["DAGRUNNER_ROOT"] = self._previous
-        self._directory.cleanup()
-
-    def test_activate_and_resolve(self) -> None:
-        version_dir = versions_dir(self.root) / "0.2.0"
-        version_dir.mkdir(parents=True)
-        activate("0.2.0", self.root)
-        self.assertEqual(active_version(self.root), "0.2.0")
-        self.assertEqual(resolve_code_dir(self.root), version_dir)
-        activate("", self.root)
-        self.assertIsNone(active_version(self.root))
-
-    def test_tree_hash_ignores_caches(self) -> None:
-        source = self.root / "code"
-        (source / "dagrunner").mkdir(parents=True)
-        (source / "dagrunner" / "__init__.py").write_text("x", encoding="utf-8")
-        (source / "dagrunner" / "__pycache__").mkdir()
-        (source / "dagrunner" / "__pycache__" / "x.pyc").write_text("y", encoding="utf-8")
-        first = tree_hash(source)
-        (source / "dagrunner" / "__pycache__" / "x.pyc").write_text("z", encoding="utf-8")
-        self.assertEqual(first, tree_hash(source))
-        (source / "dagrunner" / "__init__.py").write_text("changed", encoding="utf-8")
-        self.assertNotEqual(first, tree_hash(source))
-
-    def test_make_archive_roundtrip(self) -> None:
-        from dagrunner.server.update import extract_archive, strip_single_root
-
-        source = self.root / "code"
-        (source / "dagrunner").mkdir(parents=True)
-        (source / "dagrunner" / "__init__.py").write_text("x", encoding="utf-8")
-        archive = self.root / "out" / "dagrunner-0.2.0.tar.gz"
-        make_archive(source, archive)
-        dest = self.root / "extracted"
-        extract_archive(archive, dest)
-        self.assertTrue((dest / "dagrunner" / "__init__.py").is_file())
-        self.assertEqual(tree_hash(source), tree_hash(dest))
-
-    def test_strip_single_root(self) -> None:
-        from dagrunner.server.update import strip_single_root
-
-        dest = self.root / "staged"
-        (dest / "dagrunner-0.2.0" / "dagrunner").mkdir(parents=True)
-        (dest / "dagrunner-0.2.0" / "run_server.py").write_text("x", encoding="utf-8")
-        strip_single_root(dest)
-        self.assertTrue((dest / "dagrunner").is_dir())
-        self.assertTrue((dest / "run_server.py").is_file())
-        self.assertFalse((dest / "dagrunner-0.2.0").exists())
+class _FakeSchedules:
+    pass
 
 
-class GitSourceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self._directory.name)
-        _make_git_repo(self.root, "v0.2.0")
+class _FakeSatelliteManager:
+    def __init__(self, reply: dict | None = None):
+        self.calls: list[dict] = []
+        self.reply = reply or {"ok": True, "state": "restarting", "updated": True, "message": "ok"}
 
-    def tearDown(self) -> None:
-        self._directory.cleanup()
-
-    def test_list_and_fetch(self) -> None:
-        source = GitSource(self.root, {"remote": "."})
-        self.assertTrue(source.available())
-        self.assertEqual(source.list_versions(), ["0.2.0"])
-        dest = self.root / "staged"
-        package = source.fetch("0.2.0", dest)
-        self.assertEqual(package.version, "0.2.0")
-        self.assertTrue((dest / "dagrunner" / "__init__.py").is_file())
-        self.assertEqual(len(package.sha256), 64)
-        self.assertTrue(package.archive.is_file())
-
-    def test_fetch_unknown_version(self) -> None:
-        source = GitSource(self.root, {"remote": "."})
-        with self.assertRaises(UpdateError):
-            source.fetch("9.9.9", self.root / "staged")
-
-    def test_fetch_populates_version_directory(self) -> None:
-        from dagrunner.install import versions_dir
-
-        source = GitSource(self.root, {"remote": "."})
-        dest = versions_dir(self.root) / "0.2.0"
-        source.fetch("0.2.0", dest)
-        self.assertTrue((dest / "dagrunner" / "__init__.py").is_file())
-        self.assertTrue((dest / "run_server.py").is_file())
-
-
-class UpdateApiTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self._directory.name)
-        _make_git_repo(self.root, "v0.2.0")
-        self._previous = os.environ.get("DAGRUNNER_ROOT")
-        os.environ["DAGRUNNER_ROOT"] = str(self.root)
-        self.database = StateDatabase(self.root / "scheduler.db")
-        store_password(self.database, "admin", "test-password-1234")
-        self.app = create_app(
-            database=self.database,
-            state_dir=self.root / "var",
-            logs_path=self.root / "logs",
-            start_scheduler=False,
-            allow_insecure_remote_login=True,
-            update_config={"source": "git", "git": {"remote": "."}},
+    def sync_satellite_branch(
+        self, alias: str, *, remote: str = "origin", branch: str = "main", expected_sha: str = ""
+    ) -> dict:
+        self.calls.append(
+            {"alias": alias, "remote": remote, "branch": branch, "expected_sha": expected_sha}
         )
-        self.client = self.app.test_client()
-        self.client.post(
-            "/api/auth/login",
-            json={
-                "username": "admin",
-                "password_hash": client_password_hash("test-password-1234"),
-            },
+        return dict(self.reply)
+
+
+class UpdateServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.remote = self.base / "remote.git"
+        self.seed = self.base / "seed"
+        self.root = self.base / "master"
+        self._init_repos()
+        self.db = StateDatabase(self.root / "var" / "scheduler.db")
+
+    def _init_repos(self) -> None:
+        self.remote.mkdir()
+        _git(self.remote, "init", "--bare", "-b", "main")
+        self.seed.mkdir()
+        _git(self.seed, "init", "-b", "main")
+        _git(self.seed, "remote", "add", "origin", str(self.remote))
+        _commit(self.seed, "app.py", "v1\n")
+        _git(self.seed, "push", "-u", "origin", "main")
+        res = _git(self.base, "clone", str(self.remote), str(self.root))
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def _service(self, *, executions=None, satellite_manager=None, root=None) -> UpdateService:
+        return UpdateService(
+            config={"enabled": True, "branch": {"remote": "origin", "name": "main"}},
+            database=self.db,
+            executions=executions or _FakeExecutions(),
+            schedules=_FakeSchedules(),
+            satellite_manager=satellite_manager,
+            root=root or self.root,
         )
-        self.service = self.app.extensions["update_service"]
-        self.executions = self.app.extensions["execution_service"]
-        self.schedules = self.app.extensions["schedule_service"]
 
-    def tearDown(self) -> None:
-        try:
-            if self.service.active:
-                self.service.abort()
-        except Exception:
-            pass
-        self.schedules.shutdown()
-        self.executions.shutdown()
-        if self._previous is None:
-            os.environ.pop("DAGRUNNER_ROOT", None)
-        else:
-            os.environ["DAGRUNNER_ROOT"] = self._previous
-        self._directory.cleanup()
+    def _mark_watchdog_alive(self, root: Path, role: str) -> None:
+        watchdog_state.heartbeat(root, role, watchdog_pid=os.getpid(), status="running")
 
-    def test_status_and_health_include_version(self) -> None:
-        status = self.client.get("/api/update/status").get_json()
-        self.assertEqual(status["current_version"], __version__)
-        health = self.client.get("/health").get_json()
-        self.assertEqual(health["version"], __version__)
+    def test_release_mode_without_git_refuses_update(self) -> None:
+        plain = self.base / "release-install"
+        plain.mkdir()
+        svc = self._service(root=plain)
+        checked = svc.check()
+        self.assertFalse(checked["branch"]["available"])
+        self.assertEqual(checked["branch"]["reason"], "not_git")
+        with self.assertRaises(UpdateError) as ctx:
+            svc.apply()
+        self.assertIn("不是 git 仓库", str(ctx.exception))
 
-    def test_check_git_source(self) -> None:
-        payload = self.client.post(
-            "/api/update/check", json={"target": "0.2.0", "source": "git"}
-        ).get_json()
-        self.assertEqual(payload["source"], "git")
-        self.assertEqual(payload["target"], "0.2.0")
-        self.assertIn("0.2.0", payload["versions"])
+    def test_dirty_tracked_file_refuses_pull(self) -> None:
+        _commit(self.seed, "app.py", "v2\n")
+        _git(self.seed, "push", "origin", "main")
+        (self.root / "app.py").write_text("local edit\n", encoding="utf-8")
+        self._mark_watchdog_alive(self.root, "master")
+        svc = self._service()
+        with self.assertRaises(UpdateError) as ctx:
+            svc.apply()
+        self.assertIn("未提交改动", str(ctx.exception))
+        # Working tree untouched
+        self.assertEqual((self.root / "app.py").read_text(encoding="utf-8"), "local edit\n")
 
-    def test_update_blocked_by_running_run(self) -> None:
-        self.database.create_run("run-1", "wf", ["a"], scope=["a"])
-        response = self.client.post(
-            "/api/update", json={"target": "0.2.0", "source": "git"}
+    def test_requires_live_watchdog(self) -> None:
+        _commit(self.seed, "app.py", "v2\n")
+        _git(self.seed, "push", "origin", "main")
+        svc = self._service()
+        with self.assertRaises(UpdateError) as ctx:
+            svc.apply()
+        self.assertIn("看门狗", str(ctx.exception))
+
+    def test_preflight_blocks_when_tasks_running(self) -> None:
+        _commit(self.seed, "app.py", "v2\n")
+        _git(self.seed, "push", "origin", "main")
+        self._mark_watchdog_alive(self.root, "master")
+        svc = self._service(executions=_FakeExecutions(active=["run_1"]))
+        with self.assertRaises(UpdateError) as ctx:
+            svc.apply()
+        self.assertIn("run_1", str(ctx.exception))
+
+    def test_apply_pulls_syncs_online_satellites_and_requests_restart(self) -> None:
+        new_sha = _commit(self.seed, "app.py", "v2\n")
+        _git(self.seed, "push", "origin", "main")
+        self._mark_watchdog_alive(self.root, "master")
+
+        self.db.upsert_satellite(
+            SatelliteConfig(alias="sat-online", status="online", agent_version="0.1.0")
         )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("运行", response.get_json()["error"])
+        self.db.set_satellite_status("sat-online", "online", agent_version="0.1.0")
+        self.db.upsert_satellite(
+            SatelliteConfig(alias="sat-offline", status="offline", agent_version="0.1.0")
+        )
+        sat_mgr = _FakeSatelliteManager()
+        svc = self._service(satellite_manager=sat_mgr)
 
-    def test_begin_stages_and_blocks_new_runs(self) -> None:
-        from dagrunner.install import versions_dir
-
-        staged = self.service.begin("0.2.0", "git")
-        self.assertEqual(staged["version"], "0.2.0")
-        staged_dir = versions_dir(self.root) / "0.2.0"
-        self.assertTrue((staged_dir / "run_server.py").is_file())
-        self.assertTrue(self.service.active)
-        with self.assertRaises(ServiceError):
-            self.executions.start_run("wf")
-        prepared = self.service.prepare()
-        self.assertEqual(prepared["state"], "prepared")
-        aborted = self.service.abort()
-        self.assertEqual(aborted["state"], "aborted")
-        self.assertFalse(self.service.active)
-
-    def test_begin_rejects_same_version(self) -> None:
-        with self.assertRaises(UpdateError):
-            self.service.begin(__version__, "git")
-
-    def test_commit_requires_prepared_state(self) -> None:
-        with self.assertRaises(UpdateError):
-            self.service.commit()
-
-    def test_commit_marks_committing_and_spawns_watchdog(self) -> None:
-        from unittest import mock
-
-        self.service.begin("0.2.0", "git")
-        self.service.prepare()
-        with mock.patch.object(self.service, "_spawn_restart") as spawn:
-            result = self.service.commit()
+        result = svc.apply(expected_sha=new_sha)
+        self.assertTrue(result["ok"])
         self.assertTrue(result["restarting"])
-        self.assertEqual(self.service.status()["state"], "committing")
-        spawn.assert_called_once()
-        args = spawn.call_args[0]
-        self.assertEqual(args[0], "master")
-        self.assertEqual(args[1], "0.2.0")
-
-    def test_rollback_spawns_watchdog(self) -> None:
-        from unittest import mock
-
-        self.service.begin("0.2.0", "git")
-        with mock.patch.object(self.service, "_spawn_restart") as spawn:
-            result = self.service.rollback("0.1.0")
-        self.assertTrue(result["restarting"])
-        spawn.assert_called_once()
-        self.assertEqual(spawn.call_args[0][1], "0.1.0")
-
-    def test_commit_hands_off_to_live_watchdog(self) -> None:
-        from datetime import datetime
-        from unittest import mock
-
-        from dagrunner.watchdog import state as watchdog_state
-
-        watchdog_state.update_state(
-            self.root,
-            "master",
-            watchdog_pid=os.getpid(),
-            last_heartbeat=datetime.now().astimezone().isoformat(timespec="seconds"),
+        self.assertEqual(result["sha"], new_sha)
+        self.assertEqual((self.root / "app.py").read_text(encoding="utf-8"), "v2\n")
+        self.assertEqual(
+            watchdog_state.get_intent(self.root, "master"),
+            watchdog_state.INTENT_RESTART,
         )
-        self.service.begin("0.2.0", "git")
-        self.service.prepare()
-        with mock.patch.object(self.service, "_spawn_restart") as spawn:
-            result = self.service.commit()
-        spawn.assert_not_called()
-        self.assertTrue(result["restarting"])
-        handoff = watchdog_state.read_handoff(self.root)
-        self.assertIsNotNone(handoff)
-        assert handoff is not None
-        self.assertEqual(handoff["version"], "0.2.0")
-        self.assertEqual(self.service.status()["state"], "committing")
+        # Only online satellite was triggered; offline was skipped
+        self.assertEqual(len(sat_mgr.calls), 1)
+        self.assertEqual(sat_mgr.calls[0]["alias"], "sat-online")
+        self.assertEqual(result["satellites"]["sat-online"]["state"], "restarting")
+        self.assertEqual(result["satellites"]["sat-offline"]["state"], "skipped")
 
+        # On next startup, recover() transitions restarting -> done
+        svc2 = self._service()
+        svc2.recover()
+        self.assertEqual(svc2.status()["state"], "done")
 
-class RestartHelpersTests(unittest.TestCase):
-    def test_process_alive(self) -> None:
-        from unittest import mock
+    def test_satellite_updater_sync_branch(self) -> None:
+        sat_root = self.base / "sat"
+        res = _git(self.base, "clone", str(self.remote), str(sat_root))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        _commit(self.seed, "app.py", "v3\n")
+        _git(self.seed, "push", "origin", "main")
+        self._mark_watchdog_alive(sat_root, "satellite")
 
-        from dagrunner.watchdog import restart
-
-        self.assertTrue(restart._process_alive(os.getpid()))
-        # Windows-safe implementation lives in watchdog.launch.
-        with mock.patch("dagrunner.watchdog.launch.process_alive", return_value=True) as alive:
-            self.assertTrue(restart._process_alive(123))
-            alive.assert_called_once_with(123)
-        with mock.patch("dagrunner.watchdog.launch.process_alive", return_value=False):
-            self.assertFalse(restart._process_alive(123))
-        self.assertFalse(restart._process_alive(-1))
-
-    def test_port_free(self) -> None:
-        from unittest import mock
-
-        from dagrunner.watchdog import restart
-
-        with mock.patch.object(restart.socket, "socket") as sock:
-            sock.return_value.__enter__.return_value.connect_ex.return_value = 0
-            self.assertFalse(restart._port_free("127.0.0.1", 7119))
-            sock.return_value.__enter__.return_value.connect_ex.return_value = 1
-            self.assertTrue(restart._port_free("127.0.0.1", 7119))
-
-
-class SatelliteGraceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self._directory.name)
-
-    def tearDown(self) -> None:
-        self._directory.cleanup()
-
-    def test_recover_grace_only_while_committing(self) -> None:
-        import time
-
-        from dagrunner.install import write_state
-        from dagrunner.satellite.update import mark_update_done, recover_grace
-
-        self.assertEqual(recover_grace(self.root, 10), 0.0)
-        write_state({"state": "committing", "version": "0.2.0"}, self.root)
-        self.assertGreater(recover_grace(self.root, 10), time.monotonic())
-        mark_update_done(self.root)
-        self.assertEqual(recover_grace(self.root, 10), 0.0)
-
-
-class SatelliteHandoffTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self._directory.name)
-
-    def tearDown(self) -> None:
-        self._directory.cleanup()
-
-    def _updater(self):  # noqa: ANN201 - test helper
-        from dagrunner.satellite.update import SatelliteUpdater
-
-        return SatelliteUpdater(
-            root=self.root,
-            alias="moon",
-            master_url="https://127.0.0.1:7120",
-            token="token",
+        updater = SatelliteUpdater(root=sat_root)
+        reply = updater.sync_branch()
+        self.assertTrue(reply["ok"])
+        self.assertTrue(reply["updated"])
+        self.assertEqual(reply["state"], "restarting")
+        self.assertEqual((sat_root / "app.py").read_text(encoding="utf-8"), "v3\n")
+        self.assertEqual(
+            watchdog_state.get_intent(sat_root, "satellite"),
+            watchdog_state.INTENT_RESTART,
         )
-
-    def test_commit_falls_back_without_watchdog(self) -> None:
-        from unittest import mock
-
-        updater = self._updater()
-        with mock.patch.object(updater, "_spawn_restart") as spawn:
-            result = updater.commit("0.2.0")
-        spawn.assert_called_once()
-        self.assertEqual(spawn.call_args[0][0], "0.2.0")
-        self.assertTrue(result["restarting"])
-
-    def test_commit_hands_off_with_live_watchdog(self) -> None:
-        from datetime import datetime
-        from unittest import mock
-
-        from dagrunner.install import read_state
-        from dagrunner.watchdog import state as watchdog_state
-
-        watchdog_state.update_state(
-            self.root,
-            "satellite",
-            watchdog_pid=os.getpid(),
-            last_heartbeat=datetime.now().astimezone().isoformat(timespec="seconds"),
-        )
-        updater = self._updater()
-        with mock.patch.object(updater, "_spawn_restart") as spawn:
-            updater.commit("0.2.0")
-        spawn.assert_not_called()
-        handoff = watchdog_state.read_handoff(self.root)
-        self.assertIsNotNone(handoff)
-        assert handoff is not None
-        self.assertEqual(handoff["version"], "0.2.0")
-        self.assertEqual(read_state(self.root)["state"], "committing")
+        # Already up to date on second run
+        reply2 = updater.sync_branch()
+        self.assertTrue(reply2["ok"])
+        self.assertFalse(reply2["updated"])
+        self.assertEqual(reply2["state"], "up_to_date")
 
 
 if __name__ == "__main__":

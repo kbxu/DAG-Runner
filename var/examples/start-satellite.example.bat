@@ -23,20 +23,9 @@ goto :eof
 :direct
 set "LOG_OUT=%ROOT%\var\logs\satellite.out.log"
 set "LOG_ERR=%ROOT%\var\logs\satellite.err.log"
-set "CURRENT="
-if exist "%ROOT%\var\current" set /p "CURRENT=" < "%ROOT%\var\current"
 echo [dagrunner] root:    %ROOT%
 echo [dagrunner] log out: %LOG_OUT%
 echo [dagrunner] log err: %LOG_ERR%
-if defined CURRENT (
-  if exist "%ROOT%\var\versions\%CURRENT%\run_satellite.py" (
-    echo [dagrunner] version: %CURRENT%
-    echo [dagrunner] starting, this window stays open while the satellite runs ...
-    "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_tee.py" "%LOG_OUT%" "%LOG_ERR%" "%DAGR_PYTHON%" "%ROOT%\var\versions\%CURRENT%\run_satellite.py" --config "%ROOT%\var\satellite.yaml"
-    if errorlevel 1 pause
-    goto :eof
-  )
-)
 echo [dagrunner] starting, this window stays open while the satellite runs ...
 "%DAGR_PYTHON%" "%ROOT%\run_tee.py" "%LOG_OUT%" "%LOG_ERR%" "%DAGR_PYTHON%" -m dagrunner.satellite --config "%ROOT%\var\satellite.yaml"
 if errorlevel 1 pause

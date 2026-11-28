@@ -82,13 +82,22 @@ class BranchTests(unittest.TestCase):
         again = git_branch_sync(self.clone)
         self.assertFalse(again["updated"])
 
-    def test_dirty_worktree_refuses(self) -> None:
+    def test_dirty_tracked_file_refuses(self) -> None:
         _commit(self.seed, "c.txt", "three")
         _git(self.seed, "push", "origin", "main")
-        (self.clone / "untracked.txt").write_text("x", encoding="utf-8")
+        (self.clone / "a.txt").write_text("modified locally", encoding="utf-8")
         self.assertTrue(git_branch_status(self.clone)["dirty"])
         with self.assertRaises(UpdateError):
             git_branch_sync(self.clone)
+
+    def test_untracked_file_does_not_block(self) -> None:
+        _commit(self.seed, "c2.txt", "three-two")
+        _git(self.seed, "push", "origin", "main")
+        (self.clone / "untracked.txt").write_text("local note", encoding="utf-8")
+        info = git_branch_status(self.clone)
+        self.assertFalse(info["dirty"])
+        result = git_branch_sync(self.clone)
+        self.assertTrue(result["updated"])
 
     def test_local_ahead_refuses(self) -> None:
         _commit(self.seed, "d.txt", "four")

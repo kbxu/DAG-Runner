@@ -22,10 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock
 
-from flask import Flask, Response, jsonify, request, send_file
+from flask import Flask, Response, jsonify, request
 
 from ..database import BaseStateDatabase, local_now
-from ..install import tree_hash, versions_dir
 from .crypto import (
     ALIAS_HEADER,
     AUTH_HEADER,
@@ -56,26 +55,19 @@ from .protocol import (
     PATH_PING,
     PATH_REGISTER,
     PATH_STREAM,
-    PATH_UPDATE_COMMIT,
-    PATH_UPDATE_PACKAGE,
-    PATH_UPDATE_PREPARE,
     PATH_UPDATE_REPORT,
-    PATH_UPDATE_ROLLBACK,
-    PATH_UPDATE_STATUS,
+    PATH_UPDATE_SYNC,
     ROUTE_JOB,
     SSE_EVENT_CANCEL,
     SSE_EVENT_JOB,
     SSE_EVENT_PING,
-    SSE_EVENT_UPDATE_COMMIT,
-    SSE_EVENT_UPDATE_PREPARE,
-    SSE_EVENT_UPDATE_ROLLBACK,
+    SSE_EVENT_UPDATE_SYNC,
     VERSION_MISMATCH,
     JobSpec,
     SatelliteConfig,
     sse_event,
 )
 from ..scripting import ExecutionResult
-from ..package import UpdateError, archive_name
 
 
 STREAM_STALE_SECONDS = 90
@@ -304,70 +296,40 @@ class SatelliteManager:
         }
 
     # ------------------------------------------------------------------
-    # Update distribution
+    # Update distribution (git pull + watchdog restart)
     # ------------------------------------------------------------------
 
-    def _package_metadata(self, version: str) -> dict:
-        meta = self._package_meta.get(version)
-        if meta is None:
-            staged = versions_dir(self.root) / version
-            archive = self.root / "var" / "updates" / "archives" / archive_name(version)
-            if not staged.is_dir():
-                raise UpdateError(f"版本 {version} 尚未暂存")
-            meta = {
-                "version": version,
-                "sha256": tree_hash(staged),
-                "size": archive.stat().st_size if archive.is_file() else 0,
-                "package_path": archive_name(version),
-                "url": "",
-            }
-            self._package_meta[version] = meta
-        return meta
-
-    def prepare_update(self, alias: str, package: dict) -> dict:
-        """Ask a satellite to download and stage ``package``."""
-        payload = dict(package)
-        payload.setdefault("package_path", archive_name(str(payload.get("version", ""))))
+    def sync_satellite_branch(
+        self,
+        alias: str,
+        *,
+        remote: str = "origin",
+        branch: str = "main",
+        expected_sha: str = "",
+    ) -> dict:
+        """Ask a connected satellite to check cleanliness, pull fast-forward, and restart."""
+        payload = {
+            "remote": remote,
+            "branch": branch,
+            "expected_sha": expected_sha,
+        }
         stream = self._get_stream(alias)
         if stream is not None:
             self._update_reports.pop(alias, None)
             event = Event()
             self._update_events[alias] = event
-            stream.queue.put(sse_event(SSE_EVENT_UPDATE_PREPARE, payload))
-            if not event.wait(self.update_timeout):
-                raise SatelliteError("卫星更新准备超时")
+            stream.queue.put(sse_event(SSE_EVENT_UPDATE_SYNC, payload))
+            if not event.wait(min(self.update_timeout, 60.0)):
+                raise SatelliteError("卫星更新响应超时")
             report = self._update_reports.get(alias) or {}
-            state = str(report.get("state", ""))
-            if state not in ("ready", "preparing"):
-                raise SatelliteError(f"卫星更新准备失败: {report.get('message', '') or state}")
+            if not report.get("ok", False):
+                raise SatelliteError(str(report.get("message") or "卫星更新失败"))
             return report
         config = self.database.get_satellite(alias)
         if config is None:
             raise SatelliteError(f"卫星不存在: {alias}")
         client = self._forward_client(config)
-        return client.request("POST", PATH_UPDATE_PREPARE, json_body=payload)
-
-    def commit_update(self, alias: str, version: str) -> dict:
-        stream = self._get_stream(alias)
-        if stream is not None:
-            stream.queue.put(sse_event(SSE_EVENT_UPDATE_COMMIT, {"version": version}))
-            return {"ok": True}
-        config = self.database.get_satellite(alias)
-        if config is None:
-            raise SatelliteError(f"卫星不存在: {alias}")
-        client = self._forward_client(config)
-        return client.request("POST", PATH_UPDATE_COMMIT, json_body={"version": version})
-
-    def rollback_update(self, alias: str, version: str) -> dict:
-        stream = self._get_stream(alias)
-        if stream is not None:
-            stream.queue.put(sse_event(SSE_EVENT_UPDATE_ROLLBACK, {"version": version}))
-            return {"ok": True}
-        config = self.database.get_satellite(alias)
-        if config is None:
-            raise SatelliteError(f"卫星不存在: {alias}")
-        client = self._forward_client(config)
-        return client.request("POST", PATH_UPDATE_ROLLBACK, json_body={"version": version})
+        return client.request("POST", PATH_UPDATE_SYNC, json_body=payload)
 
     def report_update(self, alias: str, payload: dict) -> dict:
         self._update_reports[alias] = dict(payload)
@@ -375,16 +337,6 @@ class SatelliteManager:
         if event is not None:
             event.set()
         return {"ok": True}
-
-    def satellite_update_status(self, alias: str) -> dict:
-        stream = self._get_stream(alias)
-        if stream is not None:
-            return self._update_reports.get(alias, {})
-        config = self.database.get_satellite(alias)
-        if config is None:
-            raise SatelliteError(f"卫星不存在: {alias}")
-        client = self._forward_client(config)
-        return client.request("GET", PATH_UPDATE_STATUS)
 
     def cancel_job(self, job_id: str) -> None:
         with self._jobs_lock:
@@ -797,6 +749,7 @@ def create_satellite_master_app(manager: SatelliteManager) -> Flask:
                     "error": manager.version_mismatch_message(agent_version),
                     "server_version": manager.agent_version,
                     "agent_version": agent_version,
+                    "branch": getattr(manager, "branch_config", {"remote": "origin", "name": "main"}),
                 }
             ), 409
         manager.database.set_satellite_status(
@@ -905,33 +858,6 @@ def create_satellite_master_app(manager: SatelliteManager) -> Flask:
         if runtime is not None:
             runtime.cancel_requested = True
         return jsonify({"ok": True})
-
-    @app.get(PATH_UPDATE_PACKAGE)
-    @require_auth
-    def update_package():
-        version = str(request.args.get("version", "")).strip()
-        if not version:
-            return jsonify({"ok": False, "error": "missing version"}), 400
-        archive = manager.root / "var" / "updates" / "archives" / archive_name(version)
-        if not archive.is_file():
-            return jsonify({"ok": False, "error": "package not staged"}), 404
-        return send_file(
-            archive,
-            mimetype="application/gzip",
-            as_attachment=True,
-            download_name=archive.name,
-        )
-
-    @app.get(PATH_UPDATE_STATUS)
-    @require_auth
-    def update_status():
-        version = str(request.args.get("version", "")).strip()
-        if not version:
-            return jsonify({"ok": False, "error": "missing version"}), 400
-        try:
-            return jsonify({"ok": True, **manager._package_metadata(version)})
-        except UpdateError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 404
 
     @app.post(PATH_UPDATE_REPORT)
     @require_auth

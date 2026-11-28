@@ -1,88 +1,17 @@
-"""Versioned package archive helpers shared by master and satellite updates.
+"""Git branch inspection and fast-forward update helpers.
 
-Both sides of an update exchange the same artifact: a ``dagrunner-<version>.tar.gz``
-plus a sha256 tree hash. Keeping extraction / packing here means the satellite
-agent does not have to depend on the master service package.
+Online updates are only supported for ``git clone`` deployments. Non-git
+installations (such as extracted release archives) report ``available=False``
+and refuse online updates.
 """
 from __future__ import annotations
 
-import os
-import shutil
 import subprocess
-import tarfile
-import zipfile
 from pathlib import Path
-
-from .install import IGNORE_NAMES, IGNORE_SUFFIXES
 
 
 class UpdateError(RuntimeError):
     pass
-
-
-def archive_name(version: str) -> str:
-    return f"dagrunner-{version}.tar.gz"
-
-
-def _check_member(name: str) -> None:
-    normalized = str(name).replace("\\", "/")
-    if normalized.startswith("/") or any(part == ".." for part in normalized.split("/")):
-        raise UpdateError(f"压缩包包含非法路径: {name}")
-
-
-def extract_archive(archive: Path, dest: Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
-    suffix = archive.suffix.lower()
-    if suffix in (".gz", ".tgz", ".tar") or archive.name.endswith(".tar.gz"):
-        with tarfile.open(archive, "r:*") as tar:
-            for member in tar.getmembers():
-                _check_member(member.name)
-            tar.extractall(dest)
-        return
-    if suffix == ".zip":
-        with zipfile.ZipFile(archive) as bundle:
-            for name in bundle.namelist():
-                _check_member(name)
-            bundle.extractall(dest)
-        return
-    raise UpdateError(f"不支持的压缩格式: {archive.name}")
-
-
-def make_archive(source: Path, dest: Path) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
-    with tarfile.open(tmp, "w:gz") as tar:
-        for path in sorted(source.rglob("*")):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(source)
-            if any(part in IGNORE_NAMES for part in relative.parts):
-                continue
-            if path.name.endswith(IGNORE_SUFFIXES):
-                continue
-            tar.add(path, arcname=relative.as_posix())
-    os.replace(tmp, dest)
-    return dest
-
-
-def strip_single_root(dest: Path) -> None:
-    """Flatten ``dest/<single-dir>/...`` to ``dest/...``.
-
-    Source distributions from setuptools wrap the project in one top-level
-    directory (``dagrunner-<version>/``); ``git archive`` does not.
-    """
-    entries = list(dest.iterdir())
-    if len(entries) != 1 or not entries[0].is_dir():
-        return
-    root = entries[0]
-    for child in list(root.iterdir()):
-        shutil.move(str(child), str(dest / child.name))
-    root.rmdir()
-
-
-# ---------------------------------------------------------------------------
-# Git branch tracking (development / git-clone deployments)
-# ---------------------------------------------------------------------------
 
 
 def _git(root: Path, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -105,7 +34,7 @@ def _is_git_clone(root: Path) -> bool:
 
 
 def git_branch_capability(root: str | Path) -> dict:
-    """Cheap check used by satellites to advertise branch-update support."""
+    """Cheap check used by satellites to advertise git-update support."""
     root = Path(root)
     if not _is_git_clone(root):
         return {"available": False, "reason": "not_git"}
@@ -176,7 +105,9 @@ def git_branch_status(root: str | Path, remote: str = "origin", name: str = "mai
             info["behind"] = int(right.strip())
         except ValueError:
             pass
-    status = _git(root, "status", "--porcelain", timeout=15.0)
+    # Only tracked modifications/staged changes block updates; untracked files
+    # (e.g. local notes) are ignored unless git merge itself detects a conflict.
+    status = _git(root, "status", "--porcelain", "--untracked-files=no", timeout=15.0)
     info["dirty"] = bool(status.returncode == 0 and status.stdout.strip())
     log = _git(
         root,
@@ -204,15 +135,18 @@ def git_branch_sync(
 ) -> dict:
     """Fast-forward the working tree to ``remote/name``.
 
-    Requires a clean worktree and a purely divergent-free history; anything else
+    Requires clean tracked files and no local unpushed commits; anything else
     raises :class:`UpdateError` without touching the checkout.
     """
     root = Path(root)
     info = git_branch_status(root, remote=remote, name=name)
     if not info["available"]:
-        raise UpdateError(f"分支更新不可用：{info['reason']}")
+        reason = info["reason"]
+        if reason == "not_git":
+            raise UpdateError("当前目录不是 git 仓库，不支持在线更新（发布包安装请手动替换代码）")
+        raise UpdateError(f"分支更新不可用：{reason}")
     if info["dirty"]:
-        raise UpdateError("工作区有未提交改动，无法执行分支更新")
+        raise UpdateError("工作区有未提交改动，不执行更新")
     if info["ahead"] > 0:
         raise UpdateError(
             f"本地有 {info['ahead']} 个未推送提交，无法直接快进；请先处理本地提交"

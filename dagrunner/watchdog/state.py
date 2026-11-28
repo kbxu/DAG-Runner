@@ -1,19 +1,14 @@
 """Control files for the watchdog: runtime state, intent, singleton lock.
 
-Three files coordinate the supervisor, the supervised service and the update
-flow:
+Two files coordinate the supervisor and the supervised service:
 
 ``var/watchdog-<role>.json``
     Runtime status written by the watchdog (pid, child pid, counters) plus the
-    ``intent`` flag written by the service before it exits on purpose.
+    ``intent`` flag written by the service before it exits on purpose
+    (``stop`` for manual shutdown, ``restart`` for planned restart after update).
 
 ``var/locks/watchdog-<role>.lock``
     Singleton lock. Only one watchdog per role may run at a time.
-
-``var/updates/handoff.json``
-    Optional update handoff request. When present while the service exits with
-    ``intent=stop``, the watchdog switches to the requested version instead of
-    restarting the old one.
 """
 from __future__ import annotations
 
@@ -27,9 +22,7 @@ from typing import Iterator
 
 INTENT_RUN = "run"
 INTENT_STOP = "stop"
-INTENT_UPDATE = "update"
-
-HANDOFF_TTL_SECONDS = 600.0
+INTENT_RESTART = "restart"
 
 
 class WatchdogError(RuntimeError):
@@ -50,10 +43,6 @@ def state_path(root: str | Path, role: str) -> Path:
 
 def lock_path(root: str | Path, role: str) -> Path:
     return var_dir(root) / "locks" / f"watchdog-{role}.lock"
-
-
-def handoff_path(root: str | Path) -> Path:
-    return var_dir(root) / "updates" / "handoff.json"
 
 
 def _now() -> str:
@@ -103,11 +92,11 @@ def update_state(root: str | Path, role: str, **fields: object) -> dict:
 
 def get_intent(root: str | Path, role: str) -> str:
     value = str(read_state(root, role).get("intent") or INTENT_RUN)
-    return value if value in (INTENT_RUN, INTENT_STOP, INTENT_UPDATE) else INTENT_RUN
+    return value if value in (INTENT_RUN, INTENT_STOP, INTENT_RESTART) else INTENT_RUN
 
 
 def set_intent(root: str | Path, role: str, intent: str, *, pid: int | None = None) -> None:
-    if intent not in (INTENT_RUN, INTENT_STOP, INTENT_UPDATE):
+    if intent not in (INTENT_RUN, INTENT_STOP, INTENT_RESTART):
         raise WatchdogError(f"invalid watchdog intent: {intent!r}")
     fields: dict[str, object] = {"intent": intent}
     if pid is not None:
@@ -116,8 +105,13 @@ def set_intent(root: str | Path, role: str, intent: str, *, pid: int | None = No
 
 
 def request_stop(root: str | Path, role: str, *, pid: int | None = None) -> None:
-    """Tell the watchdog that the next child exit is intentional."""
+    """Tell the watchdog that the next child exit is an intentional stop."""
     set_intent(root, role, INTENT_STOP, pid=pid)
+
+
+def request_restart(root: str | Path, role: str, *, pid: int | None = None) -> None:
+    """Tell the watchdog to immediately restart the child after it exits."""
+    set_intent(root, role, INTENT_RESTART, pid=pid)
 
 
 def heartbeat(root: str | Path, role: str, **fields: object) -> dict:
@@ -200,94 +194,3 @@ def watchdog_lock(root: str | Path, role: str) -> Iterator[None]:
         except OSError:
             pass
         handle.close()
-
-
-# -- update handoff ---------------------------------------------------------
-
-
-def write_handoff(
-    root: str | Path,
-    *,
-    action: str = "switch",
-    version: str = "",
-    previous: str = "",
-    ref: str = "",
-    remote: str = "",
-    expected_sha: str = "",
-    requested_by: int = 0,
-) -> dict:
-    payload = {
-        "action": str(action or "switch"),
-        "version": str(version or ""),
-        "previous": str(previous or ""),
-        "ref": str(ref or ""),
-        "remote": str(remote or ""),
-        "expected_sha": str(expected_sha or ""),
-        "requested_by": int(requested_by or 0),
-        "requested_at": _now(),
-    }
-    path = handoff_path(root)
-    _atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-    return payload
-
-
-def read_handoff(root: str | Path, *, ttl: float = HANDOFF_TTL_SECONDS) -> dict | None:
-    """Return a fresh handoff request, or ``None`` when absent or expired."""
-    path = handoff_path(root)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    if data.get("action") == "sync_branch":
-        if not data.get("ref"):
-            return None
-    elif not data.get("version"):
-        return None
-    try:
-        stamp = datetime.fromisoformat(str(data.get("requested_at") or ""))
-    except ValueError:
-        return None
-    age = (datetime.now().astimezone() - stamp).total_seconds()
-    if age > ttl or age < -60.0:
-        return None
-    return data
-
-
-def clear_handoff(root: str | Path) -> None:
-    try:
-        handoff_path(root).unlink()
-    except OSError:
-        pass
-
-
-def record_update_result(
-    root: str | Path,
-    *,
-    status: str,
-    version: str = "",
-    error: str = "",
-) -> None:
-    """Persist the watchdog outcome into ``var/updates/state.json``.
-
-    The server's :meth:`UpdateService.recover` reads this on startup to move a
-    pending ``committing`` state to done / failed / rolled_back.
-    """
-    from ..install import read_state as read_install_state
-    from ..install import write_state as write_install_state
-
-    state = read_install_state(root)
-    if not isinstance(state, dict):
-        state = {}
-    state["restart"] = {
-        "role": "master",
-        "status": str(status),
-        "version": str(version or ""),
-        "error": str(error or ""),
-        "updated": _now(),
-    }
-    try:
-        write_install_state(state, root)
-    except OSError:
-        pass

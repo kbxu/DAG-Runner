@@ -36,18 +36,17 @@ from dagrunner.watchdog.launch import (  # noqa: E402
     terminate_tree,
 )
 from dagrunner.watchdog.state import (  # noqa: E402
+    INTENT_RESTART,
     INTENT_RUN,
     INTENT_STOP,
     WatchdogLocked,
-    clear_handoff,
     get_intent,
     is_active,
-    read_handoff,
+    request_restart,
     request_stop,
     set_intent,
     update_state,
     watchdog_lock,
-    write_handoff,
 )
 from dagrunner.watchdog.supervisor import (  # noqa: E402
     EXIT_OK,
@@ -99,7 +98,6 @@ def make_settings(root: Path, **overrides) -> Settings:
         alert_after=0.05,
         unhealthy_after=0.1,
         stop_timeout=0.1,
-        handoff_wait=0.02,
         alert_to=("ops@example.com",),
     )
     values.update(overrides)
@@ -173,23 +171,9 @@ class StateTests(TempDirTestCase):
         )
         self.assertFalse(is_active(self.root, "master", interval=5.0))
 
-    def test_handoff_ttl_and_clear(self) -> None:
-        write_handoff(self.root, version="9.9.9", previous="0.1.0")
-        handoff = read_handoff(self.root)
-        self.assertIsNotNone(handoff)
-        assert handoff is not None
-        self.assertEqual(handoff["version"], "9.9.9")
-        self.assertEqual(handoff["previous"], "0.1.0")
-
-        path = self.root / "var" / "updates" / "handoff.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["requested_at"] = "2020-01-01T00:00:00+08:00"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        self.assertIsNone(read_handoff(self.root))
-
-        write_handoff(self.root, version="1.0.0")
-        clear_handoff(self.root)
-        self.assertIsNone(read_handoff(self.root))
+    def test_request_restart_sets_intent(self) -> None:
+        request_restart(self.root, "master", pid=12345)
+        self.assertEqual(get_intent(self.root, "master"), INTENT_RESTART)
 
     def test_lock_is_exclusive(self) -> None:
         cm = watchdog_lock(self.root, "master")
@@ -527,38 +511,34 @@ class SupervisorTests(TempDirTestCase):
         self.assertEqual(result, [EXIT_OK])
         self.assertEqual(len(self.spawned), 1)
 
-    def test_handoff_switches_version_and_clears_request(self) -> None:
+    def test_request_restart_relaunches_immediately(self) -> None:
         self.spawned = []
-        versions: list[str] = []
 
-        def spawner(version: str = "") -> FakeProc:
-            versions.append(version)
+        def spawner() -> FakeProc:
             proc = FakeProc(code=None)
             self.spawned.append(proc)
             return proc
 
         self._spawner = spawner
-        write_handoff(self.root, version="9.9.9", previous="0.1.0")
         notifier = FakeNotifier()
         watchdog = self._watchdog(probe=lambda: (True, ""), notifier=notifier)
         result, thread = self._run_async(watchdog)
-        self.assertTrue(wait_for(lambda: len(self.spawned) >= 1))
-        set_intent(self.root, "master", INTENT_STOP)
+        self.assertTrue(wait_for(lambda: len(self.spawned) == 1))
+        request_restart(self.root, "master")
         self.spawned[0].code = 0
-        self.assertTrue(wait_for(lambda: "9.9.9" in versions))
+        self.assertTrue(wait_for(lambda: len(self.spawned) >= 2))
         watchdog.shutdown()
         thread.join(timeout=5.0)
         self.assertFalse(thread.is_alive())
-        self.assertIsNone(read_handoff(self.root))
-        self.assertEqual(get_intent(self.root, "master"), "run")
-        self.assertIn("9.9.9", (event.version for event in notifier.events))
+        self.assertEqual(get_intent(self.root, "master"), INTENT_RUN)
+        self.assertIn("update_ok", [event.action for event in notifier.events])
         self.assertEqual(result, [EXIT_OK])
 
     def test_unhealthy_threshold_restarts_and_alerts(self) -> None:
         self.spawned = []
         healthy = {"value": True}
 
-        def spawner(version: str = "") -> FakeProc:
+        def spawner() -> FakeProc:
             proc = FakeProc(code=None)
             self.spawned.append(proc)
             return proc
@@ -583,109 +563,9 @@ class SupervisorTests(TempDirTestCase):
         self.assertIn("restarted", actions)
         self.assertEqual(result, [EXIT_OK])
 
-    def test_sync_branch_handoff_success(self) -> None:
-        from unittest import mock
-
-        from dagrunner.install import read_state
-
-        spawned: list[FakeProc] = []
-
-        def spawner(version: str = "") -> FakeProc:
-            proc = FakeProc(code=None)
-            spawned.append(proc)
-            return proc
-
-        self._spawner = spawner
-        notifier = FakeNotifier()
-        watchdog = self._watchdog(probe=lambda: (True, ""), notifier=notifier)
-        result, thread = self._run_async(watchdog)
-        self.assertTrue(wait_for(lambda: len(spawned) >= 1))
-        write_handoff(self.root, action="sync_branch", ref="main")
-        set_intent(self.root, "master", INTENT_STOP)
-        with mock.patch(
-            "dagrunner.watchdog.supervisor.git_branch_sync",
-            return_value={"updated": True, "new_sha": "a" * 40},
-        ) as sync:
-            spawned[0].code = 0
-            self.assertTrue(wait_for(lambda: read_handoff(self.root) is None))
-            sync.assert_called_once()
-        self.assertTrue(
-            wait_for(lambda: any(e.action == "update_ok" for e in notifier.events)),
-            [event.action for event in notifier.events],
-        )
-        self.assertEqual(read_state(self.root)["restart"]["status"], "running")
-        watchdog.shutdown()
-        thread.join(timeout=5.0)
-        self.assertEqual(result, [EXIT_OK])
-
-    def test_sync_branch_handoff_failure_relaunches_old_code(self) -> None:
-        from unittest import mock
-
-        from dagrunner.install import read_state
-        from dagrunner.package import UpdateError
-
-        spawned: list[FakeProc] = []
-
-        def spawner(version: str = "") -> FakeProc:
-            proc = FakeProc(code=None)
-            spawned.append(proc)
-            return proc
-
-        self._spawner = spawner
-        notifier = FakeNotifier()
-        watchdog = self._watchdog(probe=lambda: (True, ""), notifier=notifier)
-        result, thread = self._run_async(watchdog)
-        self.assertTrue(wait_for(lambda: len(spawned) >= 1))
-        write_handoff(self.root, action="sync_branch", ref="main")
-        set_intent(self.root, "master", INTENT_STOP)
-        with mock.patch(
-            "dagrunner.watchdog.supervisor.git_branch_sync",
-            side_effect=UpdateError("工作区有未提交改动"),
-        ):
-            spawned[0].code = 0
-            self.assertTrue(wait_for(lambda: len(spawned) >= 2))
-        self.assertIsNone(read_handoff(self.root))
-        self.assertTrue(
-            wait_for(lambda: any(e.action == "update_failed" for e in notifier.events))
-        )
-        self.assertEqual(read_state(self.root)["restart"]["status"], "failed")
-        watchdog.shutdown()
-        thread.join(timeout=5.0)
-        self.assertEqual(result, [EXIT_OK])
-
-    def test_late_handoff_is_still_consumed(self) -> None:
-        self.spawned = []
-        versions: list[str] = []
-
-        def spawner(version: str = "") -> FakeProc:
-            versions.append(version)
-            proc = FakeProc(code=None)
-            self.spawned.append(proc)
-            return proc
-
-        self._spawner = spawner
-        notifier = FakeNotifier()
-        watchdog = self._watchdog(
-            probe=lambda: (True, ""),
-            notifier=notifier,
-            handoff_wait=1.0,
-        )
-        result, thread = self._run_async(watchdog)
-        self.assertTrue(wait_for(lambda: len(self.spawned) >= 1))
-        set_intent(self.root, "master", INTENT_STOP)
-        self.spawned[0].code = 0
-        # The update request lands after the child is already gone; the grace
-        # window must keep the supervisor from treating it as a manual stop.
-        time.sleep(0.1)
-        write_handoff(self.root, version="2.0.0", previous="1.0.0")
-        self.assertTrue(wait_for(lambda: "2.0.0" in versions))
-        watchdog.shutdown()
-        thread.join(timeout=5.0)
-        self.assertIsNone(read_handoff(self.root))
-
     def test_start_once_single_attempt_healthy(self) -> None:
         spawned: list[FakeProc] = []
-        self._spawner = lambda version="": (
+        self._spawner = lambda: (
             spawned.append(FakeProc(code=None)) or spawned[-1]
         )
         watchdog = self._watchdog(probe=lambda: (True, ""))
@@ -696,7 +576,7 @@ class SupervisorTests(TempDirTestCase):
         from dagrunner.watchdog.supervisor import EXIT_ERROR
 
         spawned: list[FakeProc] = []
-        self._spawner = lambda version="": (
+        self._spawner = lambda: (
             spawned.append(FakeProc(code=None)) or spawned[-1]
         )
         watchdog = self._watchdog(probe=lambda: (False, "down"))
