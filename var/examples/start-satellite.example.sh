@@ -4,6 +4,7 @@
 # exits with code 5 and this script falls back to running the agent directly.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 PY="${DAGR_PYTHON:-python3}"
 mkdir -p "$ROOT/var/logs"
 WD_OUT="$ROOT/var/logs/watchdog-satellite.out.log"

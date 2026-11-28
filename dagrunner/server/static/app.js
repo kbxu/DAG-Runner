@@ -488,7 +488,6 @@ function positionWorkflowTags() {
   if (!rail || !wrap) return;
   if (getComputedStyle(rail).position !== "absolute") {
     rail.style.top = "";
-    rail.style.maxHeight = "";
     return;
   }
   const anchor = wrap.querySelector(".workflow-list-table thead") || wrap.querySelector(".panel-head");
@@ -496,7 +495,6 @@ function positionWorkflowTags() {
   const wrapRect = wrap.getBoundingClientRect();
   const top = Math.max(0, anchor.getBoundingClientRect().bottom - wrapRect.top);
   rail.style.top = `${top}px`;
-  rail.style.maxHeight = `${Math.max(120, wrapRect.height - top - 8)}px`;
 }
 
 function scheduleSummary(schedule) {

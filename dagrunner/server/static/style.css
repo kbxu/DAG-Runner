@@ -93,8 +93,12 @@ main { flex: 1 1 0; min-height: 0; width: 100%; margin: 0; padding: 16px 24px 36
 main > .panel { max-width: calc(var(--list-table-width) + 2px); margin-inline: auto; }
 main .panel { min-height: 0; }
 .workflow-panel-wrap { position: relative; max-width: calc(var(--list-table-width) + 2px); margin-inline: auto; }
-.workflow-tags { position: absolute; top: 0; right: calc(100% + 8px); display: flex; flex-direction: column; gap: 5px; width: 136px; max-height: calc(100vh - 140px); overflow-y: auto; }
-.workflow-tag { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 10px; color: #344054; border: 1px solid #d0d5dd; border-radius: 999px; background: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; text-align: left; }
+.workflow-tags { position: absolute; top: 0; right: calc(100% + 8px); display: flex; flex-direction: column; gap: 5px; width: 136px; max-height: calc(100vh * 2 / 3); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+.workflow-tags::-webkit-scrollbar { width: 4px; }
+.workflow-tags::-webkit-scrollbar-track { background: transparent; }
+.workflow-tags::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+.workflow-tags::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.workflow-tag { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 10px; color: #344054; border: 1px solid #d0d5dd; border-radius: 999px; background: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; text-align: left; }
 .workflow-tag:hover { color: var(--teal-dark); border-color: var(--teal); }
 .workflow-tag.active { color: white; border-color: var(--teal); background: var(--teal); }
 .workflow-tag-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -734,6 +738,9 @@ html[data-theme="dark"] td { border-top-color: #1f2a3d; }
 html[data-theme="dark"] tbody tr:hover { background: #172033; }
 html[data-theme="dark"] .button.ghost { color: #e2e8f0; border-color: #334155; background: #1e293b; }
 html[data-theme="dark"] .button.ghost:hover { background: #273549; border-color: #475569; }
+html[data-theme="dark"] .workflow-tags { scrollbar-color: #334155 transparent; }
+html[data-theme="dark"] .workflow-tags::-webkit-scrollbar-thumb { background: #334155; }
+html[data-theme="dark"] .workflow-tags::-webkit-scrollbar-thumb:hover { background: #475569; }
 html[data-theme="dark"] .workflow-tag { color: #cbd5e1; border-color: #334155; background: #111827; }
 html[data-theme="dark"] .workflow-tag-count { color: #94a3b8; background: #1e293b; }
 html[data-theme="dark"] .run-stat { background: #172033; border-color: #263244; color: #cbd5e1; }
